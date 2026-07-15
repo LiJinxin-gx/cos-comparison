@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cos-comparison"
+version = "0.3.5"
+description = "Local similarity comparison for feature extraction – biologically inspired, zero‑training edge/pattern detection, multi-backend acceleration."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [
+    {name = "Li Jinxin"}
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: C",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+keywords = ["cosine similarity", "local comparison", "AGI", "feature extraction", "edge detection", "template matching"]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pillow>=9.0"]
+
+[project.urls]
+Homepage = "https://github.com/LiJinxin-gx/cos-comparison"
+Repository = "https://github.com/LiJinxin-gx/cos-comparison.git"
+Documentation = "https://cos-comparison.readthedocs.io/"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cos_comparison*"]
+exclude = ["tests*", "dist*", "*.egg-info*"]
+
+[tool.setuptools.package-data]
+cos_comparison = [
+    # Core configuration
+    "core/config.json",
+    # C source files (for reference / manual compilation)
+    "core/cos_comparison_c/include/*.c",
+    "core/cos_comparison_c/include/*.h",
+    "core/include/*.c",
+    "core/include/*.h",
+    # Compiled shared libraries (ctypes)
+    "core/cos_comparison_c/*.dll",
+    "core/cos_comparison_c/*.so",
+    "core/cos_comparison_c/*.dylib",
+    # Compiled Python extensions (pydll)
+    "core/*.pyd",
+    "core/*.so",
+    "core/*.dylib",
+    # Type hints
+    "py.typed",
+    #all file
+    "**/**"
+]
