@@ -1109,6 +1109,22 @@ class vector_map_as_tensor:
             idx += dim_i * stride
         return self.vector[idx]
 
+    def __set_item__(self, indexs, value):
+        p = self.p
+        remaining = len(self.tensor_size) - p
+        if len(indexs) == remaining:
+            ptr = self.start
+            cache = self.cache
+            for i, idx in enumerate(indexs):
+                ptr += idx * cache
+                if i < remaining - 1:
+                    cache //= self.tensor_size[p + i]
+            self.vector[ptr] = value
+        elif len(indexs) == 0:
+            return
+        else:
+            raise IndexError("It was given some effectless index.")
+
     def __iter__(self):
         for i in range(len(self)):
             yield self[i]

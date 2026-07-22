@@ -49,6 +49,7 @@ static PyObject *Vector_neg(PyObject *self);
 static PyObject *Vector_pos(PyObject *self);
 static PyObject *Vector_abs(PyObject *self);
 static PyObject *Vector_get_item(Vector *self, PyObject *args);   /* __get_item__ */
+static PyObject *Vector_set_item(Vector *self, PyObject *args);   /* __set_item__ */
 static PyObject *Vector_iter(Vector *self);                       /* __iter__ */
 /* NEW: slice support */
 static PyObject *Vector_slice(Vector *self, PyObject *args);       /* __getitem__ with slice */
@@ -94,12 +95,18 @@ static PyMethodDef Vector_methods[] = {
         "Compute the variance of the current slice."},
     {"__get_item__", (PyCFunction)Vector_get_item, METH_VARARGS,
         "Support multi-index slicing and value retrieval."},
+    {"__set_item__", (PyCFunction)Vector_set_item, METH_VARARGS,
+        "Support multi-index value assignment (fast path)."},
     {"__iter__", (PyCFunction)Vector_iter, METH_NOARGS,
         "Return an iterator over elements."},
     {"__cos_comparison_passive__", (PyCFunction)Vector_cos_comparison_passive, METH_VARARGS | METH_KEYWORDS,
-        "Optimized passive mode computation for Vector types."},
+        "Optimized passive mode computation for Vector types (overload)."},
+    {"cos_comparison_passive", (PyCFunction)Vector_cos_comparison_passive, METH_VARARGS | METH_KEYWORDS,
+        "Passive mode comparison as instance method."},
     {"__cos_comparison_active__", (PyCFunction)Vector_cos_comparison_active, METH_VARARGS | METH_KEYWORDS,
-        "Optimized active mode computation for Vector types."},
+        "Optimized active mode computation for Vector types (overload)."},
+    {"cos_comparison_active", (PyCFunction)Vector_cos_comparison_active, METH_VARARGS | METH_KEYWORDS,
+        "Active mode comparison as instance method."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -534,7 +541,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 Py_DECREF(cur);
                 return PyFloat_FromDouble(val);
             } else {
-                /* create subview */
+                /* create subview (matches __getitem__ single index behavior) */
                 Vector *sub = PyObject_New(Vector, Py_TYPE(cur));
                 if (!sub) { Py_DECREF(cur); return NULL; }
                 sub->data = cur->data;
@@ -545,10 +552,10 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 memcpy(sub->shape, cur->shape, cur->dimension * sizeof(int));
                 sub->dimension = cur->dimension;
                 sub->start = cur->start + idx * cur->cache;
+                int new_cache = cur->cache / cur->shape[cur->p];
                 sub->end = sub->start + cur->cache;
                 sub->p = cur->p + 1;
-                sub->cache = (sub->p < sub->dimension - 1) ?
-                    cur->cache / sub->shape[sub->p] : 1;
+                sub->cache = new_cache;
                 Py_DECREF(cur);
                 cur = sub;
             }
@@ -571,8 +578,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     if (self->p < self->dimension - 1) {
         int new_start = self->start + idx * self->cache;
         int new_p = self->p + 1;
-        int new_cache = (new_p < self->dimension - 1) ?
-        self->cache / self->shape[new_p] : 1;
+        int new_cache = self->cache / self->shape[self->p];
         
         Vector *result = PyObject_New(Vector, Py_TYPE(self));
         if (!result) return NULL;
@@ -593,11 +599,69 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
         result->cache = new_cache;
         return (PyObject*)result;
     } else {
-        return PyFloat_FromDouble(Data_get_flat(self->data, self->start + idx));
+        return PyFloat_FromDouble(Data_get_flat(self->data, self->start + idx * self->cache));
     }
 }
 
 static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
+    /* Handle tuple of all integers: fast path */
+    if (PyTuple_Check(item)) {
+        Py_ssize_t n = PyTuple_Size(item);
+        int all_int = 1;
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            if (!PyLong_Check(PyTuple_GetItem(item, i))) {
+                all_int = 0;
+                break;
+            }
+        }
+        if (all_int) {
+            int ndim = self->dimension - self->p;
+            if (n != ndim) {
+                PyErr_Format(PyExc_IndexError, "expected %d indices, got %zd", ndim, n);
+                return -1;
+            }
+            int ptr = self->start;
+            int cache = self->cache;
+            for (int i = 0; i < ndim; ++i) {
+                PyObject *idx_obj = PyTuple_GetItem(item, i);
+                int idx = (int)PyLong_AsLong(idx_obj);
+                if (idx < 0 || idx >= self->shape[self->p + i]) {
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return -1;
+                }
+                ptr += idx * cache;
+                if (i < ndim - 1) {
+                    cache /= self->shape[self->p + i];
+                }
+            }
+            double val = PyFloat_AsDouble(value);
+            if (val == -1.0 && PyErr_Occurred()) {
+                return -1;
+            }
+            Data_set_flat(self->data, ptr, val);
+            return 0;
+        }
+    }
+    /* Handle single integer index assignment (leaf only) */
+    if (PyLong_Check(item)) {
+        int idx = (int)PyLong_AsLong(item);
+        int ndim = self->dimension - self->p;
+        if (ndim != 1) {
+            PyErr_SetString(PyExc_IndexError, "single index assignment only allowed at 1D view");
+            return -1;
+        }
+        if (idx < 0) idx += self->shape[self->p];
+        if (idx < 0 || idx >= self->shape[self->p]) {
+            PyErr_SetString(PyExc_IndexError, "index out of range");
+            return -1;
+        }
+        double val = PyFloat_AsDouble(value);
+        if (val == -1.0 && PyErr_Occurred()) {
+            return -1;
+        }
+        Data_set_flat(self->data, self->start + idx * self->cache, val);
+        return 0;
+    }
     /* Handle slice assignment (only at leaf) */
     if (PySlice_Check(item)) {
         if (self->p != self->dimension - 1) {
@@ -1107,7 +1171,10 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
                 PyErr_SetString(PyExc_IndexError, "index out of range");
                 return NULL;
             }
-            ptr += idx * (i == 0 ? cache : cache / self->shape[self->p + i]);
+            ptr += idx * cache;
+            if (i < n - 1) {
+                cache /= self->shape[self->p + i];
+            }
         }
         return PyFloat_FromDouble(Data_get_flat(self->data, ptr));
     } else if (0 < n && n < remaining) {
@@ -1120,12 +1187,10 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
                 PyErr_SetString(PyExc_IndexError, "index out of range");
                 return NULL;
             }
-            start_ptr += idx * (i == 0 ? cache : cache / self->shape[self->p + i]);
+            start_ptr += idx * cache;
+            cache /= self->shape[self->p + i];
         }
         int new_cache = cache;
-        for (int i = 0; i < n; ++i) {
-            new_cache /= self->shape[self->p + i];
-        }
         Vector *sub = PyObject_New(Vector, Py_TYPE(self));
         if (!sub) return NULL;
         sub->data = self->data;
@@ -1144,6 +1209,47 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
         PyErr_SetString(PyExc_IndexError, "invalid number of indices");
         return NULL;
     }
+}
+
+/* __set_item__: fast multi-index value assignment, takes (index_tuple, value) as arguments */
+static PyObject *Vector_set_item(Vector *self, PyObject *args) {
+    PyObject *indexs, *val_obj;
+    if (!PyArg_ParseTuple(args, "OO", &indexs, &val_obj)) {
+        return NULL;
+    }
+    if (!PyTuple_Check(indexs)) {
+        PyErr_SetString(PyExc_TypeError, "__set_item__ first argument must be a tuple of indices");
+        return NULL;
+    }
+    Py_ssize_t n = PyTuple_Size(indexs);
+    int ndim = self->dimension - self->p;
+    if (n == 0) {
+        Py_RETURN_NONE;
+    }
+    if (n != ndim) {
+        PyErr_Format(PyExc_IndexError, "__set_item__ expected %d indices, got %zd", ndim, n);
+        return NULL;
+    }
+    int ptr = self->start;
+    int cache = self->cache;
+    for (int i = 0; i < ndim; ++i) {
+        PyObject *idx_obj = PyTuple_GetItem(indexs, i);
+        int idx = (int)PyLong_AsLong(idx_obj);
+        if (idx < 0 || idx >= self->shape[self->p + i]) {
+            PyErr_SetString(PyExc_IndexError, "index out of range");
+            return NULL;
+        }
+        ptr += idx * cache;
+        if (i < ndim - 1) {
+            cache /= self->shape[self->p + i];
+        }
+    }
+    double val = PyFloat_AsDouble(val_obj);
+    if (val == -1.0 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Data_set_flat(self->data, ptr, val);
+    Py_RETURN_NONE;
 }
 
 /* __iter__: use the sequence iterator */

@@ -1,14 +1,85 @@
-[
-    {
-        "name": ".cos_comparison_pydll",
-        "enabled": true
+{
+    "backends": [
+        {
+            "name": ".cos_comparison_pydll",
+            "enabled": true
+        },
+        {
+            "name": ".cos_comparison_c",
+            "enabled": true
+        },
+        {
+            "name": ".cos_comparison",
+            "enabled": true
+        }
+    ],
+    "global": {
+        "compile_args": [],
+        "link_args": [],
+        "include_dirs": [],
+        "libraries": [],
+        "macros": []
     },
-    {
-        "name": ".cos_comparison_c",
-        "enabled": true
+    "platforms": {
+        "Windows": {
+            "compile_args": [
+                "/O2",
+                "/std:c11"
+            ],
+            "link_args": [
+                "/DLL"
+            ],
+            "libraries": []
+        },
+        "Linux": {
+            "compile_args": [
+                "-O2",
+                "-std=c99",
+                "-fPIC"
+            ],
+            "link_args": [],
+            "libraries": [
+                "m"
+            ]
+        },
+        "Darwin": {
+            "compile_args": [
+                "-O2",
+                "-std=c99",
+                "-fPIC"
+            ],
+            "link_args": [],
+            "libraries": [
+                "m"
+            ]
+        }
     },
-    {
-        "name": ".cos_comparison",
-        "enabled": true
-    }
-]
+    "CDLL": [
+        {
+            "name": "core.c",
+            "dir": "cos_comparison/core/cos_comparison_c/include",
+            "output_name": "core",
+            "compile_args": [],
+            "link_args": [],
+            "include_dirs": [],
+            "libraries": [],
+            "kwarg": {
+                "output_dir": "cos_comparison/core/cos_comparison_c"
+            }
+        }
+    ],
+    "C_EXT": [
+        {
+            "name": "cos_comparison_pydll",
+            "sources": [
+                "cos_comparison/core/include/cos_comparison_pydll.c"
+            ],
+            "include_dirs": [
+                "cos_comparison/core/include"
+            ],
+            "compile_args": [],
+            "link_args": [],
+            "libraries": []
+        }
+    ]
+}

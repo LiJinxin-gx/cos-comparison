@@ -35,7 +35,12 @@ def _load_config() -> None:
     try:
         if os.path.exists(_CONFIG_PATH):
             with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+                config = json.load(f)
+                # Support new config format with "backends" key
+                if isinstance(config, dict) and "backends" in config:
+                    raw = config["backends"]
+                elif isinstance(config, list):
+                    raw = config
     except Exception:
         # Silently fall back to defaults if config is missing or invalid
         raw = _DEFAULT_BACKENDS

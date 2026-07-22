@@ -12,6 +12,7 @@
 #endif
 #include "type.h"
 #include "core.h"
+#include "type_vector.h"
 
 /* ------------------------------------------------------------------
 Helper: get nested item by multi-dimensional indices (iterative)
@@ -1045,7 +1046,16 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (PyObject_HasAttrString(data_obj, "__cos_comparison_passive__")) {
         PyObject *method = PyObject_GetAttrString(data_obj, "__cos_comparison_passive__");
         if (method) {
-            PyObject *result = PyObject_Call(method, args, kwargs);
+            // Create new args without the first element (data_obj), since method is bound
+            Py_ssize_t argc = PyTuple_GET_SIZE(args);
+            PyObject *new_args = PyTuple_New(argc - 1);
+            for (Py_ssize_t i = 1; i < argc; ++i) {
+                PyObject *item = PyTuple_GET_ITEM(args, i);
+                Py_INCREF(item);
+                PyTuple_SET_ITEM(new_args, i - 1, item);
+            }
+            PyObject *result = PyObject_Call(method, new_args, kwargs);
+            Py_DECREF(new_args);
             Py_DECREF(method);
             return result;
         }
@@ -1184,29 +1194,41 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_XDECREF(res);
     }
 
-    if (output_obj && PyObject_TypeCheck(output_obj, &VectorizeType)) {
-        output_data = ((Vector*)output_obj)->data;
-    }
-
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !name_space) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_passive(data, window_size, w1, w2, b1, b2,
                                         start, end, step, d,
                                         algo, &ctx,
                                         output_start, output_step,
-                                        NULL, output_data);
+                                        NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_comparison_passive(data, window_size, w1, w2, b1, b2,
                                         start, end, step, d,
                                         algo, &ctx,
                                         output_start, output_step,
-                                        output_obj, output_data);
+                                        NULL, NULL);
     }
-
-    free(output_step); free(output_start); free(d); free(step);
-    free(end); free(start); free(window_size); Data_free(data);
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
+    }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
@@ -1214,13 +1236,62 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyObject *exc = PyErr_Occurred();
             if (exc) { PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res); }
         }
+        // Free allocated memory before return
+        free(output_step); free(output_start); free(d); free(step);
+        free(end); free(start); free(window_size); Data_free(data);
         Py_XDECREF(name_space);
         return NULL;
     }
 
     PyObject *py_result;
-    if (output_data || output_obj) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
@@ -1237,6 +1308,10 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_DECREF(py_result);
         py_result = ret;
     }
+
+    // Free all allocated memory
+    free(output_step); free(output_start); free(d); free(step);
+    free(end); free(start); free(window_size); Data_free(data);
 
     Py_XDECREF(name_space);
     return py_result;
@@ -1275,7 +1350,16 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (PyObject_HasAttrString(data_obj, "__cos_comparison_active__")) {
         PyObject *method = PyObject_GetAttrString(data_obj, "__cos_comparison_active__");
         if (method) {
-            PyObject *result = PyObject_Call(method, args, kwargs);
+            // Create new args without the first element (data_obj), since method is bound
+            Py_ssize_t argc = PyTuple_GET_SIZE(args);
+            PyObject *new_args = PyTuple_New(argc - 1);
+            for (Py_ssize_t i = 1; i < argc; ++i) {
+                PyObject *item = PyTuple_GET_ITEM(args, i);
+                Py_INCREF(item);
+                PyTuple_SET_ITEM(new_args, i - 1, item);
+            }
+            PyObject *result = PyObject_Call(method, new_args, kwargs);
+            Py_DECREF(new_args);
             Py_DECREF(method);
             return result;
         }
@@ -1396,29 +1480,41 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_XDECREF(res);
     }
 
-    if (output_obj && PyObject_TypeCheck(output_obj, &VectorizeType)) {
-        output_data = ((Vector*)output_obj)->data;
-    }
-
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !name_space) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_active(data, kernel, w1, w2, b1, b2,
                                        start, end, step,
                                        algo, &ctx,
                                        output_start, output_step,
-                                       NULL, output_data);
+                                       NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_comparison_active(data, kernel, w1, w2, b1, b2,
                                        start, end, step,
                                        algo, &ctx,
                                        output_start, output_step,
-                                       output_obj, output_data);
+                                       NULL, NULL);
     }
-
-    free(output_step); free(output_start); free(step);
-    free(end); free(start); Data_free(data); Data_free(kernel);
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
+    }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
@@ -1426,13 +1522,62 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyObject *exc = PyErr_Occurred();
             if (exc) { PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res); }
         }
+        // Free allocated memory before return
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); Data_free(data); Data_free(kernel);
         Py_XDECREF(name_space);
         return NULL;
     }
 
     PyObject *py_result;
-    if (output_data || output_obj) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
@@ -1449,6 +1594,10 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_DECREF(py_result);
         py_result = ret;
     }
+
+    // Free all allocated memory
+    free(output_step); free(output_start); free(step);
+    free(end); free(start); Data_free(data); Data_free(kernel);
 
     Py_XDECREF(name_space);
     return py_result;
@@ -1557,28 +1706,101 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     }
 
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !output_obj) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_local_mean(data, local_size, start, end, step,
-                                output_start, output_step, NULL, output_data);
+                                output_start, output_step, NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_local_mean(data, local_size, start, end, step,
-                                output_start, output_step, output_obj, output_data);
+                                output_start, output_step, NULL, NULL);
+    }
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
     }
 
-    free(output_step); free(output_start); free(step);
-    free(end); free(start); free(local_size); Data_free(data);
-
-    if (!result) { if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args."); return NULL; }
+    if (!result) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
+        // Free allocated memory before return
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); free(local_size); Data_free(data);
+        return NULL;
+    }
 
     PyObject *py_result;
-    if (output_data) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
+
+    // Free all allocated memory
+    free(output_step); free(output_start); free(step);
+    free(end); free(start); free(local_size); Data_free(data);
+
     return py_result;
 }
 
@@ -1596,11 +1818,6 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     Data *data = _pyobj_to_data(data_obj);
     if (!data) return NULL;
     int dim = data->dimension;
-    Data *output_data = NULL;
-    if (output_obj && PyObject_TypeCheck(output_obj, &VectorizeType)) {
-        Vector *v = (Vector*)output_obj;
-        if (v->p == 0) output_data = v->data;
-    }
 
     int *local_size = NULL; int ls_dim = 0;
     if (local_size_obj) {
@@ -1643,28 +1860,101 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     }
 
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !output_obj) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_local_variance(data, local_size, start, end, step,
-                                    output_start, output_step, NULL, output_data);
+                                    output_start, output_step, NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_local_variance(data, local_size, start, end, step,
-                                    output_start, output_step, output_obj, output_data);
+                                    output_start, output_step, NULL, NULL);
+    }
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
     }
 
-    free(output_step); free(output_start); free(step);
-    free(end); free(start); free(local_size); Data_free(data);
-
-    if (!result) { if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args."); return NULL; }
+    if (!result) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
+        // Free allocated memory before return
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); free(local_size); Data_free(data);
+        return NULL;
+    }
 
     PyObject *py_result;
-    if (output_data) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
+
+    // Free all allocated memory
+    free(output_step); free(output_start); free(step);
+    free(end); free(start); free(local_size); Data_free(data);
+
     return py_result;
 }
 
@@ -1674,7 +1964,6 @@ Vector optimized methods (unchanged)
 static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     /* Same as your existing implementation */
     Vector *vec = (Vector*)self;
-    PyObject *data_obj;  /* unused, self is the data */
     PyObject *window_size_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
     PyObject *start_obj = NULL;
@@ -1692,15 +1981,15 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     PyObject *return_callback = NULL;
     int release_gil = 0;
     static char *kwlist[] = {
-        "data", "window_size", "w1", "w2", "b1", "b2",
+        "window_size", "w1", "w2", "b1", "b2",
         "start", "end", "step", "d", "algorithm",
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
         "return_callback", "release_gil", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOOp", kwlist,
-                                     &data_obj, &window_size_obj,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OddddOOOOOOOOOOOOOp", kwlist,
+                                     &window_size_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj, &d_obj,
                                      &algo_name, &output_obj,
@@ -1771,12 +2060,6 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     }
 
     int *output_start = NULL; int *output_step = NULL;
-    if (output_obj) {
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
-            Vector *ovec = (Vector*)output_obj;
-            output_data = ovec->data;
-        }
-    }
     if (output_start_obj) {
         int cnt; int *tmp;
         if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) {
@@ -1855,24 +2138,40 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     }
 
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !name_space) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_passive(data, window_size, w1, w2, b1, b2,
                                         start, end, step, d,
                                         algo, &ctx,
                                         output_start, output_step,
-                                        NULL, output_data);
+                                        NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_comparison_passive(data, window_size, w1, w2, b1, b2,
                                         start, end, step, d,
                                         algo, &ctx,
                                         output_start, output_step,
-                                        output_obj, output_data);
+                                        NULL, NULL);
     }
-
-    free(window_size); free(start); free(end); free(step); free(d);
-    free(output_start); free(output_step);
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
+    }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
@@ -1880,13 +2179,62 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             PyObject *exc = PyErr_Occurred();
             if (exc) { PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res); }
         }
+        // Free allocated memory before return
+        free(window_size); free(start); free(end); free(step); free(d);
+        free(output_start); free(output_step);
         Py_XDECREF(name_space);
         return NULL;
     }
 
     PyObject *py_result;
-    if (output_data || output_obj) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         py_result = _data_to_vector(result, Py_TYPE(self));
     }
@@ -1903,6 +2251,10 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         py_result = ret;
     }
 
+    // Free all allocated memory
+    free(window_size); free(start); free(end); free(step); free(d);
+    free(output_start); free(output_step);
+
     Py_XDECREF(name_space);
     return py_result;
 }
@@ -1910,7 +2262,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
 static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, PyObject *kwargs) {
     /* Same as your existing implementation, omitted for brevity but identical logic */
     Vector *vec = (Vector*)self;
-    PyObject *data_obj;  /* unused, self is the data */
+
     PyObject *kernel_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
     PyObject *start_obj = NULL;
@@ -1927,15 +2279,15 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     PyObject *return_callback = NULL;
     int release_gil = 0;
     static char *kwlist[] = {
-        "data", "kernel", "w1", "w2", "b1", "b2",
+        "kernel", "w1", "w2", "b1", "b2",
         "start", "end", "step", "algorithm",
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
         "return_callback", "release_gil", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|ddddOOOOOOOOOOOOp", kwlist,
-                                     &data_obj, &kernel_obj,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|ddddOOOOOOOOOOOOp", kwlist,
+                                     &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
                                      &algo_name, &output_obj,
@@ -1987,12 +2339,6 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     if (!algo) { Data_free(kernel); free(start); free(end); free(step); return NULL; }
 
     int *output_start = NULL; int *output_step = NULL;
-    if (output_obj) {
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
-            Vector *ovec = (Vector*)output_obj;
-            output_data = ovec->data;
-        }
-    }
     if (output_start_obj) {
         int cnt; int *tmp;
         if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); free(end); free(step); return NULL; }
@@ -2063,24 +2409,40 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     }
 
     Data *result = NULL;
+    // Save user's output_start/output_step and set to 0/1 for core call when output is provided
+    int *saved_os = NULL, *saved_ost = NULL;
+    if (output_obj && output_obj != Py_None) {
+        saved_os = (int*)malloc(dim * sizeof(int));
+        saved_ost = (int*)malloc(dim * sizeof(int));
+        memcpy(saved_os, output_start, dim * sizeof(int));
+        memcpy(saved_ost, output_step, dim * sizeof(int));
+        for (int i = 0; i < dim; ++i) {
+            output_start[i] = 0;
+            output_step[i] = 1;
+        }
+    }
     if (release_gil && !name_space) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_active(data, kernel, w1, w2, b1, b2,
                                        start, end, step,
                                        algo, &ctx,
                                        output_start, output_step,
-                                       NULL, output_data);
+                                       NULL, NULL);
         Py_END_ALLOW_THREADS
     } else {
         result = cos_comparison_active(data, kernel, w1, w2, b1, b2,
                                        start, end, step,
                                        algo, &ctx,
                                        output_start, output_step,
-                                       output_obj, output_data);
+                                       NULL, NULL);
     }
-
-    Data_free(kernel); free(start); free(end); free(step);
-    free(output_start); free(output_step);
+    // Restore user's output_start/output_step
+    if (saved_os) {
+        memcpy(output_start, saved_os, dim * sizeof(int));
+        memcpy(output_step, saved_ost, dim * sizeof(int));
+        free(saved_os);
+        free(saved_ost);
+    }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
@@ -2088,13 +2450,62 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             PyObject *exc = PyErr_Occurred();
             if (exc) { PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res); }
         }
+        // Free allocated memory before return
+        Data_free(kernel); free(start); free(end); free(step);
+        free(output_start); free(output_step);
         Py_XDECREF(name_space);
         return NULL;
     }
 
     PyObject *py_result;
-    if (output_data || output_obj) {
-        py_result = output_obj; Py_INCREF(py_result);
+    if (output_obj && output_obj != Py_None) {
+        // Write result to user-provided output object
+        int r_dim = result->dimension;
+        int *idx = (int*)malloc(r_dim * sizeof(int));
+        int *out_idx = (int*)malloc(r_dim * sizeof(int));
+        // Check if output is our C Vector type for direct write
+        Data *out_data = NULL;
+        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+            Vector *vec = (Vector*)output_obj;
+            out_data = vec->data;
+        }
+        for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        int flag = r_dim - 1;
+        while (flag >= 0) {
+            if (flag == r_dim - 1) {
+                // Calculate output index
+                for (int i = 0; i < r_dim; ++i) {
+                    out_idx[i] = output_start[i] + output_step[i] * idx[i];
+                }
+                // Get value from result
+                double val = Data_get(result, idx);
+                // Write to output: direct Data write for Vector, else generic sequence
+                if (out_data) {
+                    Data_set(out_data, out_idx, val);
+                } else {
+                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                }
+                // Advance last dimension
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                }
+            } else {
+                // Carry over
+                idx[flag]++;
+                if (idx[flag] >= result->shape[flag]) {
+                    idx[flag] = 0;
+                    flag--;
+                } else {
+                    flag = r_dim - 1;
+                }
+            }
+        }
+        free(idx); free(out_idx);
+        Data_free(result);
+        py_result = output_obj;
+        Py_INCREF(py_result);
     } else {
         py_result = _data_to_vector(result, Py_TYPE(self));
     }
@@ -2110,6 +2521,10 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         Py_DECREF(py_result);
         py_result = ret;
     }
+
+    // Free all allocated memory
+    Data_free(kernel); free(start); free(end); free(step);
+    free(output_start); free(output_step);
 
     Py_XDECREF(name_space);
     return py_result;

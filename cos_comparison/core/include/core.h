@@ -32,6 +32,7 @@ typedef double (*algo_fn)(double, double, double, CallbackContext*);
 
 static inline Data* _compute_output_shape(int dim, const int num[],
                                           const int output_start[], const int output_step[]) {
+    (void)output_start; // unused, output always starts at 0 when created by core
     int *out_shape = (int*)malloc(dim * sizeof(int));
     for (int i = 0; i < dim; ++i)
         out_shape[i] = (num[i] - 1) * output_step[i] + 1;
@@ -86,40 +87,93 @@ static inline double _py_get_item(PyObject *obj, const int idx[], int dim) {
     return val;
 }
 
-/* Helper: write value to arbitrary nested Python object */
+/* Helper: write value to arbitrary nested Python object (iterative, no stack overflow, uses generic object protocol with __set_item__ fast path) */
 static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int depth, double value) {
-    if (depth == dim - 1) {
-        PyObject *set_item_method = PyObject_GetAttrString(obj, "__set_item__");
-        if (set_item_method != NULL) {
-            PyObject *args = PyTuple_New(2);
-            PyTuple_SET_ITEM(args, 0, PyLong_FromLong(idx[depth]));
-            PyTuple_SET_ITEM(args, 1, PyFloat_FromDouble(value));
-            PyObject_CallObject(set_item_method, args);
+    if (dim == 0) return;
+    /* Fast path: check for __set_item__ method (takes index tuple and value) */
+    PyObject *set_item_method = PyObject_GetAttrString(obj, "__set_item__");
+    if (set_item_method != NULL) {
+        PyObject *args = PyTuple_New(2);
+        if (!args) {
+            Py_DECREF(set_item_method);
+            PyErr_NoMemory();
+            return;
+        }
+        // First argument: index tuple
+        PyObject *idx_tuple = PyTuple_New(dim);
+        if (!idx_tuple) {
+            Py_DECREF(args);
+            Py_DECREF(set_item_method);
+            PyErr_NoMemory();
+            return;
+        }
+        for (int i = 0; i < dim; ++i) {
+            PyObject *idx_obj = PyLong_FromLong(idx[i]);
+            if (!idx_obj) {
+                for (int j = 0; j < i; ++j) {
+                    Py_DECREF(PyTuple_GET_ITEM(idx_tuple, j));
+                }
+                Py_DECREF(idx_tuple);
+                Py_DECREF(args);
+                Py_DECREF(set_item_method);
+                return;
+            }
+            PyTuple_SET_ITEM(idx_tuple, i, idx_obj);
+        }
+        PyTuple_SET_ITEM(args, 0, idx_tuple);
+        // Second argument: value
+        PyObject *val_obj = PyFloat_FromDouble(value);
+        if (!val_obj) {
+            Py_DECREF(idx_tuple);
             Py_DECREF(args);
             Py_DECREF(set_item_method);
             return;
         }
-        PyErr_Clear();
-        PyObject *val = PyFloat_FromDouble(value);
-        PyObject_SetItem(obj, PyLong_FromLong(idx[depth]), val);
-        Py_DECREF(val);
-        return;
-    }
-    PyObject *next;
-    PyObject *get_item_method = PyObject_GetAttrString(obj, "__get_item__");
-    if (get_item_method != NULL) {
-        PyObject *args = PyTuple_New(1);
-        PyTuple_SET_ITEM(args, 0, PyLong_FromLong(idx[depth]));
-        next = PyObject_CallObject(get_item_method, args);
+        PyTuple_SET_ITEM(args, 1, val_obj);
+        PyObject *res = PyObject_CallObject(set_item_method, args);
         Py_DECREF(args);
-        Py_DECREF(get_item_method);
-    } else {
+        Py_DECREF(set_item_method);
+        if (res != NULL) {
+            Py_DECREF(res);
+            return;
+        }
         PyErr_Clear();
-        next = PySequence_GetItem(obj, idx[depth]);
     }
-    if (next == NULL) return;
-    _py_set_item(next, idx, dim, depth + 1, value);
-    Py_DECREF(next);
+    PyErr_Clear();
+    /* Generic path: traverse indices one by one */
+    PyObject **stack = (PyObject**)malloc(dim * sizeof(PyObject*));
+    if (!stack) { PyErr_NoMemory(); return; }
+    PyObject *current = obj;
+    int i;
+    // Traverse from outer to inner, keeping references
+    for (i = 0; i < dim - 1; ++i) {
+        PyObject *py_idx = PyLong_FromLong(idx[i]);
+        PyObject *next = PyObject_GetItem(current, py_idx);
+        Py_DECREF(py_idx);
+        if (next == NULL) {
+            PyErr_Clear();
+            // Cleanup already acquired references
+            for (int j = 0; j < i; ++j) Py_DECREF(stack[j]);
+            free(stack);
+            return;
+        }
+        stack[i] = next;
+        current = next;
+    }
+    // Last dimension: set value
+    PyObject *val = PyFloat_FromDouble(value);
+    PyObject *py_last_idx = PyLong_FromLong(idx[dim-1]);
+    int ret = PyObject_SetItem(current, py_last_idx, val);
+    Py_DECREF(py_last_idx);
+    Py_DECREF(val);
+    if (ret < 0) {
+        PyErr_Clear();
+    }
+    // Release references from inner to outer
+    for (i = dim - 2; i >= 0; --i) {
+        Py_DECREF(stack[i]);
+    }
+    free(stack);
 }
 
 /* Core algorithms – same as ctypes version but with CallbackContext and output_obj */

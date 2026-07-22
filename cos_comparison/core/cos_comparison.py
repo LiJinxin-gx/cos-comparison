@@ -1,4 +1,4 @@
-# it provides basic functions of cos_comparsion module, an AI algorithm set
+ # it provides basic functions of cos_comparsion module, an AI algorithm set
 #
 # core : information is produced by local comparison in raw data
 
@@ -135,6 +135,15 @@ def get_item(object, index):
     for p in index:
         temp = temp[p]
     return temp
+
+def set_item(object,index,value):
+    if hasattr(object,"__set_item__"):
+        object.__set_item__(index,value)
+    temp = object
+    *indexp,endp=index
+    for p in indexp:
+        temp = temp[p]
+    temp[endp] = vaule
 
 def no_done(*arg,**kwarg):
     pass
@@ -293,6 +302,21 @@ class vector_map_as_tensor:
                                   end=start_ptr + new_cache,
                                   p=new_p,
                                   cache=new_cache)
+        elif len(indexs) == 0:
+            return self
+        else:
+            raise IndexError("It was given some effectless index.")
+    def __set_item__(self,indexs,value):
+        p = self.p
+        remaining = len(self.tensor_size) - p
+        if len(indexs) == remaining:
+            ptr = self.start
+            cache = self.cache
+            for i, idx in enumerate(indexs):
+                ptr += idx * cache
+                if i < remaining - 1:
+                    cache //= self.tensor_size[p + i]
+            self.vector[ptr] = value
         elif len(indexs) == 0:
             return self
         else:
@@ -569,12 +593,8 @@ def cos_comparison_passive(data,
                             local_error_callback(e, name)
 
                 # Write result to output
-                for p in range(dimension):
-                    output_place = output_start[p] + output_step[p] * (num_list[p + 1] - 1)
-                    if p == dimension - 1:
-                        output_temp[output_place] = algorithm(main, other, mu, name)
-                    else:
-                        output_temp = output_temp[output_place]
+                output_places = tuple( ( output_start[p] + output_step[p] * (num_list[p + 1] - 1) for p in range(dimension) ) )
+                set_item(output,output_places,algorithm(main, other, mu, name))
 
             # Advance output position or carry left
             if num_list[flag] < num[flag - 1]:
@@ -718,12 +738,8 @@ def cos_comparison_active(data,
                             local_error_callback(e, name)
 
                 # Write result to output
-                for p in range(dimension):
-                    output_place = output_start[p] + output_step[p] * (num_list[p + 1] - 1)
-                    if p == dimension - 1:
-                        output_temp[output_place] = algorithm(main, other, mu, name)
-                    else:
-                        output_temp = output_temp[output_place]
+                output_places = tuple( ( output_start[p] + output_step[p] * (num_list[p + 1] - 1) for p in range(dimension) ) )
+                set_item(output,output_places,algorithm(main, other, mu, name))
 
             # Advance output position or carry left
             if num_list[flag] < num[flag - 1]:
