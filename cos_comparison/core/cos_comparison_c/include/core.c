@@ -675,8 +675,7 @@ COS_API Data* cos_comparison_active(const Data *data,
 COS_API double cos_full(const Data *a, const Data *b,
                         double (*sim_func)(double,double,double)) {
     if (!Data_shape_equal(a, b)) {
-        double zero = 0.0;
-        return 0.0 / zero; /* NaN */
+        return NAN; /* Shape mismatch, return NaN intentionally */
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;

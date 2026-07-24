@@ -75,12 +75,12 @@ class Logic_context:
         logic=tuple(logic_bind)
         if any(logic[0:2] == sub[0:2] for sub in self.binds):
             raise ValueError("it has occupied in the context")
-        binds.append(logic)
+        self.binds.append(logic)
     def pop(self,logic_bind):
         logic_bind = tuple(logic_bind)
         n = 0
         for bind in self.binds:
-            if binds[0:2] == tuple(logic_bind):
+            if bind[0:2] == tuple(logic_bind):
                 return self.binds.pop(n)
             n +=1
         return None

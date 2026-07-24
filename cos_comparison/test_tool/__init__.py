@@ -1,3 +1,3 @@
 #It gives test tools
 
-from debugger import *
+from .debugger import *

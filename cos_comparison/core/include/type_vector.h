@@ -51,9 +51,6 @@ static PyObject *Vector_abs(PyObject *self);
 static PyObject *Vector_get_item(Vector *self, PyObject *args);   /* __get_item__ */
 static PyObject *Vector_set_item(Vector *self, PyObject *args);   /* __set_item__ */
 static PyObject *Vector_iter(Vector *self);                       /* __iter__ */
-/* NEW: slice support */
-static PyObject *Vector_slice(Vector *self, PyObject *args);       /* __getitem__ with slice */
-static PyObject *Vector_slice_set(Vector *self, PyObject *args);   /* __setitem__ with slice */
 
 static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, PyObject *kwargs);
@@ -155,7 +152,7 @@ static PyNumberMethods Vector_as_number = {
     0,                               /* nb_inplace_matrix_multiply(36) */
 };
 
-static int _multiple_chain(const int *arr, int n) {
+static inline int _multiple_chain(const int *arr, int n) {
     int result = 1;
     for (int i = 0; i < n; ++i) result *= arr[i];
     return result;
@@ -269,31 +266,22 @@ static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim) {
     return 0;
 }
 
-/* Vector initialization – now supports PyBuffer zero-copy, nested lists, and custom shapes */
+/* Vector initialization – matches pure Python API: (vector, tensor_size, start=0, end=None, p=0, cache=None) */
 static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     PyObject *vector = NULL;
-    PyObject *size = NULL;
+    PyObject *tensor_size_obj = Py_None;
     PyObject *end_obj = Py_None;
     PyObject *cache_obj = Py_None;
-    int dimension = 0;
     int start = 0;
     int p = 0;
     
-    static char *kwlist[] = {"vector", "size", "dimension", "start", "end",
+    static char *kwlist[] = {"vector", "tensor_size", "start", "end",
         "p", "cache", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|iiOiO", kwlist,
-                                     &vector, &size, &dimension, &start,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OiOiO", kwlist,
+                                     &vector, &tensor_size_obj, &start,
                                      &end_obj, &p, &cache_obj))
         return -1;
-
-    /* DEBUG: verify size after parse */
-    /*
-    if (size == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "DEBUG: size is NULL after parse");
-        return -1;
-    }
-    */
 
     self->flags = 0;
     
@@ -309,28 +297,34 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         memcpy(self->shape, src->shape, src->dimension * sizeof(int));
         self->dimension = src->dimension;
         self->start = src->start + start;
-        self->end = (end_obj == Py_None) ? src->end : src->start + PyLong_AsLong(end_obj);
+        self->end = (end_obj == Py_None) ? src->end : src->start + (int)PyLong_AsLong(end_obj);
         self->p = src->p + p;
-        self->cache = (self->p < self->dimension - 1) ?
-        _multiple_chain(self->shape + self->p + 1, self->dimension - self->p - 1) : 1;
+        if (self->p >= self->dimension) {
+            self->cache = 1;
+        } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
+            self->cache = (int)PyLong_AsLong(cache_obj);
+        } else {
+            self->cache = _multiple_chain(self->shape + self->p + 1, self->dimension - self->p - 1);
+        }
         return 0;
     }
     
-    /* Case 2: try to get a Py_buffer (zero-copy) */
+    /* Case 2: try to get a Py_buffer (zero-copy for array.array, bytes, etc.) */
     Py_buffer view = {0};
     if (PyObject_GetBuffer(vector, &view, PyBUF_SIMPLE) == 0) {
         int *shape = NULL;
         int dim = 0;
-        if (size && size != Py_None) {
-            if (_parse_shape_tuple(size, &shape, &dim) < 0) {
+        if (tensor_size_obj != Py_None) {
+            if (_parse_shape_tuple(tensor_size_obj, &shape, &dim) < 0) {
                 PyBuffer_Release(&view);
-                PyErr_SetString(PyExc_ValueError, "invalid shape tuple");
+                PyErr_SetString(PyExc_ValueError, "invalid tensor_size tuple");
                 return -1;
             }
         } else {
             dim = 1;
             shape = (int*)malloc(sizeof(int));
-            shape[0] = (int)view.len;
+            size_t elem_size = (view.format && strcmp(view.format, "B") == 0) ? sizeof(unsigned char) : sizeof(double);
+            shape[0] = (int)(view.len / elem_size);
         }
         
         Data *data = (Data*)calloc(1, sizeof(Data));
@@ -355,41 +349,38 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         self->shape = shape;
         self->dimension = dim;
         self->start = start;
-        {
-            /* view.len is byte count, convert to element count */
+        if (end_obj == Py_None) {
             size_t elem_size = (data->dtype == 1) ? sizeof(unsigned char) : sizeof(double);
             self->end = (int)(view.len / elem_size);
+        } else {
+            self->end = (int)PyLong_AsLong(end_obj);
+            if (PyErr_Occurred()) { PyBuffer_Release(&view); return -1; }
         }
         self->p = p;
-        self->cache = (dim > 1) ? _multiple_chain(shape + 1, dim - 1) : 1;
+        if (self->p >= self->dimension) {
+            self->cache = 1;
+        } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
+            self->cache = (int)PyLong_AsLong(cache_obj);
+        } else {
+            self->cache = (dim > self->p + 1) ? _multiple_chain(shape + self->p + 1, dim - self->p - 1) : 1;
+        }
         
         PyBuffer_Release(&view);
         return 0;
     }
     
-    PyErr_Clear();  /* not a buffer, fallback to traditional copying */
+    PyErr_Clear();  /* not a buffer, fallback to copying */
     
     /* Case 3: copy data into a new double array */
     int *shape = NULL;
     int dim = 0;
+    int explicit_shape = 0;
 
-    /* Force debug: check size value */
-    /*
-    if (size == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "DEBUG: size is NULL");
-        return -1;
-    }
-    if (size == Py_None) {
-        PyErr_SetString(PyExc_RuntimeError, "DEBUG: size is Py_None");
-        return -1;
-    }
-    */
-
-    /* Try explicit shape first, fall back to auto-infer */
-    if (size && size != Py_None && PyTuple_Check(size) && _parse_shape_tuple(size, &shape, &dim) == 0) {
-        /* Explicit shape provided: use it, treat vector as flat data */
+    /* Try explicit tensor_size first */
+    if (tensor_size_obj != Py_None && PyTuple_Check(tensor_size_obj) && _parse_shape_tuple(tensor_size_obj, &shape, &dim) == 0) {
+        explicit_shape = 1;
     } else {
-        /* No explicit shape or invalid: infer from nested structure */
+        /* No explicit shape: infer from nested structure */
         if (_infer_shape(vector, &shape, &dim) < 0) {
             PyErr_SetString(PyExc_ValueError, "not a tensor");
             return -1;
@@ -401,14 +392,35 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         }
     }
     
-    Data *data = Data_create(dim, shape);   /* creates double array */
+    Data *data = Data_create(dim, shape);   /* creates owned double array */
     if (!data) { free(shape); PyErr_NoMemory(); return -1; }
     
     int idx = 0;
-    if (_flatten_list_to_data(vector, data->data, &idx, dim, shape) < 0) {
-        Data_free(data);
-        free(shape);
-        return -1;
+    if (explicit_shape) {
+        /* Explicit shape provided: vector is 1D flat data, copy directly */
+        Py_ssize_t vec_len = PySequence_Size(vector);
+        int total = _multiple_chain(shape, dim);
+        if (vec_len < total) {
+            Data_free(data);
+            free(shape);
+            PyErr_SetString(PyExc_ValueError, "inconsistent tensor shape");
+            return -1;
+        }
+        for (int i = 0; i < total; ++i) {
+            PyObject *item = PySequence_GetItem(vector, i);
+            if (!item) { Data_free(data); free(shape); return -1; }
+            double val = PyFloat_AsDouble(item);
+            Py_DECREF(item);
+            if (val == -1.0 && PyErr_Occurred()) { Data_free(data); free(shape); return -1; }
+            Data_set_flat(data, i, val);
+        }
+    } else {
+        /* No explicit shape: flatten nested structure */
+        if (_flatten_list_to_data(vector, data->data, &idx, dim, shape) < 0) {
+            Data_free(data);
+            free(shape);
+            return -1;
+        }
     }
     
     self->data = data;
@@ -424,7 +436,13 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         if (PyErr_Occurred()) { Data_free(data); free(shape); return -1; }
     }
     self->p = p;
-    self->cache = (dim > 1) ? _multiple_chain(shape + 1, dim - 1) : 1;
+    if (self->p >= self->dimension) {
+        self->cache = 1;
+    } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
+        self->cache = (int)PyLong_AsLong(cache_obj);
+    } else {
+        self->cache = (dim > self->p + 1) ? _multiple_chain(shape + self->p + 1, dim - self->p - 1) : 1;
+    }
     return 0;
 }
 
@@ -458,7 +476,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
         }
         int new_start = self->start + (int)start * self->cache;
         int new_end = self->start + (int)stop * self->cache;
-        Vector *slice = PyObject_New(Vector, Py_TYPE(self));
+        Vector *slice = PyObject_New(Vector, &VectorizeType);
         if (!slice) return NULL;
         slice->data = self->data;
         slice->owner = self->owner ? self->owner : (PyObject*)self;
@@ -476,14 +494,14 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
 
     /* Handle tuple of indices (may contain slices) */
     if (PyTuple_Check(item)) {
-        Py_ssize_t n = PyTuple_Size(item);
+        int n = (int)PyTuple_Size(item);
         if (n == 0) {
             PyErr_SetString(PyExc_IndexError, "empty tuple index");
             return NULL;
         }
         Vector *cur = self;
         Py_INCREF(cur);
-        for (Py_ssize_t i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i) {
             PyObject *idx_obj = PyTuple_GetItem(item, i);
             if (!idx_obj) { Py_DECREF(cur); return NULL; }
             if (PySlice_Check(idx_obj)) {
@@ -502,7 +520,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 int new_start = cur->start + (int)start * cur->cache;
                 int new_end = cur->start + (int)stop * cur->cache;
                 // Create sliced view at current depth, p unchanged
-                Vector *slice = PyObject_New(Vector, Py_TYPE(cur));
+                Vector *slice = PyObject_New(Vector, &VectorizeType);
                 if (!slice) { Py_DECREF(cur); return NULL; }
                 slice->data = cur->data;
                 slice->owner = cur->owner ? cur->owner : (PyObject*)cur;
@@ -542,7 +560,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 return PyFloat_FromDouble(val);
             } else {
                 /* create subview (matches __getitem__ single index behavior) */
-                Vector *sub = PyObject_New(Vector, Py_TYPE(cur));
+                Vector *sub = PyObject_New(Vector, &VectorizeType);
                 if (!sub) { Py_DECREF(cur); return NULL; }
                 sub->data = cur->data;
                 sub->owner = cur->owner ? cur->owner : (PyObject*)cur;
@@ -580,7 +598,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
         int new_p = self->p + 1;
         int new_cache = self->cache / self->shape[self->p];
         
-        Vector *result = PyObject_New(Vector, Py_TYPE(self));
+        Vector *result = PyObject_New(Vector, &VectorizeType);
         if (!result) return NULL;
         result->data = self->data;
         result->owner = self->owner ? self->owner : (PyObject*)self;
@@ -606,9 +624,9 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
 static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
     /* Handle tuple of all integers: fast path */
     if (PyTuple_Check(item)) {
-        Py_ssize_t n = PyTuple_Size(item);
+        int n = (int)PyTuple_Size(item);
         int all_int = 1;
-        for (Py_ssize_t i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i) {
             if (!PyLong_Check(PyTuple_GetItem(item, i))) {
                 all_int = 0;
                 break;
@@ -617,7 +635,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
         if (all_int) {
             int ndim = self->dimension - self->p;
             if (n != ndim) {
-                PyErr_Format(PyExc_IndexError, "expected %d indices, got %zd", ndim, n);
+                PyErr_Format(PyExc_IndexError, "expected %d indices, got %d", ndim, n);
                 return -1;
             }
             int ptr = self->start;
@@ -668,17 +686,17 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             PyErr_SetString(PyExc_IndexError, "Slice assignment only allowed at leaf dimension");
             return -1;
         }
-        Py_ssize_t start, stop, step, length;
-        length = self->shape[self->p];
-        if (PySlice_GetIndicesEx(item, length, &start, &stop, &step, &length) < 0)
+        Py_ssize_t start, stop, step, slice_len;
+        Py_ssize_t length = self->shape[self->p];
+        if (PySlice_GetIndicesEx(item, length, &start, &stop, &step, &slice_len) < 0)
             return -1;
         if (step != 1) {
             PyErr_SetString(PyExc_NotImplementedError, "Non-unit step slicing not supported");
             return -1;
         }
+        int count = (int)(stop - start);
+        int start_idx = (int)start;
         // Convert value to list of doubles
-        double *vals = NULL;
-        Py_ssize_t count = stop - start;
         if (value == Py_None) {
             // Clear slice? Not supported.
             PyErr_SetString(PyExc_TypeError, "Cannot assign None to slice");
@@ -688,24 +706,24 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             // Scalar: assign to all
             double scalar = PyFloat_AsDouble(value);
             if (PyErr_Occurred()) return -1;
-            for (Py_ssize_t i = 0; i < count; ++i) {
-                Data_set_flat(self->data, self->start + (start + i) * self->cache, scalar);
+            for (int i = 0; i < count; ++i) {
+                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, scalar);
             }
             return 0;
         } else if (PyList_Check(value) || PyTuple_Check(value)) {
             // Sequence
-            Py_ssize_t len = PySequence_Size(value);
-            if (len != count) {
+            Py_ssize_t seq_len = PySequence_Size(value);
+            if ((int)seq_len != count) {
                 PyErr_SetString(PyExc_ValueError, "length of value does not match slice length");
                 return -1;
             }
-            for (Py_ssize_t i = 0; i < count; ++i) {
+            for (int i = 0; i < count; ++i) {
                 PyObject *item_val = PySequence_GetItem(value, i);
                 if (!item_val) return -1;
                 double d = PyFloat_AsDouble(item_val);
                 Py_DECREF(item_val);
                 if (PyErr_Occurred()) return -1;
-                Data_set_flat(self->data, self->start + (start + i) * self->cache, d);
+                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
             }
             return 0;
         } else if (PyObject_TypeCheck(value, &VectorizeType)) {
@@ -714,9 +732,9 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 PyErr_SetString(PyExc_ValueError, "length of Vector does not match slice length");
                 return -1;
             }
-            for (Py_ssize_t i = 0; i < count; ++i) {
+            for (int i = 0; i < count; ++i) {
                 double d = Data_get_flat(v->data, v->start + i);
-                Data_set_flat(self->data, self->start + (start + i) * self->cache, d);
+                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
             }
             return 0;
         } else {
@@ -725,79 +743,19 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
         }
     }
 
-    /* Handle tuple (for integer indices) */
+    /* Handle tuple (slice in tuple not supported yet) */
     if (PyTuple_Check(item)) {
-        // If tuple contains slices, not supported for assignment yet
-        for (Py_ssize_t i = 0; i < PyTuple_Size(item); ++i) {
+        int tuple_len = (int)PyTuple_Size(item);
+        for (int i = 0; i < tuple_len; ++i) {
             PyObject *obj = PyTuple_GetItem(item, i);
             if (PySlice_Check(obj)) {
                 PyErr_SetString(PyExc_NotImplementedError, "Slice assignment in tuple not supported");
                 return -1;
             }
         }
-        // All integers: navigate
-        Vector *obj = self;
-        for (Py_ssize_t i = 0; i < PyTuple_Size(item) - 1; ++i) {
-            PyObject *idx_obj = PyTuple_GetItem(item, i);
-            if (!PyLong_Check(idx_obj)) {
-                PyErr_SetString(PyExc_TypeError, "indices must be integers");
-                return -1;
-            }
-            int idx = (int)PyLong_AsLong(idx_obj);
-            idx = (idx < 0) ? idx + obj->shape[obj->p] : idx;
-            if (idx < 0 || idx >= obj->shape[obj->p]) {
-                PyErr_SetString(PyExc_IndexError, "index out of range");
-                return -1;
-            }
-            // Move down
-            if (obj->p == obj->dimension - 1) {
-                PyErr_SetString(PyExc_IndexError, "too many indices");
-                return -1;
-            }
-            // Create subview
-            Vector *sub = PyObject_New(Vector, Py_TYPE(obj));
-            if (!sub) return -1;
-            sub->data = obj->data;
-            sub->owner = obj->owner ? obj->owner : (PyObject*)obj;
-            Py_INCREF(sub->owner);
-            sub->flags = obj->flags;
-            sub->shape = (int*)malloc(obj->dimension * sizeof(int));
-            memcpy(sub->shape, obj->shape, obj->dimension * sizeof(int));
-            sub->dimension = obj->dimension;
-            sub->start = obj->start + idx * obj->cache;
-            sub->end = sub->start + obj->cache;
-            sub->p = obj->p + 1;
-            sub->cache = (sub->p < sub->dimension - 1) ?
-                obj->cache / sub->shape[sub->p] : 1;
-            // Replace obj with sub
-            Py_DECREF(obj);
-            obj = sub;
-        }
-        // Now assign at leaf
-        PyObject *last_idx_obj = PyTuple_GetItem(item, PyTuple_Size(item) - 1);
-        if (!PyLong_Check(last_idx_obj)) {
-            PyErr_SetString(PyExc_TypeError, "last index must be integer");
-            Py_DECREF(obj);
-            return -1;
-        }
-        int last_idx = (int)PyLong_AsLong(last_idx_obj);
-        last_idx = (last_idx < 0) ? last_idx + obj->shape[obj->p] : last_idx;
-        if (last_idx < 0 || last_idx >= obj->shape[obj->p]) {
-            PyErr_SetString(PyExc_IndexError, "index out of range");
-            Py_DECREF(obj);
-            return -1;
-        }
-        if (obj->p != obj->dimension - 1) {
-            PyErr_SetString(PyExc_IndexError, "Cannot assign to non-leaf tensor");
-            Py_DECREF(obj);
-            return -1;
-        }
-        // Convert value to double
-        double d = PyFloat_AsDouble(value);
-        if (PyErr_Occurred()) { Py_DECREF(obj); return -1; }
-        Data_set_flat(obj->data, obj->start + last_idx * obj->cache, d);
-        Py_DECREF(obj);
-        return 0;
+        // All integer tuples are already handled by the fast path above
+        PyErr_SetString(PyExc_IndexError, "invalid tuple index");
+        return -1;
     }
 
     /* Single integer */
@@ -852,14 +810,14 @@ static PyObject *Vector_repr(Vector *self) {
                                 self->dimension, self->start, self->end, self->p, self->cache);
 }
 
-static int _shape_equal(const int *a, const int *b, int dim) {
+static inline int _shape_equal(const int *a, const int *b, int dim) {
     for (int i = 0; i < dim; ++i)
         if (a[i] != b[i]) return 0;
     return 1;
 }
 
 static Vector* _new_vector_like(Vector *src) {
-    Vector *result = PyObject_New(Vector, Py_TYPE(src));
+    Vector *result = PyObject_New(Vector, &VectorizeType);
     if (!result) return NULL;
     result->data = Data_create(src->dimension, src->shape);
     if (!result->data) { Py_DECREF(result); return NULL; }
@@ -1155,7 +1113,7 @@ static PyObject *Vector_abs(PyObject *self) {
 
 /* Implementation of __get_item__ (multi-index) */
 static PyObject *Vector_get_item(Vector *self, PyObject *args) {
-    Py_ssize_t n = PyTuple_Size(args);
+    int n = (int)PyTuple_Size(args);
     if (n == 0) {
         PyErr_SetString(PyExc_TypeError, "__get_item__ expected at least one index");
         return NULL;
@@ -1191,7 +1149,7 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
             cache /= self->shape[self->p + i];
         }
         int new_cache = cache;
-        Vector *sub = PyObject_New(Vector, Py_TYPE(self));
+        Vector *sub = PyObject_New(Vector, &VectorizeType);
         if (!sub) return NULL;
         sub->data = self->data;
         sub->owner = self->owner ? self->owner : (PyObject*)self;
@@ -1221,13 +1179,13 @@ static PyObject *Vector_set_item(Vector *self, PyObject *args) {
         PyErr_SetString(PyExc_TypeError, "__set_item__ first argument must be a tuple of indices");
         return NULL;
     }
-    Py_ssize_t n = PyTuple_Size(indexs);
+    int n = (int)PyTuple_Size(indexs);
     int ndim = self->dimension - self->p;
     if (n == 0) {
         Py_RETURN_NONE;
     }
     if (n != ndim) {
-        PyErr_Format(PyExc_IndexError, "__set_item__ expected %d indices, got %zd", ndim, n);
+        PyErr_Format(PyExc_IndexError, "__set_item__ expected %d indices, got %d", ndim, n);
         return NULL;
     }
     int ptr = self->start;

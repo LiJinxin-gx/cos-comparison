@@ -5,7 +5,7 @@ from abc import ABC
 import importlib
 import ctypes
 
-class BaseCallContainer:
+class BaseCallContainer(ABC):
     __slots__ = ("container",)
     def __init__(self,obj):
         self.container = obj

@@ -7,6 +7,7 @@ from .. import core
 
 import threading
 import multiprocessing
+import os
 from array import array
 
 
@@ -83,18 +84,42 @@ class BaseData(ABC):
 
 class Data(core.vector_map_as_tensor, BaseData):
     def __init__(self, *arg, data=None, split_start=None, tensor_size=None, **kwarg):
-        if data is None:
-            super().__init__(*arg, **kwarg)
+        if data is not None:
+            # Load external data via data keyword argument (required for subclasses)
+            vec = None
+            shape = None
+            try:
+                load_kwargs = {}
+                if split_start is not None:
+                    load_kwargs['start'] = split_start
+                if tensor_size is not None:
+                    load_kwargs['shape'] = tensor_size
+                origin = core.load_as_default_data(data, **load_kwargs)
+                # Extract flat data and shape for parent constructor
+                vec, shape = _extract_tensor_info(origin)
+                vec = list(vec)
+            except ValueError:
+                # If load_as_default_data fails (e.g. data is already 1D flat with explicit ND shape)
+                # Use data directly as 1D vector with provided tensor_size
+                if tensor_size is not None:
+                    # Calculate total elements from shape
+                    total = 1
+                    for s in tensor_size:
+                        total *= s
+                    if hasattr(data, '__len__') and len(data) == total:
+                        vec = list(data)
+                        shape = tensor_size
+                    else:
+                        raise
+                else:
+                    raise
+            # Initialize parent class with unpacked standard arguments
+            super().__init__(vec, shape, **kwarg)
         else:
-            load_kwargs = {}
-            if split_start is not None:
-                load_kwargs['start'] = split_start
-            if tensor_size is not None:
-                load_kwargs['shape'] = tensor_size
-            origin = core.load_as_default_data(data, **load_kwargs)
-            vec, shape = _extract_tensor_info(origin)
-            super().__init__(vec, shape)
+            # Pass all other arguments directly to parent constructor
+            super().__init__(*arg, **kwarg)
     def __repr__(self):
+        p = getattr(self, 'p', 0)
         return f"<Data shape={self.tensor_size[p:]}>"
             
     def _comparison_passive(self, *arg, **kwarg):
@@ -106,6 +131,14 @@ class Data(core.vector_map_as_tensor, BaseData):
         origin = core.cos_comparison_active(self, *arg, **kwarg)
         vec, shape = _extract_tensor_info(origin)
         return self.__class__(vec, shape)
+
+    def filter_s(self,func):
+        for p in range(self.start,self.end):
+            temp = self.vector[p]
+            if func(temp):
+                yield temp
+    def filter(self,func):
+        return tuple(self.filter_s(func))
 
     comparison_passive = _comparison_passive
     comparison_active = _comparison_active
@@ -121,6 +154,7 @@ class Auto_Data(Data):
         # Pass data to parent via keyword; other parent params are handled by **kwargs
         super().__init__(data=data, **kwargs)
     def __repr__(self):
+        p = getattr(self, 'p', 0)
         return f"<Auto_Data shape={self.tensor_size[p:]}, task={self.task}>"
 
     def _task_split(self, start=None, step=None, end=None, d=None, n=1):
@@ -166,7 +200,7 @@ class Auto_Data(Data):
             return None
 
         if output is None:
-            output = core.create_void_list(length_list=out_shape)
+            output = core.create_void_list(out_shape)
 
         start_iter = self._task(dim_ranges)
         ndim = len(self.tensor_size)
@@ -208,7 +242,7 @@ class Auto_Data(Data):
             return None
 
         if output is None:
-            output = core.create_void_list(length_list=out_shape)
+            output = core.create_void_list(out_shape)
 
         ndim = len(self.tensor_size)
         if step is None:
