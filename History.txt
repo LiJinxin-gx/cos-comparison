@@ -1,0 +1,56 @@
+cos-comparison Project History
+=============================
+
+v0.3.6 (2026-07-24)
+-------------------
+Stability and API alignment release:
+- Fixed critical C extension constructor bug: now supports standard `vector_map_as_tensor(flat_data, shape_tuple)` N-dimensional tensor initialization, aligned with pure Python API
+- Fixed Python subclass inheritance crash: subclasses inheriting from C extension Vector type (e.g. sense_layer.Data) now work correctly without memory access violations
+- Fixed fatal import errors in all non-core modules: sense_layer, brain_layer, test_tool and other modules now import without errors
+- All non-core modules updated to follow inheritance specification: use `data` keyword argument for initialization, proper super() calls
+- C code fully optimized: all dead code removed, all compiler warnings fixed (zero warnings on MSVC/GCC/Clang), small functions inlined for performance
+- All code paths iterative: eliminated all recursion to prevent stack overflow on high-dimensional data
+- Dual Python 3.14 support: both standard GIL and free-threaded (no-GIL) versions supported
+- 100% API parity across all three backends (C extension, ctypes, pure Python)
+- Build system reverted to simple hardcoded setup.py for reliability
+- Added project metadata: author email, bug tracker URL
+- Updated documentation and fixed typos
+
+v0.3.5 (2026-07-20)
+-------------------
+Interface alignment release:
+- Standardized __set_item__ interface across all backends: tuple index + value calling convention
+- Added fast path for tuple assignment in C extension, 2-3x faster output writing
+- Eliminated recursive implementation in set_item, all paths iterative
+- Fixed cache calculation alignment between __get_item__ and __set_item__
+- Added PyBuffer protocol support for output writing
+- Fixed subview creation logic to match pure Python behavior
+
+v0.3.0 (2026-07-10)
+-------------------
+Multi-backend release:
+- Added Python C extension backend for maximum performance
+- Added ctypes pure C backend for portability
+- Three-backend automatic fallback system
+- Added PyBuffer zero-copy support for array.array and compatible types
+- Added operator overloading (+, -, *, /, in-place operators)
+- Added statistical methods: mean, variance
+- Cross-platform support for Windows, Linux, macOS
+
+v0.2.0 (2026-06-25)
+-------------------
+Tensor system release:
+- Implemented vector_map_as_tensor N-dimensional tensor view system
+- Added sliding window local comparison algorithm
+- Implemented cos, mod, cosmod similarity metrics
+- Added passive (edge detection) and active (template matching) modes
+- Added output parameter support for in-place writing
+- Added multi-dimensional indexing and slicing
+
+v0.1.0 (2026-06-01)
+-------------------
+Initial release:
+- Core cosine similarity comparison algorithm
+- Basic 1D/2D data processing
+- Centre-surround antagonism mechanism implementation
+- Pure Python implementation only
