@@ -143,7 +143,7 @@ def set_item(object,index,value):
     *indexp,endp=index
     for p in indexp:
         temp = temp[p]
-    temp[endp] = vaule
+    temp[endp] = value
 
 def no_done(*arg,**kwarg):
     pass
@@ -183,16 +183,21 @@ class vector_map_as_tensor:
             if step != 1:
                 raise ValueError("Non-unit step slicing not supported")
             if start >= stop:
-                # Empty slice: return a view with zero length? 
-                # We'll return a view with start=start, end=start (empty)
+                # Empty slice: return a view with zero length
                 new_start = self.start + start * self.cache
                 new_end = new_start  # zero length
-                return self.__class__(self.vector, self.tensor_size,
+                new_size = list(self.tensor_size)
+                new_size[self.p] = 0
+                new_size = tuple(new_size)
+                return self.__class__(vector=self.vector, tensor_size=new_size,
                                       start=new_start, end=new_end,
                                       p=self.p, cache=self.cache)
             new_start = self.start + start * self.cache
             new_end = self.start + stop * self.cache
-            return self.__class__(self.vector, self.tensor_size,
+            new_size = list(self.tensor_size)
+            new_size[self.p] = stop - start
+            new_size = tuple(new_size)
+            return self.__class__(vector=self.vector, tensor_size=new_size,
                                   start=new_start, end=new_end,
                                   p=self.p, cache=self.cache)
 
@@ -255,6 +260,23 @@ class vector_map_as_tensor:
                     raise ValueError("Length of value does not match slice length")
                 for i, v in enumerate(value):
                     self.vector[self.start + (start + i) * self.cache] = v
+            elif hasattr(value, '__buffer__'):
+                # Support buffer protocol objects (array.array, memoryview, etc.)
+                try:
+                    mv = memoryview(value)
+                    # If already double format, use directly; else cast from bytes
+                    if mv.format == 'd' and mv.itemsize == 8:
+                        buf = mv
+                    else:
+                        buf = mv.cast('d')
+                    if len(buf) != stop - start:
+                        raise ValueError("Length of buffer does not match slice length")
+                    for i in range(stop - start):
+                        self.vector[self.start + (start + i) * self.cache] = buf[i]
+                except (TypeError, ValueError):
+                    # Fall back to scalar
+                    for i in range(stop - start):
+                        self.vector[self.start + (start + i) * self.cache] = value
             else:
                 # Scalar: assign to all elements
                 for i in range(stop - start):
@@ -344,7 +366,7 @@ class vector_map_as_tensor:
         new_vec = [0.0] * total
         for i in range(total):
             new_vec[i] = self.vector[self.start + i] + other.vector[other.start + i]
-        return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+        return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
 
     def __sub__(self, other):
         self._check_shape(other)
@@ -352,7 +374,7 @@ class vector_map_as_tensor:
         new_vec = [0.0] * total
         for i in range(total):
             new_vec[i] = self.vector[self.start + i] - other.vector[other.start + i]
-        return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+        return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
 
     def __mul__(self, other):
         if type(other) == type(self):
@@ -361,13 +383,13 @@ class vector_map_as_tensor:
             new_vec = [0.0] * total
             for i in range(total):
                 new_vec[i] = self.vector[self.start + i] * other.vector[other.start + i]
-            return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
         elif type(other) in (int, float):
             total = multiple_chain(self.tensor_size)
             new_vec = [0.0] * total
             for i in range(total):
                 new_vec[i] = self.vector[self.start + i] * other
-            return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
         else:
             raise TypeError("It can not compute with other type.")
 
@@ -378,7 +400,7 @@ class vector_map_as_tensor:
             new_vec = [0.0] * total
             for i in range(total):
                 new_vec[i] = self.vector[self.start + i] / other.vector[other.start + i]
-            return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
         elif type(other) in (int, float):
             if other == 0:
                 raise ZeroDivisionError("division by zero")
@@ -386,9 +408,25 @@ class vector_map_as_tensor:
             new_vec = [0.0] * total
             for i in range(total):
                 new_vec[i] = self.vector[self.start + i] / other
-            return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
         else:
             raise TypeError("It can not be used with other type.")
+
+    def __pow__(self, other):
+        if type(other) == type(self):
+            self._check_shape(other)
+            total = multiple_chain(self.tensor_size)
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other.vector[other.start + i]
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
+        elif type(other) in (int, float):
+            total = multiple_chain(self.tensor_size)
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
+        raise TypeError("unsupported operand type(s) for **")
 
     # ---------- in-place arithmetic ----------
     def __iadd__(self, other):
@@ -429,32 +467,63 @@ class vector_map_as_tensor:
             raise TypeError("It can not be used with other type.")
         return self
 
+    def __ipow__(self, other):
+        if type(other) == type(self):
+            self._check_shape(other)
+            for i in range(self.end - self.start):
+                self.vector[self.start + i] **= other.vector[other.start + i]
+        elif type(other) in (int, float):
+            for i in range(self.end - self.start):
+                self.vector[self.start + i] **= other
+        else:
+            raise TypeError("unsupported operand type(s) for **=")
+        return self
+
     # ---------- unary arithmetic ----------
     def __neg__(self):
         total = multiple_chain(self.tensor_size)
         new_vec = [0.0] * total
         for i in range(total):
             new_vec[i] = -self.vector[self.start + i]
-        return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+        return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
 
     def __pos__(self):
         total = multiple_chain(self.tensor_size)
         new_vec = [0.0] * total
         for i in range(total):
             new_vec[i] = self.vector[self.start + i]
-        return self.__class__(new_vec, self.tensor_size, start=0, end=total, p=0, cache=None)
+        return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
 
     def __abs__(self):
         square_sum = sum(i * i for i in self.vector[self.start:self.end])
         return sqrt(square_sum)
 
     def mean(self):
-        return sum(self.vector[self.start:self.end]) / (self.end - self.start)
+        count = self.end - self.start
+        if count == 0:
+            return None
+        # Welford's online algorithm for numerically stable mean (no overflow)
+        mean = 0.0
+        for i in range(count):
+            val = self.vector[self.start + i]
+            delta = val - mean
+            mean += delta / (i + 1)
+        return mean
 
     def variance(self):
-        mean = self.mean()
-        square_mean = sum(i * i for i in self.vector[self.start:self.end]) / (self.end - self.start)
-        return square_mean - mean * mean 
+        count = self.end - self.start
+        if count == 0:
+            return None
+        # Welford's online algorithm for numerically stable variance (no large sum overflow)
+        mean = 0.0
+        M2 = 0.0
+        for i in range(count):
+            val = self.vector[self.start + i]
+            delta = val - mean
+            mean += delta / (i + 1)
+            delta2 = val - mean
+            M2 += delta * delta2
+        return M2 / count 
 
 #    ---------containers----------
 class func_name_space:

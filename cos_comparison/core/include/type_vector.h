@@ -7,7 +7,32 @@
 #include <Python.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "type_data.h"
+
+/* -----------------------------------------------------------------------------
+ * Optional SIMD auto-vectorization hints - safe no-op fallback for all compilers
+ * These are only hints to the compiler, no architecture-specific intrinsics used
+ * --------------------------------------------------------------------------- */
+#if defined(_MSC_VER)
+  /* MSVC: ignore vector dependencies for auto-vectorization */
+  #define COS_SIMD_LOOP __pragma(loop(ivdep))
+#elif defined(__GNUC__) || defined(__clang__)
+  /* GCC/Clang: ignore vector dependencies for auto-vectorization */
+  #define COS_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+  /* Unknown compiler: no-op, no effect */
+  #define COS_SIMD_LOOP
+#endif
+
+/* Restrict qualifier for compiler alias analysis */
+#if defined(_MSC_VER)
+  #define COS_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+  #define COS_RESTRICT __restrict__
+#else
+  #define COS_RESTRICT
+#endif
 
 /* Flag definitions for Vector.flags */
 #define VECTOR_FLAG_VIEW     0x01   /* data is a view onto a Python object (owner != NULL) */
@@ -31,6 +56,8 @@ static PyTypeObject VectorizeType;
 
 /* forward declarations */
 static void Vector_dealloc(Vector *self);
+static int Vector_traverse(Vector *self, visitproc visit, void *arg);
+static int Vector_clear(Vector *self);
 static PyObject *Vector_mean(Vector *self, PyObject *args);
 static PyObject *Vector_variance(Vector *self, PyObject *args);
 static PyObject *Vector_repr(Vector *self);
@@ -50,7 +77,6 @@ static PyObject *Vector_pos(PyObject *self);
 static PyObject *Vector_abs(PyObject *self);
 static PyObject *Vector_get_item(Vector *self, PyObject *args);   /* __get_item__ */
 static PyObject *Vector_set_item(Vector *self, PyObject *args);   /* __set_item__ */
-static PyObject *Vector_iter(Vector *self);                       /* __iter__ */
 
 static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, PyObject *kwargs);
 static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, PyObject *kwargs);
@@ -94,8 +120,6 @@ static PyMethodDef Vector_methods[] = {
         "Support multi-index slicing and value retrieval."},
     {"__set_item__", (PyCFunction)Vector_set_item, METH_VARARGS,
         "Support multi-index value assignment (fast path)."},
-    {"__iter__", (PyCFunction)Vector_iter, METH_NOARGS,
-        "Return an iterator over elements."},
     {"__cos_comparison_passive__", (PyCFunction)Vector_cos_comparison_passive, METH_VARARGS | METH_KEYWORDS,
         "Optimized passive mode computation for Vector types (overload)."},
     {"cos_comparison_passive", (PyCFunction)Vector_cos_comparison_passive, METH_VARARGS | METH_KEYWORDS,
@@ -113,13 +137,40 @@ static PyMappingMethods Vector_as_mapping = {
     (objobjargproc)Vector_ass_subscript,
 };
 
+/* Sequence protocol for default iteration support (matches pure Python behavior) */
+static PyObject* Vector_sq_item(Vector *self, Py_ssize_t i) {
+    if (i < 0) i += self->shape[self->p];
+    if (i < 0 || i >= self->shape[self->p]) {
+        PyErr_SetString(PyExc_IndexError, "index out of range");
+        return NULL;
+    }
+    return Vector_subscript(self, PyLong_FromSsize_t(i));
+}
+
+static PySequenceMethods Vector_as_sequence = {
+    (lenfunc)Vector_len,                      /* sq_length */
+    0,                                        /* sq_concat */
+    0,                                        /* sq_repeat */
+    (ssizeargfunc)Vector_sq_item,             /* sq_item */
+    0,                                        /* sq_slice */
+    0,                                        /* sq_ass_item */
+    0,                                        /* sq_ass_slice */
+    0,                                        /* sq_contains */
+    0,                                        /* sq_inplace_concat */
+    0,                                        /* sq_inplace_repeat */
+};
+
+// Forward declarations for number methods
+static PyObject* Vector_pow(PyObject *a, PyObject *b, PyObject *mod);
+static PyObject* Vector_ipow(PyObject *self, PyObject *other, PyObject *mod);
+
 static PyNumberMethods Vector_as_number = {
     (binaryfunc)Vector_add,          /* nb_add              (1) */
     (binaryfunc)Vector_sub,          /* nb_subtract         (2) */
     (binaryfunc)Vector_mul,          /* nb_multiply         (3) */
     0,                               /* nb_remainder        (4) */
     0,                               /* nb_divmod           (5) */
-    0,                               /* nb_power            (6) */
+    (ternaryfunc)Vector_pow,         /* nb_power            (6) */
     (unaryfunc)Vector_neg,           /* nb_negative         (7) */
     (unaryfunc)Vector_pos,           /* nb_positive         (8) */
     (unaryfunc)Vector_abs,           /* nb_absolute         (9) */
@@ -137,7 +188,7 @@ static PyNumberMethods Vector_as_number = {
     (binaryfunc)Vector_isub,         /* nb_inplace_subtract(21) */
     (binaryfunc)Vector_imul,         /* nb_inplace_multiply(22) */
     0,                               /* nb_inplace_remainder(23) */
-    0,                               /* nb_inplace_power   (24) */
+    (ternaryfunc)Vector_ipow,        /* nb_inplace_power   (24) */
     0,                               /* nb_inplace_lshift  (25) */
     0,                               /* nb_inplace_rshift  (26) */
     0,                               /* nb_inplace_and     (27) */
@@ -158,6 +209,69 @@ static inline int _multiple_chain(const int *arr, int n) {
     return result;
 }
 
+/* -----------------------------------------------------------------------------
+ * High-frequency inline helpers - extracted to reduce code duplication
+ * --------------------------------------------------------------------------- */
+
+/* Calculate flat index from multi-dimensional indices (matches pure Python logic exactly) */
+static inline int _vector_calc_flat_index(const Vector *self, PyObject *index_tuple, int n, int *out_cache) {
+    int ptr = self->start;
+    int cache = self->cache;
+    for (int i = 0; i < n; ++i) {
+        PyObject *idx_obj = PyTuple_GET_ITEM(index_tuple, i);
+        int idx = (int)PyLong_AsLong(idx_obj);
+        ptr += idx * cache;
+        if (i < n - 1) {
+            cache /= self->shape[self->p + i];
+        }
+    }
+    if (out_cache) *out_cache = cache;
+    return ptr;
+}
+
+/* Bounds check for multi-dimensional indices */
+static inline int _vector_check_indices(const Vector *self, PyObject *index_tuple, int n) {
+    for (int i = 0; i < n; ++i) {
+        PyObject *idx_obj = PyTuple_GET_ITEM(index_tuple, i);
+        int idx = (int)PyLong_AsLong(idx_obj);
+        if (idx < 0) idx += self->shape[self->p + i];
+        if (idx < 0 || idx >= self->shape[self->p + i]) {
+            PyErr_SetString(PyExc_IndexError, "index out of range");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Create a new view of the same type as self (supports subclasses, GC-safe) */
+static inline Vector* _vector_new_view(Vector *self, int new_start, int new_end, int new_p, int new_cache) {
+    PyTypeObject *type = Py_TYPE(self);
+    Vector *view = (Vector*)type->tp_alloc(type, 0);
+    if (!view) return NULL;
+    
+    view->data = self->data;
+    view->owner = self->owner ? self->owner : (PyObject*)self;
+    Py_INCREF(view->owner);
+    view->flags = self->flags | VECTOR_FLAG_VIEW;
+    view->dimension = self->dimension;
+    
+    view->shape = (int*)malloc(self->dimension * sizeof(int));
+    if (!view->shape) {
+        Py_DECREF(view);
+        return NULL;
+    }
+    memcpy(view->shape, self->shape, self->dimension * sizeof(int));
+    
+    view->start = new_start;
+    view->end = new_end;
+    view->p = new_p;
+    view->cache = new_cache;
+    
+    // tp_alloc for GC types already tracks the object in Python 3.14?
+    // _PyObject_GC_TRACK(view);
+    return view;
+}
+
 static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, const int *shape) {
     if (dim == 0) {
         PyObject *num = PyNumber_Float(obj);
@@ -174,7 +288,8 @@ static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, 
     for (int i = 0; i <= dim; ++i) num_list[i] = 1;
     int flag = dim;
     int pos = 0;
-    int *indices = (int*)alloca(dim * sizeof(int));
+    int *indices = (int*)malloc(dim * sizeof(int));
+    if (!indices) { free(num_list); PyErr_NoMemory(); return -1; }
 
     while (flag) {
         if (flag == dim) {
@@ -201,12 +316,13 @@ static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, 
             if (!valid) {
                 Py_XDECREF(current);
                 free(num_list);
+                free(indices);
                 PyErr_SetString(PyExc_ValueError, "inconsistent tensor shape");
                 return -1;
             }
             PyObject *num = PyNumber_Float(current);
             Py_DECREF(current);
-            if (!num) { free(num_list); return -1; }
+            if (!num) { free(num_list); free(indices); return -1; }
             out[pos] = PyFloat_AsDouble(num);
             Py_DECREF(num);
             pos++;
@@ -221,6 +337,7 @@ static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, 
     }
     *idx = pos;
     free(num_list);
+    free(indices);
     return 0;
 }
 
@@ -446,10 +563,20 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     return 0;
 }
 
+static int Vector_traverse(Vector *self, visitproc visit, void *arg) {
+    Py_VISIT(self->owner);
+    return 0;
+}
+
+static int Vector_clear(Vector *self) {
+    Py_CLEAR(self->owner);
+    return 0;
+}
+
 static void Vector_dealloc(Vector *self) {
-    if (self->owner) {
-        Py_DECREF(self->owner);
-    } else if (self->data) {
+    PyObject_GC_UnTrack(self);
+    Vector_clear(self);
+    if (self->data && !(self->flags & VECTOR_FLAG_VIEW)) {
         Data_free(self->data);
     }
     if (self->shape)
@@ -476,19 +603,9 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
         }
         int new_start = self->start + (int)start * self->cache;
         int new_end = self->start + (int)stop * self->cache;
-        Vector *slice = PyObject_New(Vector, &VectorizeType);
+        Vector *slice = _vector_new_view(self, new_start, new_end, self->p, self->cache);
         if (!slice) return NULL;
-        slice->data = self->data;
-        slice->owner = self->owner ? self->owner : (PyObject*)self;
-        Py_INCREF(slice->owner);
-        slice->flags = self->flags;
-        slice->shape = (int*)malloc(self->dimension * sizeof(int));
-        memcpy(slice->shape, self->shape, self->dimension * sizeof(int));
-        slice->dimension = self->dimension;
-        slice->start = new_start;
-        slice->end = new_end;
-        slice->p = self->p;
-        slice->cache = self->cache;
+        slice->shape[self->p] = (int)(stop - start); // Update current dimension size for slice
         return (PyObject*)slice;
     }
 
@@ -520,19 +637,9 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 int new_start = cur->start + (int)start * cur->cache;
                 int new_end = cur->start + (int)stop * cur->cache;
                 // Create sliced view at current depth, p unchanged
-                Vector *slice = PyObject_New(Vector, &VectorizeType);
+                Vector *slice = _vector_new_view(cur, new_start, new_end, cur->p, cur->cache);
                 if (!slice) { Py_DECREF(cur); return NULL; }
-                slice->data = cur->data;
-                slice->owner = cur->owner ? cur->owner : (PyObject*)cur;
-                Py_INCREF(slice->owner);
-                slice->flags = cur->flags;
-                slice->shape = (int*)malloc(cur->dimension * sizeof(int));
-                memcpy(slice->shape, cur->shape, cur->dimension * sizeof(int));
-                slice->dimension = cur->dimension;
-                slice->start = new_start;
-                slice->end = new_end;
-                slice->p = cur->p;
-                slice->cache = cur->cache;
+                slice->shape[cur->p] = (int)(stop - start); // Update current dimension size for slice
                 Py_DECREF(cur);
                 cur = slice;
                 // Continue with remaining indices (if any)
@@ -560,20 +667,12 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                 return PyFloat_FromDouble(val);
             } else {
                 /* create subview (matches __getitem__ single index behavior) */
-                Vector *sub = PyObject_New(Vector, &VectorizeType);
+                int new_start = cur->start + idx * cur->cache;
+                int new_p = cur->p + 1;
+                int new_cache = cur->cache / cur->shape[new_p];
+                int new_end = new_start + cur->cache;
+                Vector *sub = _vector_new_view(cur, new_start, new_end, new_p, new_cache);
                 if (!sub) { Py_DECREF(cur); return NULL; }
-                sub->data = cur->data;
-                sub->owner = cur->owner ? cur->owner : (PyObject*)cur;
-                Py_INCREF(sub->owner);
-                sub->flags = cur->flags;
-                sub->shape = (int*)malloc(cur->dimension * sizeof(int));
-                memcpy(sub->shape, cur->shape, cur->dimension * sizeof(int));
-                sub->dimension = cur->dimension;
-                sub->start = cur->start + idx * cur->cache;
-                int new_cache = cur->cache / cur->shape[cur->p];
-                sub->end = sub->start + cur->cache;
-                sub->p = cur->p + 1;
-                sub->cache = new_cache;
                 Py_DECREF(cur);
                 cur = sub;
             }
@@ -596,25 +695,11 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     if (self->p < self->dimension - 1) {
         int new_start = self->start + idx * self->cache;
         int new_p = self->p + 1;
-        int new_cache = self->cache / self->shape[self->p];
+        int new_cache = self->cache / self->shape[new_p];
+        int new_end = new_start + self->cache;
         
-        Vector *result = PyObject_New(Vector, &VectorizeType);
+        Vector *result = _vector_new_view(self, new_start, new_end, new_p, new_cache);
         if (!result) return NULL;
-        result->data = self->data;
-        result->owner = self->owner ? self->owner : (PyObject*)self;
-        Py_INCREF(result->owner);
-        result->flags = self->flags;
-        result->shape = (int*)malloc(self->dimension * sizeof(int));
-        if (!result->shape) {
-            Py_DECREF(result);
-            return NULL;
-        }
-        memcpy(result->shape, self->shape, self->dimension * sizeof(int));
-        result->dimension = self->dimension;
-        result->start = new_start;
-        result->end = new_start + self->cache;
-        result->p = new_p;
-        result->cache = new_cache;
         return (PyObject*)result;
     } else {
         return PyFloat_FromDouble(Data_get_flat(self->data, self->start + idx * self->cache));
@@ -638,20 +723,9 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 PyErr_Format(PyExc_IndexError, "expected %d indices, got %d", ndim, n);
                 return -1;
             }
-            int ptr = self->start;
-            int cache = self->cache;
-            for (int i = 0; i < ndim; ++i) {
-                PyObject *idx_obj = PyTuple_GetItem(item, i);
-                int idx = (int)PyLong_AsLong(idx_obj);
-                if (idx < 0 || idx >= self->shape[self->p + i]) {
-                    PyErr_SetString(PyExc_IndexError, "index out of range");
-                    return -1;
-                }
-                ptr += idx * cache;
-                if (i < ndim - 1) {
-                    cache /= self->shape[self->p + i];
-                }
-            }
+            /* Fast path: use inline index calculation */
+            if (_vector_check_indices(self, item, n) < 0) return -1;
+            int ptr = _vector_calc_flat_index(self, item, n, NULL);
             double val = PyFloat_AsDouble(value);
             if (val == -1.0 && PyErr_Occurred()) {
                 return -1;
@@ -737,8 +811,36 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
             }
             return 0;
+        } else if (PyObject_CheckBuffer(value)) {
+            Py_buffer buf;
+            if (PyObject_GetBuffer(value, &buf, PyBUF_FORMAT | PyBUF_STRIDED) < 0)
+                return -1;
+            // Check buffer type: double, 1D
+            if (buf.ndim != 1) {
+                PyBuffer_Release(&buf);
+                PyErr_SetString(PyExc_TypeError, "buffer must be 1-dimensional for slice assignment");
+                return -1;
+            }
+            if (buf.itemsize != sizeof(double) || (buf.format && strcmp(buf.format, "d") != 0)) {
+                PyBuffer_Release(&buf);
+                PyErr_SetString(PyExc_TypeError, "buffer must be of type double (format 'd')");
+                return -1;
+            }
+            if (buf.shape[0] != count) {
+                PyBuffer_Release(&buf);
+                PyErr_SetString(PyExc_ValueError, "buffer length does not match slice length");
+                return -1;
+            }
+            double *buf_ptr = (double*)buf.buf;
+            Py_ssize_t stride = buf.strides[0] / sizeof(double);
+            for (int i = 0; i < count; ++i) {
+                double d = buf_ptr[i * stride];
+                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+            }
+            PyBuffer_Release(&buf);
+            return 0;
         } else {
-            PyErr_SetString(PyExc_TypeError, "value must be scalar, list, tuple, or Vector");
+            PyErr_SetString(PyExc_TypeError, "value must be scalar, sequence, Vector, or buffer-like object");
             return -1;
         }
     }
@@ -782,25 +884,32 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
 static PyObject *Vector_mean(Vector *self, PyObject *args) {
     int len = self->end - self->start;
     if (len == 0) Py_RETURN_NONE;
-    double sum = 0.0;
-    for (int i = self->start; i < self->end; ++i) {
-        sum += Data_get_flat(self->data, i);
+    // Welford's online algorithm for numerically stable mean (no overflow)
+    double mean = 0.0;
+    COS_SIMD_LOOP
+    for (int i = 0; i < len; ++i) {
+        double val = Data_get_flat(self->data, self->start + i);
+        double delta = val - mean;
+        mean += delta / (i + 1);
     }
-    return PyFloat_FromDouble(sum / (double)len);
+    return PyFloat_FromDouble(mean);
 }
 
 static PyObject *Vector_variance(Vector *self, PyObject *args) {
     int len = self->end - self->start;
     if (len == 0) Py_RETURN_NONE;
-    double sum = 0.0;
-    double sum_sq = 0.0;
-    for (int i = self->start; i < self->end; ++i) {
-        double val = Data_get_flat(self->data, i);
-        sum += val;
-        sum_sq += val * val;
+    // Welford's online algorithm for numerically stable variance (no large sum overflow)
+    double mean = 0.0;
+    double M2 = 0.0;
+    COS_SIMD_LOOP
+    for (int i = 0; i < len; ++i) {
+        double val = Data_get_flat(self->data, self->start + i);
+        double delta = val - mean;
+        mean += delta / (i + 1);
+        double delta2 = val - mean;
+        M2 += delta * delta2;
     }
-    double mean = sum / (double)len;
-    double var = sum_sq / (double)len - mean * mean;
+    double var = M2 / (double)len; // population variance
     return PyFloat_FromDouble(var);
 }
 
@@ -817,7 +926,8 @@ static inline int _shape_equal(const int *a, const int *b, int dim) {
 }
 
 static Vector* _new_vector_like(Vector *src) {
-    Vector *result = PyObject_New(Vector, &VectorizeType);
+    PyTypeObject *type = Py_TYPE(src);
+    Vector *result = (Vector*)type->tp_alloc(type, 0);
     if (!result) return NULL;
     result->data = Data_create(src->dimension, src->shape);
     if (!result->data) { Py_DECREF(result); return NULL; }
@@ -832,6 +942,8 @@ static Vector* _new_vector_like(Vector *src) {
     result->p = 0;
     result->cache = (src->dimension > 1) ?
     _multiple_chain(src->shape + 1, src->dimension - 1) : 1;
+    
+    // _PyObject_GC_TRACK(result);
     return result;
 }
 
@@ -850,6 +962,7 @@ static PyObject *Vector_add(PyObject *a, PyObject *b) {
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val_a = Data_get_flat(va->data, va->start + i);
         double val_b = Data_get_flat(vb->data, vb->start + i);
@@ -873,6 +986,7 @@ static PyObject *Vector_sub(PyObject *a, PyObject *b) {
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val_a = Data_get_flat(va->data, va->start + i);
         double val_b = Data_get_flat(vb->data, vb->start + i);
@@ -893,6 +1007,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_a = Data_get_flat(va->data, va->start + i);
             double val_b = Data_get_flat(vb->data, vb->start + i);
@@ -905,6 +1020,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
             Data_set_flat(result->data, i, val * scalar);
@@ -929,6 +1045,7 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_b = Data_get_flat(vb->data, vb->start + i);
             if (val_b == 0.0) {
@@ -950,6 +1067,7 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
             Data_set_flat(result->data, i, val / scalar);
@@ -957,6 +1075,45 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
         return (PyObject*)result;
     }
     PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for /");
+    return NULL;
+}
+
+static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
+    // mod parameter is ignored (per Python number protocol, not supported for tensors)
+    (void)mod;
+    if (PyObject_TypeCheck(a, &VectorizeType) && PyObject_TypeCheck(b, &VectorizeType)) {
+        Vector *va = (Vector*)a;
+        Vector *vb = (Vector*)b;
+        if (va->dimension != vb->dimension ||
+            !_shape_equal(va->shape, vb->shape, va->dimension)) {
+            PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
+            return NULL;
+        }
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val_a = Data_get_flat(va->data, va->start + i);
+            double val_b = Data_get_flat(vb->data, vb->start + i);
+            Data_set_flat(result->data, i, pow(val_a, val_b));
+        }
+        return (PyObject*)result;
+    } else if (PyObject_TypeCheck(a, &VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+        Vector *va = (Vector*)a;
+        double scalar = PyFloat_AsDouble(b);
+        if (PyErr_Occurred()) return NULL;
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(va->data, va->start + i);
+            Data_set_flat(result->data, i, pow(val, scalar));
+        }
+        return (PyObject*)result;
+    }
+    PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for **");
     return NULL;
 }
 
@@ -974,6 +1131,7 @@ static PyObject *Vector_iadd(PyObject *self, PyObject *other) {
         return NULL;
     }
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double new_val = Data_get_flat(va->data, va->start + i) + Data_get_flat(vb->data, vb->start + i);
         Data_set_flat(va->data, va->start + i, new_val);
@@ -995,6 +1153,7 @@ static PyObject *Vector_isub(PyObject *self, PyObject *other) {
         return NULL;
     }
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double new_val = Data_get_flat(va->data, va->start + i) - Data_get_flat(vb->data, vb->start + i);
         Data_set_flat(va->data, va->start + i, new_val);
@@ -1013,6 +1172,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
             return NULL;
         }
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double new_val = Data_get_flat(va->data, va->start + i) * Data_get_flat(vb->data, vb->start + i);
             Data_set_flat(va->data, va->start + i, new_val);
@@ -1023,6 +1183,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
             Data_set_flat(va->data, va->start + i, val * scalar);
@@ -1044,6 +1205,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
             return NULL;
         }
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_b = Data_get_flat(vb->data, vb->start + i);
             if (val_b == 0.0) {
@@ -1063,6 +1225,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
             return NULL;
         }
         int total = _multiple_chain(va->shape, va->dimension);
+        COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
             Data_set_flat(va->data, va->start + i, val / scalar);
@@ -1074,12 +1237,50 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
     return NULL;
 }
 
+static PyObject *Vector_ipow(PyObject *self, PyObject *other, PyObject *mod) {
+    // mod parameter is ignored
+    (void)mod;
+    if (PyObject_TypeCheck(self, &VectorizeType) && PyObject_TypeCheck(other, &VectorizeType)) {
+        Vector *va = (Vector*)self;
+        Vector *vb = (Vector*)other;
+        if (va->dimension != vb->dimension ||
+            !_shape_equal(va->shape, vb->shape, va->dimension)) {
+            PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
+            return NULL;
+        }
+        int total = va->end - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val_a = Data_get_flat(va->data, va->start + i);
+            double val_b = Data_get_flat(vb->data, vb->start + i);
+            Data_set_flat(va->data, va->start + i, pow(val_a, val_b));
+        }
+        Py_INCREF(self);
+        return self;
+    } else if (PyObject_TypeCheck(self, &VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
+        Vector *va = (Vector*)self;
+        double scalar = PyFloat_AsDouble(other);
+        if (PyErr_Occurred()) return NULL;
+        int total = va->end - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(va->data, va->start + i);
+            Data_set_flat(va->data, va->start + i, pow(val, scalar));
+        }
+        Py_INCREF(self);
+        return self;
+    }
+    PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for **=");
+    return NULL;
+}
+
 /* Unary operators */
 static PyObject *Vector_neg(PyObject *self) {
     Vector *va = (Vector*)self;
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val = Data_get_flat(va->data, va->start + i);
         Data_set_flat(result->data, i, -val);
@@ -1092,6 +1293,7 @@ static PyObject *Vector_pos(PyObject *self) {
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
     int total = _multiple_chain(va->shape, va->dimension);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val = Data_get_flat(va->data, va->start + i);
         Data_set_flat(result->data, i, val);
@@ -1102,6 +1304,7 @@ static PyObject *Vector_pos(PyObject *self) {
 static PyObject *Vector_abs(PyObject *self) {
     Vector *va = (Vector*)self;
     double sum_sq = 0.0;
+    COS_SIMD_LOOP
     for (int i = va->start; i < va->end; ++i) {
         double val = Data_get_flat(va->data, i);
         sum_sq += val * val;
@@ -1120,48 +1323,18 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
     }
     int remaining = self->dimension - self->p;
     if (n == remaining) {
-        int ptr = self->start;
-        int cache = self->cache;
-        for (int i = 0; i < n; ++i) {
-            PyObject *idx_obj = PyTuple_GetItem(args, i);
-            int idx = (int)PyLong_AsLong(idx_obj);
-            if (idx < 0 || idx >= self->shape[self->p + i]) {
-                PyErr_SetString(PyExc_IndexError, "index out of range");
-                return NULL;
-            }
-            ptr += idx * cache;
-            if (i < n - 1) {
-                cache /= self->shape[self->p + i];
-            }
-        }
+        /* Fast scalar path: use inline index calculation */
+        if (_vector_check_indices(self, args, n) < 0) return NULL;
+        int ptr = _vector_calc_flat_index(self, args, n, NULL);
         return PyFloat_FromDouble(Data_get_flat(self->data, ptr));
     } else if (0 < n && n < remaining) {
-        int start_ptr = self->start;
-        int cache = self->cache;
-        for (int i = 0; i < n; ++i) {
-            PyObject *idx_obj = PyTuple_GetItem(args, i);
-            int idx = (int)PyLong_AsLong(idx_obj);
-            if (idx < 0 || idx >= self->shape[self->p + i]) {
-                PyErr_SetString(PyExc_IndexError, "index out of range");
-                return NULL;
-            }
-            start_ptr += idx * cache;
-            cache /= self->shape[self->p + i];
-        }
-        int new_cache = cache;
-        Vector *sub = PyObject_New(Vector, &VectorizeType);
+        /* Subview path */
+        if (_vector_check_indices(self, args, n) < 0) return NULL;
+        int new_cache;
+        int start_ptr = _vector_calc_flat_index(self, args, n, &new_cache);
+        int new_p = self->p + n;
+        Vector *sub = _vector_new_view(self, start_ptr, start_ptr + new_cache, new_p, new_cache);
         if (!sub) return NULL;
-        sub->data = self->data;
-        sub->owner = self->owner ? self->owner : (PyObject*)self;
-        Py_INCREF(sub->owner);
-        sub->flags = self->flags;
-        sub->shape = (int*)malloc(self->dimension * sizeof(int));
-        memcpy(sub->shape, self->shape, self->dimension * sizeof(int));
-        sub->dimension = self->dimension;
-        sub->start = start_ptr;
-        sub->end = start_ptr + new_cache;
-        sub->p = self->p + n;
-        sub->cache = new_cache;
         return (PyObject*)sub;
     } else {
         PyErr_SetString(PyExc_IndexError, "invalid number of indices");
@@ -1188,20 +1361,9 @@ static PyObject *Vector_set_item(Vector *self, PyObject *args) {
         PyErr_Format(PyExc_IndexError, "__set_item__ expected %d indices, got %d", ndim, n);
         return NULL;
     }
-    int ptr = self->start;
-    int cache = self->cache;
-    for (int i = 0; i < ndim; ++i) {
-        PyObject *idx_obj = PyTuple_GetItem(indexs, i);
-        int idx = (int)PyLong_AsLong(idx_obj);
-        if (idx < 0 || idx >= self->shape[self->p + i]) {
-            PyErr_SetString(PyExc_IndexError, "index out of range");
-            return NULL;
-        }
-        ptr += idx * cache;
-        if (i < ndim - 1) {
-            cache /= self->shape[self->p + i];
-        }
-    }
+    /* Bounds check and calculate flat index using inline helper */
+    if (_vector_check_indices(self, indexs, n) < 0) return NULL;
+    int ptr = _vector_calc_flat_index(self, indexs, n, NULL);
     double val = PyFloat_AsDouble(val_obj);
     if (val == -1.0 && PyErr_Occurred()) {
         return NULL;
@@ -1223,10 +1385,13 @@ static PyTypeObject VectorizeType = {
     .tp_basicsize = sizeof(Vector),
     .tp_itemsize  = 0,
     .tp_dealloc   = (destructor)Vector_dealloc,
+    .tp_traverse  = (traverseproc)Vector_traverse,
+    .tp_clear     = (inquiry)Vector_clear,
     .tp_repr      = (reprfunc)Vector_repr,
     .tp_as_number = &Vector_as_number,
+    .tp_as_sequence = &Vector_as_sequence,
     .tp_as_mapping = &Vector_as_mapping,
-    .tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
     .tp_doc       = "Maps a 1D list to a multi-dimensional tensor view (C-backed).",
     .tp_methods   = Vector_methods,
     .tp_getset    = Vector_getseters,

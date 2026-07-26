@@ -1024,6 +1024,16 @@ def get_item(obj, index):
         temp = temp[i]
     return temp
 
+def set_item(obj, index, value):
+    if hasattr(obj, "__set_item__"):
+        obj.__set_item__(index, value)
+        return
+    temp = obj
+    *indexp, endp = index
+    for p in indexp:
+        temp = temp[p]
+    temp[endp] = value
+
 # ---------- custom types (matching Python core) ----------
 class func_name_space:
     __slots__ = ("output", "output_start", "output_step", "window_size", "kernel",
@@ -1068,7 +1078,10 @@ class vector_map_as_tensor:
                 raise NotImplementedError("step != 1 not supported for slice")
             new_start = self.start + start * self.cache
             new_end = self.start + stop * self.cache
-            return self.__class__(self.vector, self.tensor_size, start=new_start, end=new_end, p=self.p, cache=self.cache)
+            new_size = list(self.tensor_size)
+            new_size[self.p] = stop - start
+            new_size = tuple(new_size)
+            return self.__class__(vector=self.vector, tensor_size=new_size, start=new_start, end=new_end, p=self.p, cache=self.cache)
         # Handle single integer
         if isinstance(index, int):
             if index < 0:
@@ -1090,7 +1103,51 @@ class vector_map_as_tensor:
             self.vector[idx] = value
             return
         if isinstance(key, slice):
-            raise NotImplementedError("slice assignment not supported")
+            if self.p != self.dimension - 1:
+                raise IndexError("Slice assignment only allowed at leaf dimension")
+            length = self.tensor_size[self.p]
+            start, stop, step = key.indices(length)
+            if step != 1:
+                raise NotImplementedError("step != 1 not supported for slice assignment")
+            count = stop - start
+            start_idx = start
+            # Scalar assignment
+            if isinstance(value, (int, float)):
+                for i in range(count):
+                    self.vector[self.start + (start_idx + i) * self.cache] = value
+                return
+            # List/tuple assignment
+            if isinstance(value, (list, tuple)):
+                if len(value) != count:
+                    raise ValueError("length of sequence does not match slice length")
+                for i in range(count):
+                    self.vector[self.start + (start_idx + i) * self.cache] = value[i]
+                return
+            # Vector assignment
+            if isinstance(value, vector_map_as_tensor):
+                if value.end - value.start != count:
+                    raise ValueError("length of Vector does not match slice length")
+                for i in range(count):
+                    self.vector[self.start + (start_idx + i) * self.cache] = value.vector[value.start + i]
+                return
+            # Buffer protocol support (array.array, memoryview, numpy arrays, etc.)
+            if hasattr(value, '__buffer__'):
+                # Try to get as array of doubles
+                try:
+                    mv = memoryview(value)
+                    # If already double format, use directly; else cast from bytes
+                    if mv.format == 'd' and mv.itemsize == 8:
+                        buf = mv
+                    else:
+                        buf = mv.cast('d')
+                    if len(buf) != count:
+                        raise ValueError("buffer length does not match slice length")
+                    for i in range(count):
+                        self.vector[self.start + (start_idx + i) * self.cache] = buf[i]
+                    return
+                except (TypeError, ValueError):
+                    pass
+            raise TypeError("value must be scalar, sequence, Vector, or buffer-like object")
         if isinstance(key, int):
             if key < 0:
                 key += self.tensor_size[self.p]
@@ -1235,6 +1292,38 @@ class vector_map_as_tensor:
             return self
         raise TypeError("unsupported operand type(s) for /=")
 
+    def __pow__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
+            total = 1
+            for s in self.tensor_size:
+                total *= s
+            new_vec = (c_double * total)()
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other.vector[other.start + i]
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
+        elif isinstance(other, (int, float)):
+            total = 1
+            for s in self.tensor_size:
+                total *= s
+            new_vec = (c_double * total)()
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other
+            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
+        raise TypeError("unsupported operand type(s) for **")
+
+    def __ipow__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
+            for i in range(self.end - self.start):
+                self.vector[self.start + i] **= other.vector[other.start + i]
+            return self
+        elif isinstance(other, (int, float)):
+            for i in range(self.end - self.start):
+                self.vector[self.start + i] **= other
+            return self
+        raise TypeError("unsupported operand type(s) for **=")
+
     def __neg__(self):
         result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
         for i in range(self.end - self.start):
@@ -1255,20 +1344,31 @@ class vector_map_as_tensor:
         return total ** 0.5
 
     def mean(self):
-        total = 0.0
         count = self.end - self.start
-        for i in range(count):
-            total += self.vector[self.start + i]
-        return total / count
-
-    def variance(self):
-        m = self.mean()
-        total = 0.0
-        count = self.end - self.start
+        if count == 0:
+            return None
+        # Welford's online algorithm for numerically stable mean
+        mean = 0.0
         for i in range(count):
             val = self.vector[self.start + i]
-            total += val * val
-        return total / count - m * m
+            delta = val - mean
+            mean += delta / (i + 1)
+        return mean
+
+    def variance(self):
+        count = self.end - self.start
+        if count == 0:
+            return None
+        # Welford's online algorithm for numerically stable variance
+        mean = 0.0
+        M2 = 0.0
+        for i in range(count):
+            val = self.vector[self.start + i]
+            delta = val - mean
+            mean += delta / (i + 1)
+            delta2 = val - mean
+            M2 += delta * delta2
+        return M2 / count
 
 # ---------- expose the public API ----------
 __all__ = [

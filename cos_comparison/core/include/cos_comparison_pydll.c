@@ -141,7 +141,7 @@ Helper: Data → vector_map_as_tensor (zero-copy)
 ------------------------------------------------------------------ */
 static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     if (!type) type = &VectorizeType;
-    Vector *vec = PyObject_New(Vector, type);
+    Vector *vec = (Vector*)type->tp_alloc(type, 0);
     if (!vec) { Data_free(data); return NULL; }
     vec->data = data;
     vec->owner = NULL;
@@ -158,6 +158,8 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
         vec->cache = 1;
     }
     vec->flags = VECTOR_FLAG_OWNED;
+    // tp_alloc already tracks GC objects in Python 3.14, no need to call again
+    // PyObject_GC_Track(vec);
     return (PyObject*)vec;
 }
 
@@ -259,6 +261,7 @@ static PyObject* py_create_void_list(PyObject *self, PyObject *args, PyObject *k
         if (PyErr_Occurred()) { Data_free(data); free(shape); return NULL; }
     }
     int total = Data_total(data);
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) Data_set_flat(data, i, fill_val);
     free(shape);
     return _data_to_vector(data, NULL);
@@ -266,7 +269,7 @@ static PyObject* py_create_void_list(PyObject *self, PyObject *args, PyObject *k
 
 /* Helper: create independent Vector from Data (deep copy) */
 static PyObject* _data_to_independent_vector(Data *data, int start) {
-    Vector *vec = PyObject_New(Vector, &VectorizeType);
+    Vector *vec = (Vector*)VectorizeType.tp_alloc(&VectorizeType, 0);
     if (!vec) { Data_free(data); return NULL; }
     vec->dimension = data->dimension;
     vec->shape = (int*)malloc(data->dimension * sizeof(int));
@@ -283,6 +286,8 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     vec->cache = (vec->dimension > 1) ? _multiple_chain(vec->shape + 1, vec->dimension - 1) : 1;
     Data_free(data);
     vec->flags = VECTOR_FLAG_OWNED;
+    // tp_alloc already tracks GC objects in Python 3.14
+    // PyObject_GC_Track(vec);
     return (PyObject*)vec;
 }
 
@@ -514,6 +519,49 @@ static PyObject* py_get_item(PyObject *self, PyObject *args) {
         Py_ssize_t idx = PyLong_AsSsize_t(index);
         if (idx == -1 && PyErr_Occurred()) return NULL;
         return PySequence_GetItem(obj, idx);
+    }
+}
+
+static PyObject* py_set_item(PyObject *self, PyObject *args) {
+    PyObject *obj, *index, *value;
+    if (!PyArg_ParseTuple(args, "OOO", &obj, &index, &value)) return NULL;
+    
+    // First try __set_item__ method (our custom interface)
+    PyObject *set_item_method = PyObject_GetAttrString(obj, "__set_item__");
+    if (set_item_method != NULL) {
+        PyObject *result = PyObject_CallFunctionObjArgs(set_item_method, index, value, NULL);
+        Py_DECREF(set_item_method);
+        return result;
+    }
+    PyErr_Clear();
+    
+    // Fall back to generic sequence indexing
+    if (PyTuple_Check(index)) {
+        PyObject *temp = obj; Py_INCREF(temp);
+        Py_ssize_t n = PyTuple_Size(index);
+        for (Py_ssize_t i = 0; i < n - 1; ++i) {
+            PyObject *idx_obj = PyTuple_GetItem(index, i);
+            Py_ssize_t idx = PyLong_AsSsize_t(idx_obj);
+            if (idx == -1 && PyErr_Occurred()) { Py_DECREF(temp); return NULL; }
+            PyObject *next = PySequence_GetItem(temp, idx);
+            Py_DECREF(temp);
+            if (!next) return NULL;
+            temp = next;
+        }
+        // Last index: set item
+        PyObject *last_idx = PyTuple_GetItem(index, n - 1);
+        Py_ssize_t idx = PyLong_AsSsize_t(last_idx);
+        if (idx == -1 && PyErr_Occurred()) { Py_DECREF(temp); return NULL; }
+        int result = PySequence_SetItem(temp, idx, value);
+        Py_DECREF(temp);
+        if (result < 0) return NULL;
+        Py_RETURN_NONE;
+    } else {
+        Py_ssize_t idx = PyLong_AsSsize_t(index);
+        if (idx == -1 && PyErr_Occurred()) return NULL;
+        int result = PySequence_SetItem(obj, idx, value);
+        if (result < 0) return NULL;
+        Py_RETURN_NONE;
     }
 }
 
@@ -799,6 +847,7 @@ double cos_full(const Data *a, const Data *b, algo_fn algorithm, CallbackContext
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double va = Data_get_flat(a, i);
         double vb = Data_get_flat(b, i);
@@ -2543,6 +2592,8 @@ static PyMethodDef methods[] = {
         "Load data as a default data type."},
     {"get_item", py_get_item, METH_VARARGS,
         "Get item from nested list with multi-dimensional index."},
+    {"set_item", py_set_item, METH_VARARGS,
+        "Set item in nested list with multi-dimensional index."},
     {"_cos", py_cos, METH_VARARGS, "inner cos algorithm."},
     {"_mod", py_mod, METH_VARARGS, "inner mod algorithm."},
     {"_cosmod", py_cosmod, METH_VARARGS, "inner cosmod algorithm."},

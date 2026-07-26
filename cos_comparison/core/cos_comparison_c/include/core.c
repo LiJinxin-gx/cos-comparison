@@ -9,6 +9,17 @@
 #define COS_API
 #endif
 
+/* -----------------------------------------------------------------------------
+ * Optional SIMD auto-vectorization hints - safe no-op fallback for all compilers
+ * --------------------------------------------------------------------------- */
+#if defined(_MSC_VER)
+  #define COS_SIMD_LOOP __pragma(loop(ivdep))
+#elif defined(__GNUC__) || defined(__clang__)
+  #define COS_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+  #define COS_SIMD_LOOP
+#endif
+
 /* ---------- Data functions ---------- */
 COS_API Data* Data_create(int dimension, const int shape[]) {
     Data *self = (Data*)calloc(1, sizeof(Data));
@@ -259,6 +270,7 @@ COS_API void VectorMap_slice_set(VectorMap *self, int start, int stop, const Vec
         // Length mismatch
         return;
     }
+    COS_SIMD_LOOP
     for (int i = 0; i < count; ++i) {
         int idx = self->start + (start + i) * self->strides[self->p];
         double val = Data_get_flat(value->base, value->start + i);
@@ -274,6 +286,7 @@ COS_API void VectorMap_slice_set_scalar(VectorMap *self, int start, int stop, do
     if (start < 0) start = 0;
     if (stop > length) stop = length;
     if (start >= stop) return;
+    COS_SIMD_LOOP
     for (int i = 0; i < stop - start; ++i) {
         int idx = self->start + (start + i) * self->strides[self->p];
         Data_set_flat(self->base, idx, value);
@@ -679,6 +692,7 @@ COS_API double cos_full(const Data *a, const Data *b,
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;
+    COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double va = Data_get_flat(a, i);
         double vb = Data_get_flat(b, i);
