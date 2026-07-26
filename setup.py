@@ -119,19 +119,6 @@ class SafeBuildExt(build_ext):
             if source_lib != output_lib:
                 shutil.copy2(output_lib, source_lib)
                 print(f"Copied to source directory: {source_lib}")
-            
-            # Enable ctypes backend in config.json
-            config_path = os.path.abspath("cos_comparison/core/config.json")
-            if os.path.isfile(config_path):
-                import json
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-                for entry in config:
-                    if entry.get("name") == ".cos_comparison_c":
-                        entry["enabled"] = True
-                with open(config_path, "w") as f:
-                    json.dump(config, f, indent=4)
-                print("ctypes backend enabled by default in config.json")
                 
         except Exception as e:
             print(f"\n*** ctypes backend compilation failed: {e} ***")
