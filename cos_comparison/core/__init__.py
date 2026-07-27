@@ -85,8 +85,13 @@ def _load_backend(module_name: str) -> bool:
     global _backend, _current_backend_name
     try:
         mod = importlib.import_module(module_name, package=__package__)
-        # Store all public and private attributes, skip dunder methods
-        for attr_name in dir(mod):
+        # Only export public API defined in __all__ to hide internal implementation details,
+        # fall back to non-underscore names if __all__ is not defined
+        if hasattr(mod, '__all__'):
+            public_attrs = mod.__all__
+        else:
+            public_attrs = [name for name in dir(mod) if not name.startswith('_')]
+        for attr_name in public_attrs:
             if attr_name.startswith("__") and attr_name.endswith("__"):
                 continue
             _backend[attr_name] = getattr(mod, attr_name)

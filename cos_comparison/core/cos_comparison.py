@@ -352,7 +352,7 @@ class vector_map_as_tensor:
         return self.tensor_size[self.p]
 
     def _check_shape(self, other):
-        if type(other) != type(self):
+        if not isinstance(other, vector_map_as_tensor):
             raise TypeError("It can not compute with other type.")
         if self.tensor_size != other.tensor_size:
             raise ValueError("the shape of two tensors are not same.")
@@ -377,7 +377,7 @@ class vector_map_as_tensor:
         return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
 
     def __mul__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             total = multiple_chain(self.tensor_size)
             new_vec = [0.0] * total
@@ -394,7 +394,7 @@ class vector_map_as_tensor:
             raise TypeError("It can not compute with other type.")
 
     def __truediv__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             total = multiple_chain(self.tensor_size)
             new_vec = [0.0] * total
@@ -413,7 +413,7 @@ class vector_map_as_tensor:
             raise TypeError("It can not be used with other type.")
 
     def __pow__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             total = multiple_chain(self.tensor_size)
             new_vec = [0.0] * total
@@ -442,7 +442,7 @@ class vector_map_as_tensor:
         return self
 
     def __imul__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             for i in range(self.end - self.start):
                 self.vector[self.start + i] *= other.vector[other.start + i]
@@ -454,7 +454,7 @@ class vector_map_as_tensor:
         return self
 
     def __itruediv__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             for i in range(self.end - self.start):
                 self.vector[self.start + i] /= other.vector[other.start + i]
@@ -468,7 +468,7 @@ class vector_map_as_tensor:
         return self
 
     def __ipow__(self, other):
-        if type(other) == type(self):
+        if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
             for i in range(self.end - self.start):
                 self.vector[self.start + i] **= other.vector[other.start + i]
@@ -1071,3 +1071,18 @@ local_variance_1d = local_variance
 local_variance_2d = local_variance
 local_variance_3d = local_variance
 local_variance_4d = local_variance
+
+# ---------- public API export list (matches other backends) ----------
+__all__ = [
+    'NaN', 'sqrt',
+    'cos_comparison_passive', 'cos_comparison_passive_1d', 'cos_comparison_passive_2d', 'cos_comparison_passive_3d', 'cos_comparison_passive_4d',
+    'cos_comparison_active', 'cos_comparison_active_1d', 'cos_comparison_active_2d', 'cos_comparison_active_3d', 'cos_comparison_active_4d',
+    'cos', 'cos_1d', 'cos_2d', 'cos_3d', 'cos_4d',
+    'mean_local', 'mean_local_1d', 'mean_local_2d', 'mean_local_3d', 'mean_local_4d',
+    'local_variance', 'local_variance_1d', 'local_variance_2d', 'local_variance_3d', 'local_variance_4d',
+    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'get_item', 'set_item',
+    'vector_chain_compute',
+    'vector_map_as_tensor', 'func_name_space', 'default_contain',
+    'private_dict'
+]
+

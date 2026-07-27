@@ -267,8 +267,7 @@ static inline Vector* _vector_new_view(Vector *self, int new_start, int new_end,
     view->p = new_p;
     view->cache = new_cache;
     
-    // tp_alloc for GC types already tracks the object in Python 3.14?
-    // _PyObject_GC_TRACK(view);
+    /* tp_alloc for GC types automatically tracks objects in Python 3.13+, no manual GC_Track needed */
     return view;
 }
 
@@ -345,13 +344,21 @@ static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
     int dim = 0;
     int cap = 4;
     int *sh = (int*)malloc(cap * sizeof(int));
+    if (!sh) { PyErr_NoMemory(); return -1; }
     PyObject *cur = obj;
     Py_INCREF(cur);
     while (PySequence_Check(cur)) {
         Py_ssize_t len = PySequence_Size(cur);
         if (dim >= cap) {
             cap *= 2;
-            sh = (int*)realloc(sh, cap * sizeof(int));
+            int *new_sh = (int*)realloc(sh, cap * sizeof(int));
+            if (!new_sh) {
+                free(sh);
+                Py_XDECREF(cur);
+                PyErr_NoMemory();
+                return -1;
+            }
+            sh = new_sh;
         }
         sh[dim++] = (int)len;
         if (len == 0) break;
@@ -403,7 +410,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     self->flags = 0;
     
     /* Case 1: vector is another Vector -> create a sub-view */
-    if (PyObject_TypeCheck(vector, &VectorizeType)) {
+    if (PyObject_IsInstance(vector, (PyObject*)&VectorizeType)) {
         Vector *src = (Vector*)vector;
         self->data = src->data;
         self->owner = src->owner ? src->owner : vector;
@@ -426,11 +433,26 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         return 0;
     }
     
-    /* Case 2: try to get a Py_buffer (zero-copy for array.array, bytes, etc.) */
+    /* Case 2: try to get a Py_buffer (zero-copy for array.array, bytes, memoryview, etc.) */
     Py_buffer view = {0};
-    if (PyObject_GetBuffer(vector, &view, PyBUF_SIMPLE) == 0) {
+    if (PyObject_GetBuffer(vector, &view, PyBUF_SIMPLE | PyBUF_FORMAT) == 0) {
         int *shape = NULL;
         int dim = 0;
+        int dtype = 0; /* 0 = double, 1 = unsigned char */
+        size_t elem_size = sizeof(double);
+        
+        /* Detect element type from buffer format string */
+        if (view.format) {
+            if (strcmp(view.format, "B") == 0 || strcmp(view.format, "b") == 0) {
+                dtype = 1;
+                elem_size = sizeof(unsigned char);
+            } else if (strcmp(view.format, "d") == 0) {
+                dtype = 0;
+                elem_size = sizeof(double);
+            }
+            /* Other formats (float, int, etc.) fall back to double for compatibility */
+        }
+        
         if (tensor_size_obj != Py_None) {
             if (_parse_shape_tuple(tensor_size_obj, &shape, &dim) < 0) {
                 PyBuffer_Release(&view);
@@ -440,7 +462,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         } else {
             dim = 1;
             shape = (int*)malloc(sizeof(int));
-            size_t elem_size = (view.format && strcmp(view.format, "B") == 0) ? sizeof(unsigned char) : sizeof(double);
+            if (!shape) { PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
             shape[0] = (int)(view.len / elem_size);
         }
         
@@ -450,6 +472,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         data->dimension = dim;
         data->shape = shape;
         data->strides = (int*)malloc(dim * sizeof(int));
+        if (!data->strides) { Data_free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
         int stride = 1;
         for (int i = dim - 1; i >= 0; --i) {
             data->strides[i] = stride;
@@ -457,7 +480,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         }
         data->data = view.buf;
         data->owns_data = 0;          /* data is owned by the Python object */
-        data->dtype = (view.format && strcmp(view.format, "B") == 0) ? 1 : 0;
+        data->dtype = dtype;
         
         self->data = data;
         self->owner = vector;         /* keep the Python object alive */
@@ -499,7 +522,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     } else {
         /* No explicit shape: infer from nested structure */
         if (_infer_shape(vector, &shape, &dim) < 0) {
-            PyErr_SetString(PyExc_ValueError, "not a tensor");
+            // Preserve original exception (index error, type error, etc.) for upper layer handling
             return -1;
         }
         if (dim <= 0) {
@@ -780,6 +803,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             // Scalar: assign to all
             double scalar = PyFloat_AsDouble(value);
             if (PyErr_Occurred()) return -1;
+            COS_SIMD_LOOP
             for (int i = 0; i < count; ++i) {
                 Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, scalar);
             }
@@ -791,6 +815,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 PyErr_SetString(PyExc_ValueError, "length of value does not match slice length");
                 return -1;
             }
+            COS_SIMD_LOOP
             for (int i = 0; i < count; ++i) {
                 PyObject *item_val = PySequence_GetItem(value, i);
                 if (!item_val) return -1;
@@ -800,12 +825,13 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
             }
             return 0;
-        } else if (PyObject_TypeCheck(value, &VectorizeType)) {
+        } else if (PyObject_IsInstance(value, (PyObject*)&VectorizeType)) {
             Vector *v = (Vector*)value;
             if (v->end - v->start != count) {
                 PyErr_SetString(PyExc_ValueError, "length of Vector does not match slice length");
                 return -1;
             }
+            COS_SIMD_LOOP
             for (int i = 0; i < count; ++i) {
                 double d = Data_get_flat(v->data, v->start + i);
                 Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
@@ -815,15 +841,10 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             Py_buffer buf;
             if (PyObject_GetBuffer(value, &buf, PyBUF_FORMAT | PyBUF_STRIDED) < 0)
                 return -1;
-            // Check buffer type: double, 1D
+            // Check buffer is 1D
             if (buf.ndim != 1) {
                 PyBuffer_Release(&buf);
                 PyErr_SetString(PyExc_TypeError, "buffer must be 1-dimensional for slice assignment");
-                return -1;
-            }
-            if (buf.itemsize != sizeof(double) || (buf.format && strcmp(buf.format, "d") != 0)) {
-                PyBuffer_Release(&buf);
-                PyErr_SetString(PyExc_TypeError, "buffer must be of type double (format 'd')");
                 return -1;
             }
             if (buf.shape[0] != count) {
@@ -831,11 +852,41 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 PyErr_SetString(PyExc_ValueError, "buffer length does not match slice length");
                 return -1;
             }
-            double *buf_ptr = (double*)buf.buf;
-            Py_ssize_t stride = buf.strides[0] / sizeof(double);
-            for (int i = 0; i < count; ++i) {
-                double d = buf_ptr[i * stride];
-                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+            int dtype = 0; /* 0 = double, 1 = unsigned char */
+            if (buf.format) {
+                if (strcmp(buf.format, "B") == 0 || strcmp(buf.format, "b") == 0) {
+                    dtype = 1;
+                    if (buf.itemsize != sizeof(unsigned char)) {
+                        PyBuffer_Release(&buf);
+                        PyErr_SetString(PyExc_TypeError, "unsigned char buffer has invalid itemsize");
+                        return -1;
+                    }
+                } else if (strcmp(buf.format, "d") == 0) {
+                    dtype = 0;
+                    if (buf.itemsize != sizeof(double)) {
+                        PyBuffer_Release(&buf);
+                        PyErr_SetString(PyExc_TypeError, "double buffer has invalid itemsize");
+                        return -1;
+                    }
+                }
+                /* Other formats fall back to double for compatibility */
+            }
+            if (dtype == 0) {
+                double *buf_ptr = (double*)buf.buf;
+                Py_ssize_t stride = buf.strides[0] / sizeof(double);
+                COS_SIMD_LOOP
+                for (int i = 0; i < count; ++i) {
+                    double d = buf_ptr[i * stride];
+                    Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                }
+            } else {
+                unsigned char *buf_ptr = (unsigned char*)buf.buf;
+                Py_ssize_t stride = buf.strides[0] / sizeof(unsigned char);
+                COS_SIMD_LOOP
+                for (int i = 0; i < count; ++i) {
+                    double d = (double)buf_ptr[i * stride];
+                    Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                }
             }
             PyBuffer_Release(&buf);
             return 0;
@@ -943,12 +994,12 @@ static Vector* _new_vector_like(Vector *src) {
     result->cache = (src->dimension > 1) ?
     _multiple_chain(src->shape + 1, src->dimension - 1) : 1;
     
-    // _PyObject_GC_TRACK(result);
+    /* tp_alloc for GC types automatically tracks objects in Python 3.13+, no manual GC_Track needed */
     return result;
 }
 
 static PyObject *Vector_add(PyObject *a, PyObject *b) {
-    if (!PyObject_TypeCheck(a, &VectorizeType) || !PyObject_TypeCheck(b, &VectorizeType)) {
+    if (!PyObject_IsInstance(a, (PyObject*)&VectorizeType) || !PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
         return NULL;
     }
@@ -972,7 +1023,7 @@ static PyObject *Vector_add(PyObject *a, PyObject *b) {
 }
 
 static PyObject *Vector_sub(PyObject *a, PyObject *b) {
-    if (!PyObject_TypeCheck(a, &VectorizeType) || !PyObject_TypeCheck(b, &VectorizeType)) {
+    if (!PyObject_IsInstance(a, (PyObject*)&VectorizeType) || !PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
         return NULL;
     }
@@ -996,7 +1047,7 @@ static PyObject *Vector_sub(PyObject *a, PyObject *b) {
 }
 
 static PyObject *Vector_mul(PyObject *a, PyObject *b) {
-    if (PyObject_TypeCheck(a, &VectorizeType) && PyObject_TypeCheck(b, &VectorizeType)) {
+    if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)a;
         Vector *vb = (Vector*)b;
         if (va->dimension != vb->dimension ||
@@ -1014,7 +1065,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
             Data_set_flat(result->data, i, val_a * val_b);
         }
         return (PyObject*)result;
-    } else if (PyObject_TypeCheck(a, &VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+    } else if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
         Vector *va = (Vector*)a;
         double scalar = PyFloat_AsDouble(b);
         Vector *result = _new_vector_like(va);
@@ -1026,7 +1077,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
             Data_set_flat(result->data, i, val * scalar);
         }
         return (PyObject*)result;
-    } else if ((PyLong_Check(a) || PyFloat_Check(a)) && PyObject_TypeCheck(b, &VectorizeType)) {
+    } else if ((PyLong_Check(a) || PyFloat_Check(a)) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         return Vector_mul(b, a);
     }
     PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for *");
@@ -1034,7 +1085,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
 }
 
 static PyObject *Vector_div(PyObject *a, PyObject *b) {
-    if (PyObject_TypeCheck(a, &VectorizeType) && PyObject_TypeCheck(b, &VectorizeType)) {
+    if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)a;
         Vector *vb = (Vector*)b;
         if (va->dimension != vb->dimension ||
@@ -1057,7 +1108,7 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
             Data_set_flat(result->data, i, val_a / val_b);
         }
         return (PyObject*)result;
-    } else if (PyObject_TypeCheck(a, &VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+    } else if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
         Vector *va = (Vector*)a;
         double scalar = PyFloat_AsDouble(b);
         if (scalar == 0.0) {
@@ -1081,7 +1132,7 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
 static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
     // mod parameter is ignored (per Python number protocol, not supported for tensors)
     (void)mod;
-    if (PyObject_TypeCheck(a, &VectorizeType) && PyObject_TypeCheck(b, &VectorizeType)) {
+    if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)a;
         Vector *vb = (Vector*)b;
         if (va->dimension != vb->dimension ||
@@ -1099,7 +1150,7 @@ static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
             Data_set_flat(result->data, i, pow(val_a, val_b));
         }
         return (PyObject*)result;
-    } else if (PyObject_TypeCheck(a, &VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+    } else if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
         Vector *va = (Vector*)a;
         double scalar = PyFloat_AsDouble(b);
         if (PyErr_Occurred()) return NULL;
@@ -1119,7 +1170,7 @@ static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
 
 /* In-place operations: modify self in place, return self */
 static PyObject *Vector_iadd(PyObject *self, PyObject *other) {
-    if (!PyObject_TypeCheck(self, &VectorizeType) || !PyObject_TypeCheck(other, &VectorizeType)) {
+    if (!PyObject_IsInstance(self, (PyObject*)&VectorizeType) || !PyObject_IsInstance(other, (PyObject*)&VectorizeType)) {
         PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
         return NULL;
     }
@@ -1141,7 +1192,7 @@ static PyObject *Vector_iadd(PyObject *self, PyObject *other) {
 }
 
 static PyObject *Vector_isub(PyObject *self, PyObject *other) {
-    if (!PyObject_TypeCheck(self, &VectorizeType) || !PyObject_TypeCheck(other, &VectorizeType)) {
+    if (!PyObject_IsInstance(self, (PyObject*)&VectorizeType) || !PyObject_IsInstance(other, (PyObject*)&VectorizeType)) {
         PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
         return NULL;
     }
@@ -1163,7 +1214,7 @@ static PyObject *Vector_isub(PyObject *self, PyObject *other) {
 }
 
 static PyObject *Vector_imul(PyObject *self, PyObject *other) {
-    if (PyObject_TypeCheck(self, &VectorizeType) && PyObject_TypeCheck(other, &VectorizeType)) {
+    if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && PyObject_IsInstance(other, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)self;
         Vector *vb = (Vector*)other;
         if (va->dimension != vb->dimension ||
@@ -1179,7 +1230,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
         }
         Py_INCREF(self);
         return self;
-    } else if (PyObject_TypeCheck(self, &VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
+    } else if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
         int total = _multiple_chain(va->shape, va->dimension);
@@ -1196,7 +1247,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
 }
 
 static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
-    if (PyObject_TypeCheck(self, &VectorizeType) && PyObject_TypeCheck(other, &VectorizeType)) {
+    if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && PyObject_IsInstance(other, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)self;
         Vector *vb = (Vector*)other;
         if (va->dimension != vb->dimension ||
@@ -1217,7 +1268,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
         }
         Py_INCREF(self);
         return self;
-    } else if (PyObject_TypeCheck(self, &VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
+    } else if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
         if (scalar == 0.0) {
@@ -1240,7 +1291,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
 static PyObject *Vector_ipow(PyObject *self, PyObject *other, PyObject *mod) {
     // mod parameter is ignored
     (void)mod;
-    if (PyObject_TypeCheck(self, &VectorizeType) && PyObject_TypeCheck(other, &VectorizeType)) {
+    if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && PyObject_IsInstance(other, (PyObject*)&VectorizeType)) {
         Vector *va = (Vector*)self;
         Vector *vb = (Vector*)other;
         if (va->dimension != vb->dimension ||
@@ -1257,7 +1308,7 @@ static PyObject *Vector_ipow(PyObject *self, PyObject *other, PyObject *mod) {
         }
         Py_INCREF(self);
         return self;
-    } else if (PyObject_TypeCheck(self, &VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
+    } else if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
         if (PyErr_Occurred()) return NULL;

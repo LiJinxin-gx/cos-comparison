@@ -20,10 +20,8 @@ _lib_path = None
 _lib = None
 
 _candidates = [
-    "libcos_core.so",
-    "libcos_core.dylib",
-    "cos_core.dll",
-    "libcos_core.dll",
+    "core.so",
+    "core.dylib",
     "core.dll",
 ]
 
@@ -922,20 +920,23 @@ local_variance_4d = local_variance
 
 # ---------- utility functions (matching Python core) ----------
 def multiple_chain(iterable, base=1):
+    """Multiply all elements in an iterable."""
     for m in iterable:
         base *= m
     return base
 
 def add_chain(iterable, base=0):
+    """Add all elements in an iterable."""
     for m in iterable:
         base += m
     return base
 
 def no_done(*arg, **kwarg):
-    """Default empty callback"""
+    """Placeholder callback that does nothing."""
     pass
 
 def create_void_list(length_list=(1,), default=None):
+    """Create a multi-dimensional nested list filled with default value."""
     if not length_list:
         return default
     length_list = tuple(length_list)
@@ -1017,6 +1018,7 @@ def load_as_default_data(data, start=None, shape=None):
     return vector_map_as_tensor(vector, shape, start=0, end=total_elements, p=0, cache=None)
 
 def get_item(obj, index):
+    """Get item from nested list with multi-dimensional index."""
     if hasattr(obj, "__get_item__"):
         return obj.__get_item__(*index)
     temp = obj
@@ -1025,6 +1027,7 @@ def get_item(obj, index):
     return temp
 
 def set_item(obj, index, value):
+    """Set item in nested list with multi-dimensional index."""
     if hasattr(obj, "__set_item__"):
         obj.__set_item__(index, value)
         return
@@ -1370,14 +1373,44 @@ class vector_map_as_tensor:
             M2 += delta * delta2
         return M2 / count
 
+# ---------- constants and utility functions (matching pure Python API) ----------
+NaN = float("nan")
+
+def vector_chain_compute(A):
+    """
+    Chain vector computation utility, matches pure Python implementation.
+    Returns (compute, fix, get) closures for chained dot product operations.
+    """
+    a = A
+    def compute(vector):
+        nonlocal a
+        leng = len(a)
+        return (sum((m*n for m,n in zip(vector,a[i]))) for i in range(leng))
+    def fix(new):
+        nonlocal a
+        a = new
+    def get():
+        return a
+    return compute, fix, get
+
+# Private algorithm dictionary (matches pure Python backend)
+private_dict = {
+    "_cos": _cos,
+    "_mod": _mod,
+    "_cosmod": _cosmod,
+    "_default_algorithm": _default_algorithm
+}
+
 # ---------- expose the public API ----------
 __all__ = [
+    'NaN', 'sqrt',
     'cos_comparison_passive', 'cos_comparison_passive_1d', 'cos_comparison_passive_2d', 'cos_comparison_passive_3d', 'cos_comparison_passive_4d',
     'cos_comparison_active', 'cos_comparison_active_1d', 'cos_comparison_active_2d', 'cos_comparison_active_3d', 'cos_comparison_active_4d',
     'cos', 'cos_1d', 'cos_2d', 'cos_3d', 'cos_4d',
     'mean_local', 'mean_local_1d', 'mean_local_2d', 'mean_local_3d', 'mean_local_4d',
     'local_variance', 'local_variance_1d', 'local_variance_2d', 'local_variance_3d', 'local_variance_4d',
-    'multiple_chain', 'add_chain', 'create_void_list', 'load_as_default_data', 'get_item',
+    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'get_item', 'set_item',
+    'vector_chain_compute',
     'vector_map_as_tensor', 'func_name_space', 'default_contain',
-    '_cos', '_mod', '_cosmod', '_default_algorithm'
+    'private_dict'
 ]

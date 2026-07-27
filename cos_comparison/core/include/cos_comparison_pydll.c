@@ -52,16 +52,17 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
     for (int i = 0; i <= dim; ++i) num_list[i] = 1;
     int flag = dim;
     int pos = 0;
-    int *indices = (int*)alloca(dim * sizeof(int)); // Allocate once outside loop
+    int *indices = (int*)malloc(dim * sizeof(int)); // Use malloc instead of alloca for portability
+    if (!indices) { free(num_list); PyErr_NoMemory(); return -1; }
     
     while (flag) {
         if (flag == dim) {
             for (int i = 0; i < dim; ++i) indices[i] = num_list[i+1] - 1;
             PyObject *item = _get_nested_item(obj, indices, dim);
-            if (!item) { free(num_list); return -1; }
+            if (!item) { free(indices); free(num_list); return -1; }
             PyObject *num = PyNumber_Float(item);
             Py_DECREF(item);
-            if (!num) { free(num_list); return -1; }
+            if (!num) { free(indices); free(num_list); return -1; }
             out[pos] = PyFloat_AsDouble(num);
             Py_DECREF(num);
             pos++;
@@ -75,6 +76,7 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
         }
     }
     *idx = pos;
+    free(indices);
     free(num_list);
     return 0;
 }
@@ -83,7 +85,7 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
 Helper: nested list / Vector → Data
 ------------------------------------------------------------------ */
 static Data* _pyobj_to_data(PyObject *obj) {
-    if (PyObject_TypeCheck(obj, &VectorizeType)) {
+    if (PyObject_IsInstance(obj, (PyObject*)&VectorizeType)) {
         Vector *v = (Vector*)obj;
         int ndim = v->dimension - v->p;
         Data *data = (Data*)calloc(1, sizeof(Data));
@@ -1299,7 +1301,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -1341,7 +1343,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
+        PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
 
@@ -1585,7 +1587,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -1627,7 +1629,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
+        PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
 
@@ -1708,7 +1710,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     if (!data) return NULL;
     int dim = data->dimension;
     Data *output_data = NULL;
-    if (output_obj && PyObject_TypeCheck(output_obj, &VectorizeType)) {
+    if (output_obj && PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
         Vector *v = (Vector*)output_obj;
         if (v->p == 0) output_data = v->data;
     }
@@ -1799,7 +1801,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -1841,7 +1843,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
+        PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
 
@@ -1953,7 +1955,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -1995,7 +1997,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        PyTypeObject *result_type = PyObject_TypeCheck(data_obj, &VectorizeType) ? Py_TYPE(data_obj) : NULL;
+        PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
         py_result = _data_to_vector(result, result_type);
     }
 
@@ -2242,7 +2244,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -2513,7 +2515,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         int *out_idx = (int*)malloc(r_dim * sizeof(int));
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
-        if (PyObject_TypeCheck(output_obj, &VectorizeType)) {
+        if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
             Vector *vec = (Vector*)output_obj;
             out_data = vec->data;
         }
@@ -2675,5 +2677,83 @@ PyMODINIT_FUNC PyInit_cos_comparison_pydll(void) {
         Py_DECREF(module);
         return NULL;
     }
+
+    // Add NaN constant
+    if (PyModule_AddObject(module, "NaN", PyFloat_FromDouble(NAN)) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+
+    // Add sqrt function (from math module, matches pure Python import)
+    PyObject *math_mod = PyImport_ImportModule("math");
+    if (!math_mod) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    PyObject *sqrt_func = PyObject_GetAttrString(math_mod, "sqrt");
+    Py_DECREF(math_mod);
+    if (!sqrt_func) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddObject(module, "sqrt", sqrt_func) < 0) {
+        Py_DECREF(sqrt_func);
+        Py_DECREF(module);
+        return NULL;
+    }
+
+    // Add private_dict (internal algorithm dictionary, matches pure Python backend)
+    PyObject *private_dict = PyDict_New();
+    if (!private_dict) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    PyObject *cos_algo = PyObject_GetAttrString(module, "_cos");
+    PyObject *mod_algo = PyObject_GetAttrString(module, "_mod");
+    PyObject *cosmod_algo = PyObject_GetAttrString(module, "_cosmod");
+    PyObject *default_algo = PyObject_GetAttrString(module, "_cosmod");
+    if (!cos_algo || !mod_algo || !cosmod_algo || !default_algo) {
+        Py_XDECREF(cos_algo);
+        Py_XDECREF(mod_algo);
+        Py_XDECREF(cosmod_algo);
+        Py_XDECREF(default_algo);
+        Py_DECREF(private_dict);
+        Py_DECREF(module);
+        return NULL;
+    }
+    PyDict_SetItemString(private_dict, "_cos", cos_algo);
+    PyDict_SetItemString(private_dict, "_mod", mod_algo);
+    PyDict_SetItemString(private_dict, "_cosmod", cosmod_algo);
+    PyDict_SetItemString(private_dict, "_default_algorithm", default_algo);
+    Py_DECREF(cos_algo);
+    Py_DECREF(mod_algo);
+    Py_DECREF(cosmod_algo);
+    Py_DECREF(default_algo);
+    if (PyModule_AddObject(module, "private_dict", private_dict) < 0) {
+        Py_DECREF(private_dict);
+        Py_DECREF(module);
+        return NULL;
+    }
+
+    // Add vector_chain_compute (pure Python utility, behavior matches pure Python exactly)
+    const char *vcc_code =
+        "def vector_chain_compute(A):\n"
+        "    a = A\n"
+        "    def compute(vector):\n"
+        "        nonlocal a\n"
+        "        leng = len(a)\n"
+        "        return (sum((m*n for m,n in zip(vector,a[i]))) for i in range(leng))\n"
+        "    def fix(new):\n"
+        "        nonlocal a\n"
+        "        a = new\n"
+        "    def get():\n"
+        "        return a\n"
+        "    return compute, fix, get\n";
+    PyObject *module_dict = PyModule_GetDict(module);
+    if (PyRun_String(vcc_code, Py_file_input, module_dict, module_dict) == NULL) {
+        Py_DECREF(module);
+        return NULL;
+    }
+
     return module;
 }

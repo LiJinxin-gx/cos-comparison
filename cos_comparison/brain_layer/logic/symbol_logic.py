@@ -17,6 +17,13 @@ class No_limit:
     def __contains__(self,other):
         return True
 
+#------- type supports -------
+class Vabiable:
+    __slots__ = ("name","value")
+    def __init__(self,name,value=None):
+        self.name = name
+        self.value = value
+
 #------- logical error -------
 class LogicError(Exception):
     pass
