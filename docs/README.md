@@ -35,7 +35,7 @@
 - **Zero training, zero labels** — Deterministic computation, ready to use
 - **Dimension-agnostic** — Works on 1D, 2D, 3D, 4D and beyond
 - **Dual modes** — Passive (self-similarity) + Active (template matching)
-- **Multi-backend acceleration** — Pure Python / NumPy / C / Python C extension
+- **Multi-backend acceleration** — Pure Python / ctypes C / Python C extension, automatic fallback
 - **Fully interpretable** — Every output has clear geometric meaning
 - **Zero-dependency core** — Pure Python core works out of the box
 
@@ -51,6 +51,6 @@
 
 ## Related Links
 
-- [GitHub Repository](https://github.com/LiJinxin/cos-comparison)
+- [GitHub Repository](https://github.com/LiJinxin-gx/cos-comparison)
 - [PyPI Project Page](https://pypi.org/project/cos-comparison/)
-- [Issue Tracker](https://github.com/LiJinxin/cos-comparison/issues)
+- [Issue Tracker](https://github.com/LiJinxin-gx/cos-comparison/issues)

@@ -8,8 +8,8 @@ Cos-comparison features a sophisticated **multi-backend management system** that
 
 | Priority | Backend | Implementation | Performance | Status | Free-thread Support |
 |----------|---------|----------------|-------------|--------|---------------------|
-| 1 | `cos_comparison_pydll` | Python C Extension | 100-200x | ✅ Stable | ✅ Full (no GIL) |
-| 2 | `cos_comparison_c` | C via ctypes | 50-100x | 🟡 Experimental | ✅ Full |
+| 1 | `cos_comparison_pydll` | Python C Extension | 100-150x | ✅ Stable | ✅ Full (no GIL) |
+| 2 | `cos_comparison_c` | C via ctypes | 60-80x | ✅ Stable (core functions) | ✅ Full |
 | 3 | `cos_comparison` | Pure Python | 1x (reference) | ✅ Stable | ✅ Full |
 
 ### Key Features
@@ -19,6 +19,11 @@ Cos-comparison features a sophisticated **multi-backend management system** that
 - **Unified API**: All backends expose the same interface
 - **Configuration flexibility**: Control backend priority via config file or environment variable
 - **Zero-dependency guarantee**: Pure Python backend always works
+- **LSP compliance**: Full support for subclass operations, follows Liskov Substitution Principle
+- **Enhanced PyBuffer support**: Zero-copy creation and slice assignment for buffer protocol objects (array.array, bytes, memoryview), supports both double and unsigned char types
+- **SIMD auto-vectorization**: Cross-compiler hints for all element-wise loops, automatic CPU vectorization for 50-100% performance improvement
+- **Free-threaded support**: Automatically releases GIL during compute-heavy operations, supports true multi-threaded parallelism on Python 3.13+ free-threaded builds
+- **Robust error handling**: Zero division protection for all core algorithms, preserves original exceptions instead of masking them with generic errors
 
 ## Architecture
 
@@ -111,7 +116,7 @@ Manually specify which backend(s) to use, overriding automatic mode.
 cc.set_mode("cos_comparison")
 
 # Multiple backends (tried in order)
-cc.set_mode(["cos_comparison_c", "cos_comparison"])
+cc.set_mode(["cos_comparison_pydll", "cos_comparison_c", "cos_comparison"])
 ```
 
 **Parameters**:

@@ -10,7 +10,7 @@ This guide will help you get up and running with cos-comparison in 5 minutes.
 pip install cos-comparison
 ```
 
-This installs the pure Python version, which has zero dependencies and works out of the box.
+This installs the package. The installer will automatically attempt to compile C acceleration backends during installation; if no C compiler is available, it will fall back to the pure Python backend automatically, which works out of the box with zero dependencies.
 
 ### Verify Installation
 
@@ -194,8 +194,8 @@ print(cc.get_mode())
 # Force pure Python (for debugging)
 cc.set_mode("cos_comparison")
 
-# Try C backend, fall back to pure Python
-cc.set_mode(["cos_comparison_c", "cos_comparison"])
+# Try C extension first, then ctypes, fall back to pure Python
+cc.set_mode(["cos_comparison_pydll", "cos_comparison_c", "cos_comparison"])
 ```
 
 ## Next Steps
@@ -223,4 +223,4 @@ Windows might be completely different. Check your data and parameters.
 
 ---
 
-**Need help?** [Open an issue on GitHub](https://github.com/LiJinxin/cos-comparison/issues)
+**Need help?** [Open an issue on GitHub](https://github.com/LiJinxin-gx/cos-comparison/issues)

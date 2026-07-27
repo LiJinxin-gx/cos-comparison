@@ -6,13 +6,13 @@ Cos-comparison adopts a **seven-layer brain-inspired cognitive architecture**, w
 
 | Layer | Directory | Brain Analogue | Maturity | Core Function |
 |-------|-----------|----------------|----------|---------------|
-| 1 | `core` | Brainstem / Cerebellum | ✅ Mature | Low-level local comparison computation |
-| 2 | `sense_layer` | Sensory Cortex | 🔴 Skeleton | Receive external stimuli, extract raw features |
+| 1 | `core` | Brainstem / Cerebellum | ✅ Production | Low-level local comparison computation |
+| 2 | `sense_layer` | Sensory Cortex | 🟡 Early Development | Receive external stimuli, extract raw features (Data/Auto_Data classes available) |
 | 3 | `memory_layer` | Hippocampus / Cortex | 🔴 Skeleton | Store short-term and long-term memory |
-| 4 | `brain_layer` | Prefrontal Cortex | 🟡 Partial | Higher cognition, logic, decision making |
+| 4 | `brain_layer` | Prefrontal Cortex | 🟡 Early Development | Higher cognition, logic, decision making (symbolic logic system implemented) |
 | 5 | `action_layer` | Motor Cortex | 🔴 Skeleton | Control action output, interact with environment |
 | 6 | `generate_layer` | Broca's / Wernicke's Area | 🔴 Skeleton | Generate language, images, high-level output |
-| 7 | `expend_layer` | Association Areas | 🔴 Skeleton | Extended functions and special capabilities |
+| 7 | `extension_layer` | Association Areas | 🔴 Skeleton | Extended functions and special capabilities |
 
 ## Design Principles
 
@@ -52,7 +52,7 @@ Each layer has a clear correspondence with biological brain structures:
 - **Brain (Layer 4)**: Analogous to prefrontal cortex — reasoning, planning, decision making
 - **Action (Layer 5)**: Analogous to motor cortex — execution of actions
 - **Generate (Layer 6)**: Analogous to language areas — generation of complex outputs
-- **Expend (Layer 7)**: Analogous to association areas — integration and special functions
+- **Extension (Layer 7)**: Analogous to association areas — integration and special functions
 
 ### 3. Dual-Mode Consistency
 
@@ -91,13 +91,19 @@ This consistent design philosophy creates architectural coherence.
 
 ### Layer 2: Sense Layer
 
-**Status**: 🔴 Skeleton (planned)
+**Status**: 🟡 Early Development (Data/Auto_Data classes implemented)
 
 **Responsibilities**:
 - Input data normalization and preprocessing
 - Multi-sensory integration
 - Basic feature extraction pipelines
 - Sensory adaptation mechanisms
+
+**Current Implementation**:
+- `Data` class: Standard tensor data class inheriting from core vector_map_as_tensor, supporting 1D flat data + explicit shape initialization
+- `Auto_Data` class: Automatic data type detection and wrapping
+- Basic filter and data processing utilities
+- All classes work correctly on both pure Python and C extension backends
 
 **Design Ideas**:
 - Standardized input interfaces for different data types
@@ -183,7 +189,7 @@ This consistent design philosophy creates architectural coherence.
 - Style control
 - Multi-modal output generation
 
-### Layer 7: Expend Layer
+### Layer 7: Extension Layer
 
 **Status**: 🔴 Skeleton (planned)
 
@@ -199,18 +205,21 @@ This consistent design philosophy creates architectural coherence.
 - Meta-learning capabilities
 - Social cognition modules
 
-## Current State Assessment
+## Current State Assessment (v0.3.6)
 
 ### Strengths
 - Clear architectural vision with strong neuroscience inspiration
-- Well-designed core layer with solid implementation
+- Production-ready core layer with solid, well-tested implementation
 - Clean separation of concerns and dependency direction
 - Dual-mode philosophy provides conceptual coherence
+- All seven layers can now be imported without fatal errors
+- Three backends fully API-aligned with zero-warning C code
 
 ### Gaps
-- Only core layer is truly functional
-- Brain layer has minimal implementation
-- All other layers are empty skeletons
+- Core layer is fully production-ready
+- Brain layer has basic symbolic logic implementation
+- Sense layer has basic Data class implementation
+- Other layers are empty skeletons with no functional code
 - No clear roadmap for layer-by-layer development
 
 ### Recommendations
