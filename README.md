@@ -47,9 +47,9 @@ This project follows a biologically inspired seven-layer cognitive architecture,
 
 \---
 
-## 🚀 What's New in Version 0.3.7
+## 🚀 What's New in Version 0.3.8
 
-Version 0.3.7 is a performance **with an urgent fix for issues in version 0.3.6**, stability and portability release:
+Version 0.3.8 is a performance **with an urgent fix for issues in version 0.3.7 and verison 0.3.6**, stability and portability release:
 
 * **Full Python GC support**: Added proper traverse/clear functions for garbage collection, fixes memory leaks and circular reference issues
 * **Portability improvements**: Replaced non-standard `alloca()` with standard C `malloc`/`free`, conforms to C11 standard, works with all C compilers
@@ -63,6 +63,7 @@ Version 0.3.7 is a performance **with an urgent fix for issues in version 0.3.6*
 * **Zero dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
 * **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends
 * **Dual Python 3.14 support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
+* **Portability Enhancement**: Align with the C language standard to enhance the portability of C code by replacing the `alloca` function with standard `malloc` and `free` functions for memory allocation.
 
 \---
 
@@ -153,7 +154,7 @@ I was born on May 31, 2008, and I feel fortunate to grow up in an era of rapid p
 
 I have run extensive tests and observed many surprising emergent properties in the outputs. Earlier versions of this project contained numerous issues, as examination-oriented education left me limited time for thorough testing. I now have the opportunity to properly test, refine, and polish this work.
 
-There remains a long road ahead to achieve true general artificial intelligence. I may be forced to set aside this research due to personal circumstances, but I do not want these ideas to fade away unnoticed. The purpose of open-sourcing this project is to share my thoughts, in the hope that others may build upon them and continue this line of inquiry.
+There remains a long road ahead to achieve true general artificial intelligence. I may be forced to set aside this research due to personal circumstances, but I do not want these ideas to fade away unnoticed. The purpose of open-sourcing this project is to share my thoughts, in the hope that others may build upon them and continue this line of inquiry. 
 
 \---
 
