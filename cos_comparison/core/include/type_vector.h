@@ -43,14 +43,22 @@ typedef struct {
     PyObject_HEAD
     Data     *data;      /* underlying flat array (shared or owned) */
     int      *shape;     /* shape of this view */
+    int      *strides;   /* strides for each dimension (precomputed) */
     int       dimension; /* number of dimensions */
     int       start;     /* start offset (flat index) */
-    int       end;       /* end offset (exclusive, flat index) */
     int       p;         /* current depth */
-    int       cache;     /* stride of current dimension (flat) */
     PyObject *owner;     /* the object that owns data (ref'd), or NULL */
+    Py_buffer *buf;      /* saved Py_buffer for zero-copy support, released on dealloc */
     int       flags;     /* internal flags (VECTOR_FLAG_*) */
 } Vector;
+
+/* Helper inline functions for strides-based access */
+static inline int Vector_end(Vector *self) {
+    return self->start + self->shape[self->p] * self->strides[self->p];
+}
+static inline int Vector_cache(Vector *self) {
+    return self->strides[self->p];
+}
 
 static PyTypeObject VectorizeType;
 
@@ -82,7 +90,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
 static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, PyObject *kwargs);
 
 /* Getters for Python attribute access (pure Python API compatibility) */
-static PyObject* Vector_get_tensor_size(Vector *self, void *closure) {
+static PyObject* Vector_get_shape(Vector *self, void *closure) {
     int ndim = self->dimension - self->p;
     PyObject *tup = PyTuple_New(ndim);
     if (!tup) return NULL;
@@ -92,11 +100,22 @@ static PyObject* Vector_get_tensor_size(Vector *self, void *closure) {
     return tup;
 }
 
+static PyObject* Vector_get_strides(Vector *self, void *closure) {
+    int ndim = self->dimension - self->p;
+    PyObject *tup = PyTuple_New(ndim);
+    if (!tup) return NULL;
+    for (int i = 0; i < ndim; ++i) {
+        PyTuple_SET_ITEM(tup, i, PyLong_FromLong(self->strides[self->p + i]));
+    }
+    return tup;
+}
+
 static PyObject* Vector_get_vector(Vector *self, void *closure) {
-    int len = self->end - self->start;
+    int len = Vector_end(self) - self->start;
     PyObject *list = PyList_New(len);
     if (!list) return NULL;
     double *data = (double*)self->data->data;
+    COS_SIMD_LOOP
     for (int i = 0; i < len; ++i) {
         PyList_SET_ITEM(list, i, PyFloat_FromDouble(data[self->start + i]));
     }
@@ -104,8 +123,12 @@ static PyObject* Vector_get_vector(Vector *self, void *closure) {
 }
 
 static PyGetSetDef Vector_getseters[] = {
-    {"tensor_size", (getter)Vector_get_tensor_size, NULL,
+    {"tensor_size", (getter)Vector_get_shape, NULL,
+     "Tuple representing the shape of the current tensor view (backward compatibility alias for shape).", NULL},
+    {"shape", (getter)Vector_get_shape, NULL,
      "Tuple representing the shape of the current tensor view.", NULL},
+    {"strides", (getter)Vector_get_strides, NULL,
+     "Tuple representing the strides of the current tensor view.", NULL},
     {"vector", (getter)Vector_get_vector, NULL,
      "Flat list of underlying data (copy, for API compatibility with pure Python backend).", NULL},
     {NULL}  /* Sentinel */
@@ -214,18 +237,13 @@ static inline int _multiple_chain(const int *arr, int n) {
  * --------------------------------------------------------------------------- */
 
 /* Calculate flat index from multi-dimensional indices (matches pure Python logic exactly) */
-static inline int _vector_calc_flat_index(const Vector *self, PyObject *index_tuple, int n, int *out_cache) {
+static inline int _vector_calc_flat_index(const Vector *self, PyObject *index_tuple, int n) {
     int ptr = self->start;
-    int cache = self->cache;
     for (int i = 0; i < n; ++i) {
         PyObject *idx_obj = PyTuple_GET_ITEM(index_tuple, i);
         int idx = (int)PyLong_AsLong(idx_obj);
-        ptr += idx * cache;
-        if (i < n - 1) {
-            cache /= self->shape[self->p + i];
-        }
+        ptr += idx * self->strides[self->p + i];
     }
-    if (out_cache) *out_cache = cache;
     return ptr;
 }
 
@@ -244,7 +262,7 @@ static inline int _vector_check_indices(const Vector *self, PyObject *index_tupl
 }
 
 /* Create a new view of the same type as self (supports subclasses, GC-safe) */
-static inline Vector* _vector_new_view(Vector *self, int new_start, int new_end, int new_p, int new_cache) {
+static inline Vector* _vector_new_view(Vector *self, int new_start, int new_p) {
     PyTypeObject *type = Py_TYPE(self);
     Vector *view = (Vector*)type->tp_alloc(type, 0);
     if (!view) return NULL;
@@ -255,6 +273,7 @@ static inline Vector* _vector_new_view(Vector *self, int new_start, int new_end,
     view->flags = self->flags | VECTOR_FLAG_VIEW;
     view->dimension = self->dimension;
     
+    // Allocate and copy shape
     view->shape = (int*)malloc(self->dimension * sizeof(int));
     if (!view->shape) {
         Py_DECREF(view);
@@ -262,10 +281,17 @@ static inline Vector* _vector_new_view(Vector *self, int new_start, int new_end,
     }
     memcpy(view->shape, self->shape, self->dimension * sizeof(int));
     
+    // Allocate and copy strides (views share the same strides as parent)
+    view->strides = (int*)malloc(self->dimension * sizeof(int));
+    if (!view->strides) {
+        free(view->shape);
+        Py_DECREF(view);
+        return NULL;
+    }
+    memcpy(view->strides, self->strides, self->dimension * sizeof(int));
+    
     view->start = new_start;
-    view->end = new_end;
     view->p = new_p;
-    view->cache = new_cache;
     
     /* tp_alloc for GC types automatically tracks objects in Python 3.13+, no manual GC_Track needed */
     return view;
@@ -393,21 +419,19 @@ static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim) {
 /* Vector initialization – matches pure Python API: (vector, tensor_size, start=0, end=None, p=0, cache=None) */
 static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     PyObject *vector = NULL;
-    PyObject *tensor_size_obj = Py_None;
-    PyObject *end_obj = Py_None;
-    PyObject *cache_obj = Py_None;
+    PyObject *shape_obj = Py_None;
+    PyObject *strides_obj = Py_None;
     int start = 0;
     int p = 0;
     
-    static char *kwlist[] = {"vector", "tensor_size", "start", "end",
-        "p", "cache", NULL};
+    static char *kwlist[] = {"vector", "shape", "start", "p", "strides", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OiOiO", kwlist,
-                                     &vector, &tensor_size_obj, &start,
-                                     &end_obj, &p, &cache_obj))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OiiO", kwlist,
+                                     &vector, &shape_obj, &start, &p, &strides_obj))
         return -1;
 
     self->flags = 0;
+    self->buf = NULL;
     
     /* Case 1: vector is another Vector -> create a sub-view */
     if (PyObject_IsInstance(vector, (PyObject*)&VectorizeType)) {
@@ -419,44 +443,65 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         self->shape = (int*)malloc(src->dimension * sizeof(int));
         if (!self->shape) { PyErr_NoMemory(); return -1; }
         memcpy(self->shape, src->shape, src->dimension * sizeof(int));
+        // Allocate and copy strides
+        self->strides = (int*)malloc(src->dimension * sizeof(int));
+        if (!self->strides) { free(self->shape); PyErr_NoMemory(); return -1; }
+        memcpy(self->strides, src->strides, src->dimension * sizeof(int));
         self->dimension = src->dimension;
         self->start = src->start + start;
-        self->end = (end_obj == Py_None) ? src->end : src->start + (int)PyLong_AsLong(end_obj);
         self->p = src->p + p;
-        if (self->p >= self->dimension) {
-            self->cache = 1;
-        } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
-            self->cache = (int)PyLong_AsLong(cache_obj);
-        } else {
-            self->cache = _multiple_chain(self->shape + self->p + 1, self->dimension - self->p - 1);
-        }
         return 0;
     }
     
-    /* Case 2: try to get a Py_buffer (zero-copy for array.array, bytes, memoryview, etc.) */
+    /* Case 2: try to get a Py_buffer (zero-copy for array.array, bytes, memoryview, numpy arrays etc.) */
     Py_buffer view = {0};
     if (PyObject_GetBuffer(vector, &view, PyBUF_SIMPLE | PyBUF_FORMAT) == 0) {
         int *shape = NULL;
         int dim = 0;
         int dtype = 0; /* 0 = double, 1 = unsigned char */
         size_t elem_size = sizeof(double);
+        int need_convert = 0;
         
         /* Detect element type from buffer format string */
+        int conv_type = 0; /* 0 = double, 1 = unsigned char, 2 = float, 3 = int, 4 = short, 5 = long, 6 = long long */
         if (view.format) {
-            if (strcmp(view.format, "B") == 0 || strcmp(view.format, "b") == 0) {
+            if (strcmp(view.format, "d") == 0) {
+                need_convert = 0;
+            } else if (strcmp(view.format, "B") == 0 || strcmp(view.format, "b") == 0) {
+                need_convert = 0;
                 dtype = 1;
                 elem_size = sizeof(unsigned char);
-            } else if (strcmp(view.format, "d") == 0) {
-                dtype = 0;
-                elem_size = sizeof(double);
+            } else if (strcmp(view.format, "f") == 0) {
+                need_convert = 1;
+                conv_type = 2;
+                elem_size = sizeof(float);
+            } else if (strcmp(view.format, "i") == 0 || strcmp(view.format, "I") == 0) {
+                need_convert = 1;
+                conv_type = 3;
+                elem_size = sizeof(int);
+            } else if (strcmp(view.format, "h") == 0 || strcmp(view.format, "H") == 0) {
+                need_convert = 1;
+                conv_type = 4;
+                elem_size = sizeof(short);
+            } else if (strcmp(view.format, "l") == 0 || strcmp(view.format, "L") == 0) {
+                need_convert = 1;
+                conv_type = 5;
+                elem_size = sizeof(long);
+            } else if (strcmp(view.format, "q") == 0 || strcmp(view.format, "Q") == 0) {
+                need_convert = 1;
+                conv_type = 6;
+                elem_size = sizeof(long long);
+            } else {
+                /* Unknown format: fall back to sequence copying */
+                PyBuffer_Release(&view);
+                goto fallback_sequence;
             }
-            /* Other formats (float, int, etc.) fall back to double for compatibility */
         }
         
-        if (tensor_size_obj != Py_None) {
-            if (_parse_shape_tuple(tensor_size_obj, &shape, &dim) < 0) {
+        if (shape_obj != Py_None) {
+            if (_parse_shape_tuple(shape_obj, &shape, &dim) < 0) {
                 PyBuffer_Release(&view);
-                PyErr_SetString(PyExc_ValueError, "invalid tensor_size tuple");
+                PyErr_SetString(PyExc_ValueError, "invalid shape tuple");
                 return -1;
             }
         } else {
@@ -466,58 +511,100 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
             shape[0] = (int)(view.len / elem_size);
         }
         
-        Data *data = (Data*)calloc(1, sizeof(Data));
-        if (!data) { free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+        int total = _multiple_chain(shape, dim);
+        Data *data = NULL;
         
-        data->dimension = dim;
-        data->shape = shape;
-        data->strides = (int*)malloc(dim * sizeof(int));
-        if (!data->strides) { Data_free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
-        int stride = 1;
-        for (int i = dim - 1; i >= 0; --i) {
-            data->strides[i] = stride;
-            stride *= shape[i];
+        if (!need_convert) {
+            /* Zero-copy path: directly use buffer memory */
+            data = (Data*)calloc(1, sizeof(Data));
+            if (!data) { free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            data->dimension = dim;
+            data->shape = shape;
+            data->strides = (int*)malloc(dim * sizeof(int));
+            if (!data->strides) { free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            int stride = 1;
+            for (int i = dim - 1; i >= 0; --i) {
+                data->strides[i] = stride;
+                stride *= shape[i];
+            }
+            data->data = view.buf;
+            data->owns_data = 0;
+            data->dtype = dtype;
+            
+            /* Save buffer to release on dealloc (fixes dangling pointer bug) */
+            self->buf = (Py_buffer*)malloc(sizeof(Py_buffer));
+            if (!self->buf) { Data_free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            memcpy(self->buf, &view, sizeof(Py_buffer));
+            
+            self->data = data;
+            self->owner = vector;
+            Py_INCREF(self->owner);
+            self->flags |= VECTOR_FLAG_VIEW | VECTOR_FLAG_BUFFER;
+        } else {
+            /* Convert path: copy and convert to owned double array */
+            data = Data_create(dim, shape);
+            if (!data) { free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            double * COS_RESTRICT out = (double*)data->data;
+            const char * COS_RESTRICT in = (const char*)view.buf;
+            
+            COS_SIMD_LOOP
+            for (int i = 0; i < total; ++i) {
+                double val;
+                const char *p = in + i*elem_size;
+                switch (conv_type) {
+                    case 2: val = (double)*(const float*)p; break;
+                    case 3: val = (double)*(const int*)p; break;
+                    case 4: val = (double)*(const short*)p; break;
+                    case 5: val = (double)*(const long*)p; break;
+                    case 6: val = (double)*(const long long*)p; break;
+                    default: val = 0.0;
+                }
+                out[i] = val;
+            }
+            
+            /* Release buffer immediately since we copied */
+            PyBuffer_Release(&view);
+            self->data = data;
+            self->owner = NULL;
+            self->flags |= VECTOR_FLAG_OWNED;
         }
-        data->data = view.buf;
-        data->owns_data = 0;          /* data is owned by the Python object */
-        data->dtype = dtype;
         
-        self->data = data;
-        self->owner = vector;         /* keep the Python object alive */
-        Py_INCREF(self->owner);
-        self->flags |= VECTOR_FLAG_VIEW | VECTOR_FLAG_BUFFER;
         self->shape = shape;
         self->dimension = dim;
         self->start = start;
-        if (end_obj == Py_None) {
-            size_t elem_size = (data->dtype == 1) ? sizeof(unsigned char) : sizeof(double);
-            self->end = (int)(view.len / elem_size);
-        } else {
-            self->end = (int)PyLong_AsLong(end_obj);
-            if (PyErr_Occurred()) { PyBuffer_Release(&view); return -1; }
-        }
         self->p = p;
-        if (self->p >= self->dimension) {
-            self->cache = 1;
-        } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
-            self->cache = (int)PyLong_AsLong(cache_obj);
-        } else {
-            self->cache = (dim > self->p + 1) ? _multiple_chain(shape + self->p + 1, dim - self->p - 1) : 1;
+        // Allocate and compute strides for Vector
+        self->strides = (int*)malloc(dim * sizeof(int));
+        if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
+        self->strides[dim - 1] = 1;
+        for (int i = dim - 2; i >= 0; --i) {
+            self->strides[i] = self->strides[i+1] * self->shape[i+1];
+        }
+        // Override strides if provided
+        if (strides_obj != Py_None && PyTuple_Check(strides_obj)) {
+            int n = (int)PyTuple_Size(strides_obj);
+            if (n != dim) {
+                PyErr_SetString(PyExc_ValueError, "strides length must match shape length");
+                return -1;
+            }
+            for (int i = 0; i < n; ++i) {
+                self->strides[i] = (int)PyLong_AsLong(PyTuple_GetItem(strides_obj, i));
+            }
         }
         
-        PyBuffer_Release(&view);
         return 0;
     }
     
     PyErr_Clear();  /* not a buffer, fallback to copying */
+fallback_sequence:
     
     /* Case 3: copy data into a new double array */
     int *shape = NULL;
     int dim = 0;
     int explicit_shape = 0;
 
-    /* Try explicit tensor_size first */
-    if (tensor_size_obj != Py_None && PyTuple_Check(tensor_size_obj) && _parse_shape_tuple(tensor_size_obj, &shape, &dim) == 0) {
+    /* Try explicit shape first */
+    if (shape_obj != Py_None && PyTuple_Check(shape_obj) && _parse_shape_tuple(shape_obj, &shape, &dim) == 0) {
         explicit_shape = 1;
     } else {
         /* No explicit shape: infer from nested structure */
@@ -569,19 +656,24 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     self->shape = shape;
     self->dimension = dim;
     self->start = start;
-    if (end_obj == Py_None) {
-        self->end = Data_total(data);
-    } else {
-        self->end = (int)PyLong_AsLong(end_obj);
-        if (PyErr_Occurred()) { Data_free(data); free(shape); return -1; }
-    }
     self->p = p;
-    if (self->p >= self->dimension) {
-        self->cache = 1;
-    } else if (cache_obj != Py_None && PyLong_Check(cache_obj)) {
-        self->cache = (int)PyLong_AsLong(cache_obj);
-    } else {
-        self->cache = (dim > self->p + 1) ? _multiple_chain(shape + self->p + 1, dim - self->p - 1) : 1;
+    // Allocate and compute strides
+    self->strides = (int*)malloc(dim * sizeof(int));
+    if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
+    self->strides[dim - 1] = 1;
+    for (int i = dim - 2; i >= 0; --i) {
+        self->strides[i] = self->strides[i+1] * self->shape[i+1];
+    }
+    // Override strides if provided
+    if (strides_obj != Py_None && PyTuple_Check(strides_obj)) {
+        int n = (int)PyTuple_Size(strides_obj);
+        if (n != dim) {
+            PyErr_SetString(PyExc_ValueError, "strides length must match shape length");
+            return -1;
+        }
+        for (int i = 0; i < n; ++i) {
+            self->strides[i] = (int)PyLong_AsLong(PyTuple_GetItem(strides_obj, i));
+        }
     }
     return 0;
 }
@@ -602,8 +694,15 @@ static void Vector_dealloc(Vector *self) {
     if (self->data && !(self->flags & VECTOR_FLAG_VIEW)) {
         Data_free(self->data);
     }
+    // Release saved Py_buffer if present
+    if (self->buf) {
+        PyBuffer_Release(self->buf);
+        free(self->buf);
+    }
     if (self->shape)
         free(self->shape);
+    if (self->strides)
+        free(self->strides);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -624,9 +723,8 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
             PyErr_SetString(PyExc_NotImplementedError, "Non-unit step slicing not supported");
             return NULL;
         }
-        int new_start = self->start + (int)start * self->cache;
-        int new_end = self->start + (int)stop * self->cache;
-        Vector *slice = _vector_new_view(self, new_start, new_end, self->p, self->cache);
+        int new_start = self->start + (int)start * Vector_cache(self);
+        Vector *slice = _vector_new_view(self, new_start, self->p);
         if (!slice) return NULL;
         slice->shape[self->p] = (int)(stop - start); // Update current dimension size for slice
         return (PyObject*)slice;
@@ -657,10 +755,9 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
                     PyErr_SetString(PyExc_NotImplementedError, "Non-unit step slicing not supported");
                     return NULL;
                 }
-                int new_start = cur->start + (int)start * cur->cache;
-                int new_end = cur->start + (int)stop * cur->cache;
+                int new_start = cur->start + (int)start * Vector_cache(cur);
                 // Create sliced view at current depth, p unchanged
-                Vector *slice = _vector_new_view(cur, new_start, new_end, cur->p, cur->cache);
+                Vector *slice = _vector_new_view(cur, new_start, cur->p);
                 if (!slice) { Py_DECREF(cur); return NULL; }
                 slice->shape[cur->p] = (int)(stop - start); // Update current dimension size for slice
                 Py_DECREF(cur);
@@ -685,16 +782,14 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
             }
             if (cur->p == cur->dimension - 1) {
                 /* leaf: return value */
-                double val = Data_get_flat(cur->data, cur->start + idx * cur->cache);
+                double val = Data_get_flat(cur->data, cur->start + idx * Vector_cache(cur));
                 Py_DECREF(cur);
                 return PyFloat_FromDouble(val);
             } else {
                 /* create subview (matches __getitem__ single index behavior) */
-                int new_start = cur->start + idx * cur->cache;
+                int new_start = cur->start + idx * Vector_cache(cur);
                 int new_p = cur->p + 1;
-                int new_cache = cur->cache / cur->shape[new_p];
-                int new_end = new_start + cur->cache;
-                Vector *sub = _vector_new_view(cur, new_start, new_end, new_p, new_cache);
+                Vector *sub = _vector_new_view(cur, new_start, new_p);
                 if (!sub) { Py_DECREF(cur); return NULL; }
                 Py_DECREF(cur);
                 cur = sub;
@@ -716,16 +811,14 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     }
     
     if (self->p < self->dimension - 1) {
-        int new_start = self->start + idx * self->cache;
+        int new_start = self->start + idx * Vector_cache(self);
         int new_p = self->p + 1;
-        int new_cache = self->cache / self->shape[new_p];
-        int new_end = new_start + self->cache;
         
-        Vector *result = _vector_new_view(self, new_start, new_end, new_p, new_cache);
+        Vector *result = _vector_new_view(self, new_start, new_p);
         if (!result) return NULL;
         return (PyObject*)result;
     } else {
-        return PyFloat_FromDouble(Data_get_flat(self->data, self->start + idx * self->cache));
+        return PyFloat_FromDouble(Data_get_flat(self->data, self->start + idx * Vector_cache(self)));
     }
 }
 
@@ -748,7 +841,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             }
             /* Fast path: use inline index calculation */
             if (_vector_check_indices(self, item, n) < 0) return -1;
-            int ptr = _vector_calc_flat_index(self, item, n, NULL);
+            int ptr = _vector_calc_flat_index(self, item, n);
             double val = PyFloat_AsDouble(value);
             if (val == -1.0 && PyErr_Occurred()) {
                 return -1;
@@ -774,7 +867,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
         if (val == -1.0 && PyErr_Occurred()) {
             return -1;
         }
-        Data_set_flat(self->data, self->start + idx * self->cache, val);
+        Data_set_flat(self->data, self->start + idx * Vector_cache(self), val);
         return 0;
     }
     /* Handle slice assignment (only at leaf) */
@@ -805,7 +898,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
             if (PyErr_Occurred()) return -1;
             COS_SIMD_LOOP
             for (int i = 0; i < count; ++i) {
-                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, scalar);
+                Data_set_flat(self->data, self->start + (start_idx + i) * Vector_cache(self), scalar);
             }
             return 0;
         } else if (PyList_Check(value) || PyTuple_Check(value)) {
@@ -822,19 +915,19 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 double d = PyFloat_AsDouble(item_val);
                 Py_DECREF(item_val);
                 if (PyErr_Occurred()) return -1;
-                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                Data_set_flat(self->data, self->start + (start_idx + i) * Vector_cache(self), d);
             }
             return 0;
         } else if (PyObject_IsInstance(value, (PyObject*)&VectorizeType)) {
             Vector *v = (Vector*)value;
-            if (v->end - v->start != count) {
+            if (Vector_end(v) - v->start != count) {
                 PyErr_SetString(PyExc_ValueError, "length of Vector does not match slice length");
                 return -1;
             }
             COS_SIMD_LOOP
             for (int i = 0; i < count; ++i) {
                 double d = Data_get_flat(v->data, v->start + i);
-                Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                Data_set_flat(self->data, self->start + (start_idx + i) * Vector_cache(self), d);
             }
             return 0;
         } else if (PyObject_CheckBuffer(value)) {
@@ -877,7 +970,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 COS_SIMD_LOOP
                 for (int i = 0; i < count; ++i) {
                     double d = buf_ptr[i * stride];
-                    Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                    Data_set_flat(self->data, self->start + (start_idx + i) * Vector_cache(self), d);
                 }
             } else {
                 unsigned char *buf_ptr = (unsigned char*)buf.buf;
@@ -885,7 +978,7 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
                 COS_SIMD_LOOP
                 for (int i = 0; i < count; ++i) {
                     double d = (double)buf_ptr[i * stride];
-                    Data_set_flat(self->data, self->start + (start_idx + i) * self->cache, d);
+                    Data_set_flat(self->data, self->start + (start_idx + i) * Vector_cache(self), d);
                 }
             }
             PyBuffer_Release(&buf);
@@ -928,12 +1021,12 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
     }
     double d = PyFloat_AsDouble(value);
     if (PyErr_Occurred()) return -1;
-    Data_set_flat(self->data, self->start + idx * self->cache, d);
+    Data_set_flat(self->data, self->start + idx * Vector_cache(self), d);
     return 0;
 }
 
 static PyObject *Vector_mean(Vector *self, PyObject *args) {
-    int len = self->end - self->start;
+    int len = Vector_end(self) - self->start;
     if (len == 0) Py_RETURN_NONE;
     // Welford's online algorithm for numerically stable mean (no overflow)
     double mean = 0.0;
@@ -947,7 +1040,7 @@ static PyObject *Vector_mean(Vector *self, PyObject *args) {
 }
 
 static PyObject *Vector_variance(Vector *self, PyObject *args) {
-    int len = self->end - self->start;
+    int len = Vector_end(self) - self->start;
     if (len == 0) Py_RETURN_NONE;
     // Welford's online algorithm for numerically stable variance (no large sum overflow)
     double mean = 0.0;
@@ -967,7 +1060,7 @@ static PyObject *Vector_variance(Vector *self, PyObject *args) {
 static PyObject *Vector_repr(Vector *self) {
     return PyUnicode_FromFormat(
                                 "<vector_map_as_tensor: dim=%d, start=%d, end=%d, p=%d, cache=%d>",
-                                self->dimension, self->start, self->end, self->p, self->cache);
+                                self->dimension, self->start, Vector_end(self), self->p, Vector_cache(self));
 }
 
 static inline int _shape_equal(const int *a, const int *b, int dim) {
@@ -980,70 +1073,114 @@ static Vector* _new_vector_like(Vector *src) {
     PyTypeObject *type = Py_TYPE(src);
     Vector *result = (Vector*)type->tp_alloc(type, 0);
     if (!result) return NULL;
-    result->data = Data_create(src->dimension, src->shape);
+    int ndim = src->dimension - src->p; // New tensor uses shape from current p onwards
+    int *new_shape = src->shape + src->p;
+    result->data = Data_create(ndim, new_shape);
     if (!result->data) { Py_DECREF(result); return NULL; }
     result->owner = NULL;
     result->flags = VECTOR_FLAG_OWNED;
-    result->shape = (int*)malloc(src->dimension * sizeof(int));
+    result->shape = (int*)malloc(ndim * sizeof(int));
     if (!result->shape) { Data_free(result->data); Py_DECREF(result); return NULL; }
-    memcpy(result->shape, src->shape, src->dimension * sizeof(int));
-    result->dimension = src->dimension;
+    memcpy(result->shape, new_shape, ndim * sizeof(int));
+    // Precompute strides for new tensor
+    result->strides = (int*)malloc(ndim * sizeof(int));
+    if (!result->strides) { free(result->shape); Data_free(result->data); Py_DECREF(result); return NULL; }
+    result->strides[ndim - 1] = 1;
+    for (int i = ndim - 2; i >= 0; --i) {
+        result->strides[i] = result->strides[i+1] * result->shape[i+1];
+    }
+    result->dimension = ndim;
     result->start = 0;
-    result->end = Data_total(result->data);
     result->p = 0;
-    result->cache = (src->dimension > 1) ?
-    _multiple_chain(src->shape + 1, src->dimension - 1) : 1;
     
     /* tp_alloc for GC types automatically tracks objects in Python 3.13+, no manual GC_Track needed */
     return result;
 }
 
 static PyObject *Vector_add(PyObject *a, PyObject *b) {
-    if (!PyObject_IsInstance(a, (PyObject*)&VectorizeType) || !PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
-        PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
-        return NULL;
+    if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
+        Vector *va = (Vector*)a;
+        Vector *vb = (Vector*)b;
+        if (va->dimension != vb->dimension ||
+            !_shape_equal(va->shape, vb->shape, va->dimension)) {
+            PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
+            return NULL;
+        }
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = Vector_end(va) - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val_a = Data_get_flat(va->data, va->start + i);
+            double val_b = Data_get_flat(vb->data, vb->start + i);
+            Data_set_flat(result->data, i, val_a + val_b);
+        }
+        return (PyObject*)result;
+    } else if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+        Vector *va = (Vector*)a;
+        double scalar = PyFloat_AsDouble(b);
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = Vector_end(va) - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(va->data, va->start + i);
+            Data_set_flat(result->data, i, val + scalar);
+        }
+        return (PyObject*)result;
+    } else if ((PyLong_Check(a) || PyFloat_Check(a)) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
+        return Vector_add(b, a);
     }
-    Vector *va = (Vector*)a;
-    Vector *vb = (Vector*)b;
-    if (va->dimension != vb->dimension ||
-        !_shape_equal(va->shape, vb->shape, va->dimension)) {
-        PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
-        return NULL;
-    }
-    Vector *result = _new_vector_like(va);
-    if (!result) return NULL;
-    int total = _multiple_chain(va->shape, va->dimension);
-    COS_SIMD_LOOP
-    for (int i = 0; i < total; ++i) {
-        double val_a = Data_get_flat(va->data, va->start + i);
-        double val_b = Data_get_flat(vb->data, vb->start + i);
-        Data_set_flat(result->data, i, val_a + val_b);
-    }
-    return (PyObject*)result;
+    PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for +");
+    return NULL;
 }
 
 static PyObject *Vector_sub(PyObject *a, PyObject *b) {
-    if (!PyObject_IsInstance(a, (PyObject*)&VectorizeType) || !PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
-        PyErr_SetString(PyExc_TypeError, "operands must be vector_map_as_tensor");
-        return NULL;
+    if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
+        Vector *va = (Vector*)a;
+        Vector *vb = (Vector*)b;
+        if (va->dimension != vb->dimension ||
+            !_shape_equal(va->shape, vb->shape, va->dimension)) {
+            PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
+            return NULL;
+        }
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = Vector_end(va) - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val_a = Data_get_flat(va->data, va->start + i);
+            double val_b = Data_get_flat(vb->data, vb->start + i);
+            Data_set_flat(result->data, i, val_a - val_b);
+        }
+        return (PyObject*)result;
+    } else if (PyObject_IsInstance(a, (PyObject*)&VectorizeType) && (PyLong_Check(b) || PyFloat_Check(b))) {
+        Vector *va = (Vector*)a;
+        double scalar = PyFloat_AsDouble(b);
+        Vector *result = _new_vector_like(va);
+        if (!result) return NULL;
+        int total = Vector_end(va) - va->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(va->data, va->start + i);
+            Data_set_flat(result->data, i, val - scalar);
+        }
+        return (PyObject*)result;
+    } else if ((PyLong_Check(a) || PyFloat_Check(a)) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
+        Vector *vb = (Vector*)b;
+        double scalar = PyFloat_AsDouble(a);
+        Vector *result = _new_vector_like(vb);
+        if (!result) return NULL;
+        int total = Vector_end(vb) - vb->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(vb->data, vb->start + i);
+            Data_set_flat(result->data, i, scalar - val);
+        }
+        return (PyObject*)result;
     }
-    Vector *va = (Vector*)a;
-    Vector *vb = (Vector*)b;
-    if (va->dimension != vb->dimension ||
-        !_shape_equal(va->shape, vb->shape, va->dimension)) {
-        PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
-        return NULL;
-    }
-    Vector *result = _new_vector_like(va);
-    if (!result) return NULL;
-    int total = _multiple_chain(va->shape, va->dimension);
-    COS_SIMD_LOOP
-    for (int i = 0; i < total; ++i) {
-        double val_a = Data_get_flat(va->data, va->start + i);
-        double val_b = Data_get_flat(vb->data, vb->start + i);
-        Data_set_flat(result->data, i, val_a - val_b);
-    }
-    return (PyObject*)result;
+    PyErr_SetString(PyExc_TypeError, "unsupported operand type(s) for -");
+    return NULL;
 }
 
 static PyObject *Vector_mul(PyObject *a, PyObject *b) {
@@ -1057,7 +1194,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
         }
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_a = Data_get_flat(va->data, va->start + i);
@@ -1070,7 +1207,7 @@ static PyObject *Vector_mul(PyObject *a, PyObject *b) {
         double scalar = PyFloat_AsDouble(b);
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
@@ -1095,7 +1232,7 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
         }
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_b = Data_get_flat(vb->data, vb->start + i);
@@ -1117,11 +1254,28 @@ static PyObject *Vector_div(PyObject *a, PyObject *b) {
         }
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
             Data_set_flat(result->data, i, val / scalar);
+        }
+        return (PyObject*)result;
+    } else if ((PyLong_Check(a) || PyFloat_Check(a)) && PyObject_IsInstance(b, (PyObject*)&VectorizeType)) {
+        Vector *vb = (Vector*)b;
+        double scalar = PyFloat_AsDouble(a);
+        Vector *result = _new_vector_like(vb);
+        if (!result) return NULL;
+        int total = Vector_end(vb) - vb->start;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double val = Data_get_flat(vb->data, vb->start + i);
+            if (val == 0.0) {
+                Py_DECREF(result);
+                PyErr_SetString(PyExc_ZeroDivisionError, "division by zero");
+                return NULL;
+            }
+            Data_set_flat(result->data, i, scalar / val);
         }
         return (PyObject*)result;
     }
@@ -1142,7 +1296,7 @@ static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
         }
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_a = Data_get_flat(va->data, va->start + i);
@@ -1156,7 +1310,7 @@ static PyObject *Vector_pow(PyObject *a, PyObject *b, PyObject *mod) {
         if (PyErr_Occurred()) return NULL;
         Vector *result = _new_vector_like(va);
         if (!result) return NULL;
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
@@ -1181,7 +1335,7 @@ static PyObject *Vector_iadd(PyObject *self, PyObject *other) {
         PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
         return NULL;
     }
-    int total = _multiple_chain(va->shape, va->dimension);
+    int total = Vector_end(va) - va->start;
     COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double new_val = Data_get_flat(va->data, va->start + i) + Data_get_flat(vb->data, vb->start + i);
@@ -1203,7 +1357,7 @@ static PyObject *Vector_isub(PyObject *self, PyObject *other) {
         PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
         return NULL;
     }
-    int total = _multiple_chain(va->shape, va->dimension);
+    int total = Vector_end(va) - va->start;
     COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double new_val = Data_get_flat(va->data, va->start + i) - Data_get_flat(vb->data, vb->start + i);
@@ -1222,7 +1376,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
             PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
             return NULL;
         }
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double new_val = Data_get_flat(va->data, va->start + i) * Data_get_flat(vb->data, vb->start + i);
@@ -1233,7 +1387,7 @@ static PyObject *Vector_imul(PyObject *self, PyObject *other) {
     } else if (PyObject_IsInstance(self, (PyObject*)&VectorizeType) && (PyLong_Check(other) || PyFloat_Check(other))) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
@@ -1255,7 +1409,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
             PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
             return NULL;
         }
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_b = Data_get_flat(vb->data, vb->start + i);
@@ -1275,7 +1429,7 @@ static PyObject *Vector_itruediv(PyObject *self, PyObject *other) {
             PyErr_SetString(PyExc_ZeroDivisionError, "division by zero");
             return NULL;
         }
-        int total = _multiple_chain(va->shape, va->dimension);
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
@@ -1299,7 +1453,7 @@ static PyObject *Vector_ipow(PyObject *self, PyObject *other, PyObject *mod) {
             PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same.");
             return NULL;
         }
-        int total = va->end - va->start;
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val_a = Data_get_flat(va->data, va->start + i);
@@ -1312,7 +1466,7 @@ static PyObject *Vector_ipow(PyObject *self, PyObject *other, PyObject *mod) {
         Vector *va = (Vector*)self;
         double scalar = PyFloat_AsDouble(other);
         if (PyErr_Occurred()) return NULL;
-        int total = va->end - va->start;
+        int total = Vector_end(va) - va->start;
         COS_SIMD_LOOP
         for (int i = 0; i < total; ++i) {
             double val = Data_get_flat(va->data, va->start + i);
@@ -1330,7 +1484,7 @@ static PyObject *Vector_neg(PyObject *self) {
     Vector *va = (Vector*)self;
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
-    int total = _multiple_chain(va->shape, va->dimension);
+    int total = Vector_end(va) - va->start;
     COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val = Data_get_flat(va->data, va->start + i);
@@ -1343,7 +1497,7 @@ static PyObject *Vector_pos(PyObject *self) {
     Vector *va = (Vector*)self;
     Vector *result = _new_vector_like(va);
     if (!result) return NULL;
-    int total = _multiple_chain(va->shape, va->dimension);
+    int total = Vector_end(va) - va->start;
     COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) {
         double val = Data_get_flat(va->data, va->start + i);
@@ -1356,7 +1510,7 @@ static PyObject *Vector_abs(PyObject *self) {
     Vector *va = (Vector*)self;
     double sum_sq = 0.0;
     COS_SIMD_LOOP
-    for (int i = va->start; i < va->end; ++i) {
+    for (int i = va->start; i < Vector_end(va); ++i) {
         double val = Data_get_flat(va->data, i);
         sum_sq += val * val;
     }
@@ -1376,15 +1530,14 @@ static PyObject *Vector_get_item(Vector *self, PyObject *args) {
     if (n == remaining) {
         /* Fast scalar path: use inline index calculation */
         if (_vector_check_indices(self, args, n) < 0) return NULL;
-        int ptr = _vector_calc_flat_index(self, args, n, NULL);
+        int ptr = _vector_calc_flat_index(self, args, n);
         return PyFloat_FromDouble(Data_get_flat(self->data, ptr));
     } else if (0 < n && n < remaining) {
         /* Subview path */
         if (_vector_check_indices(self, args, n) < 0) return NULL;
-        int new_cache;
-        int start_ptr = _vector_calc_flat_index(self, args, n, &new_cache);
+        int start_ptr = _vector_calc_flat_index(self, args, n);
         int new_p = self->p + n;
-        Vector *sub = _vector_new_view(self, start_ptr, start_ptr + new_cache, new_p, new_cache);
+        Vector *sub = _vector_new_view(self, start_ptr, new_p);
         if (!sub) return NULL;
         return (PyObject*)sub;
     } else {
@@ -1414,7 +1567,7 @@ static PyObject *Vector_set_item(Vector *self, PyObject *args) {
     }
     /* Bounds check and calculate flat index using inline helper */
     if (_vector_check_indices(self, indexs, n) < 0) return NULL;
-    int ptr = _vector_calc_flat_index(self, indexs, n, NULL);
+    int ptr = _vector_calc_flat_index(self, indexs, n);
     double val = PyFloat_AsDouble(val_obj);
     if (val == -1.0 && PyErr_Occurred()) {
         return NULL;

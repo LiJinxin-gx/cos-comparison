@@ -151,14 +151,15 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->shape = (int*)malloc(data->dimension * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
-    vec->start = 0;
-    vec->end = Data_total(data);
-    vec->p = 0;
-    if (data->dimension > 1) {
-        vec->cache = _multiple_chain(data->shape + 1, data->dimension - 1);
-    } else {
-        vec->cache = 1;
+    // Allocate and compute strides
+    vec->strides = (int*)malloc(data->dimension * sizeof(int));
+    if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    vec->strides[data->dimension - 1] = 1;
+    for (int i = data->dimension - 2; i >= 0; --i) {
+        vec->strides[i] = vec->strides[i+1] * vec->shape[i+1];
     }
+    vec->start = 0;
+    vec->p = 0;
     vec->flags = VECTOR_FLAG_OWNED;
     // tp_alloc already tracks GC objects in Python 3.14, no need to call again
     // PyObject_GC_Track(vec);
@@ -277,15 +278,20 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     vec->shape = (int*)malloc(data->dimension * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
+    // Allocate and compute strides
+    vec->strides = (int*)malloc(data->dimension * sizeof(int));
+    if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    vec->strides[data->dimension - 1] = 1;
+    for (int i = data->dimension - 2; i >= 0; --i) {
+        vec->strides[i] = vec->strides[i+1] * vec->shape[i+1];
+    }
     int total = Data_total(data);
     vec->data = Data_create(data->dimension, data->shape);
-    if (!vec->data) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->data) { free(vec->strides); free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
     memcpy(vec->data->data, data->data, total * sizeof(double));
     vec->owner = NULL;
     vec->start = start;
-    vec->end = Data_total(vec->data);
     vec->p = 0;
-    vec->cache = (vec->dimension > 1) ? _multiple_chain(vec->shape + 1, vec->dimension - 1) : 1;
     Data_free(data);
     vec->flags = VECTOR_FLAG_OWNED;
     // tp_alloc already tracks GC objects in Python 3.14
@@ -2581,6 +2587,125 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
 }
 
 /* ------------------------------------------------------------------
+VectorChainCompute native type (replaces PyRun_String Python closure)
+------------------------------------------------------------------ */
+typedef struct {
+    PyObject_HEAD
+    PyObject *a;
+} VectorChainComputeObject;
+
+static void VectorChainCompute_dealloc(VectorChainComputeObject *self) {
+    Py_XDECREF(self->a);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+// compute method: returns tuple of dot products
+static PyObject* VectorChainCompute_compute(VectorChainComputeObject *self, PyObject *vector) {
+    PyObject *a = self->a;
+    if (!a || !vector) {
+        PyErr_SetString(PyExc_ValueError, "Invalid state");
+        return NULL;
+    }
+    Py_ssize_t leng = PyObject_Length(a);
+    if (leng < 0) return NULL;
+    PyObject *result = PyTuple_New(leng);
+    if (!result) return NULL;
+
+    for (Py_ssize_t i = 0; i < leng; i++) {
+        PyObject *row = PySequence_GetItem(a, i);
+        if (!row) { Py_DECREF(result); return NULL; }
+        PyObject *vec_iter = PyObject_GetIter(vector);
+        PyObject *row_iter = PyObject_GetIter(row);
+        if (!vec_iter || !row_iter) {
+            Py_XDECREF(vec_iter); Py_XDECREF(row_iter); Py_DECREF(row);
+            Py_DECREF(result);
+            return NULL;
+        }
+        double dot = 0.0;
+        PyObject *v_item, *r_item;
+        while ((v_item = PyIter_Next(vec_iter)) && (r_item = PyIter_Next(row_iter))) {
+            double v = PyFloat_AsDouble(v_item);
+            double r = PyFloat_AsDouble(r_item);
+            dot += v * r;
+            Py_DECREF(v_item); Py_DECREF(r_item);
+        }
+        Py_XDECREF(v_item); Py_XDECREF(r_item);
+        Py_DECREF(vec_iter); Py_DECREF(row_iter);
+        Py_DECREF(row);
+        if (PyErr_Occurred()) { Py_DECREF(result); return NULL; }
+        PyTuple_SET_ITEM(result, i, PyFloat_FromDouble(dot));
+    }
+    return result;
+}
+
+// fix method: update internal a state
+static PyObject* VectorChainCompute_fix(VectorChainComputeObject *self, PyObject *new_a) {
+    PyObject *tmp = self->a;
+    Py_INCREF(new_a);
+    self->a = new_a;
+    Py_XDECREF(tmp);
+    Py_RETURN_NONE;
+}
+
+// get method: return current a
+static PyObject* VectorChainCompute_get(VectorChainComputeObject *self, PyObject *args) {
+    if (self->a) {
+        Py_INCREF(self->a);
+        return self->a;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef VectorChainCompute_methods[] = {
+    {"compute", (PyCFunction)VectorChainCompute_compute, METH_O,
+     "Compute dot products between input vector and each row of internal state."},
+    {"fix", (PyCFunction)VectorChainCompute_fix, METH_O,
+     "Update internal state to new value."},
+    {"get", (PyCFunction)VectorChainCompute_get, METH_NOARGS,
+     "Return current internal state."},
+    {NULL}
+};
+
+static PyTypeObject VectorChainComputeType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "cos_comparison_pydll.VectorChainCompute",
+    .tp_basicsize = sizeof(VectorChainComputeObject),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor)VectorChainCompute_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Native chain compute state object",
+    .tp_methods = VectorChainCompute_methods,
+    .tp_new = PyType_GenericNew,
+};
+
+// vector_chain_compute factory function
+static PyMethodDef vcc_compute_def = {"compute", (PyCFunction)VectorChainCompute_compute, METH_O, NULL};
+static PyMethodDef vcc_fix_def = {"fix", (PyCFunction)VectorChainCompute_fix, METH_O, NULL};
+static PyMethodDef vcc_get_def = {"get", (PyCFunction)VectorChainCompute_get, METH_NOARGS, NULL};
+
+static PyObject* py_vector_chain_compute(PyObject *self, PyObject *A) {
+    if (PyType_Ready(&VectorChainComputeType) < 0) return NULL;
+    VectorChainComputeObject *obj = PyObject_New(VectorChainComputeObject, &VectorChainComputeType);
+    if (!obj) return NULL;
+    obj->a = A;
+    Py_INCREF(A);
+
+    // Create bound C functions directly (no need to fetch from tp_dict)
+    PyObject *compute = PyCFunction_New(&vcc_compute_def, (PyObject*)obj);
+    PyObject *fix = PyCFunction_New(&vcc_fix_def, (PyObject*)obj);
+    PyObject *get = PyCFunction_New(&vcc_get_def, (PyObject*)obj);
+    if (!compute || !fix || !get) {
+        Py_XDECREF(compute); Py_XDECREF(fix); Py_XDECREF(get);
+        Py_DECREF(obj);
+        return NULL;
+    }
+    PyObject *result = PyTuple_Pack(3, compute, fix, get);
+    Py_DECREF(compute); Py_DECREF(fix); Py_DECREF(get);
+    Py_DECREF(obj);
+    return result;
+}
+
+/* ------------------------------------------------------------------
 Method table
 ------------------------------------------------------------------ */
 static PyMethodDef methods[] = {
@@ -2642,6 +2767,8 @@ static PyMethodDef methods[] = {
         "Local mean (4D alias)."},
     {"local_variance", (PyCFunction)py_local_variance, METH_VARARGS | METH_KEYWORDS,
         "Compute local variance."},
+    {"vector_chain_compute", (PyCFunction)py_vector_chain_compute, METH_O,
+        "Create chain compute state, returns (compute, fix, get) tuple."},
     {"local_variance_1d", (PyCFunction)py_local_variance, METH_VARARGS | METH_KEYWORDS,
         "Local variance (1D alias)."},
     {"local_variance_2d", (PyCFunction)py_local_variance, METH_VARARGS | METH_KEYWORDS,
@@ -2735,22 +2862,25 @@ PyMODINIT_FUNC PyInit_cos_comparison_pydll(void) {
         return NULL;
     }
 
-    // Add vector_chain_compute (pure Python utility, behavior matches pure Python exactly)
-    const char *vcc_code =
-        "def vector_chain_compute(A):\n"
-        "    a = A\n"
-        "    def compute(vector):\n"
-        "        nonlocal a\n"
-        "        leng = len(a)\n"
-        "        return (sum((m*n for m,n in zip(vector,a[i]))) for i in range(leng))\n"
-        "    def fix(new):\n"
-        "        nonlocal a\n"
-        "        a = new\n"
-        "    def get():\n"
-        "        return a\n"
-        "    return compute, fix, get\n";
-    PyObject *module_dict = PyModule_GetDict(module);
-    if (PyRun_String(vcc_code, Py_file_input, module_dict, module_dict) == NULL) {
+    // Register VectorChainCompute native type
+    if (PyType_Ready(&VectorChainComputeType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+
+    // Add __all__ (public API list, matches pure Python backend)
+    PyObject *__all__ = Py_BuildValue("[sssssssssssssssssss]",
+        "NaN", "sqrt", "multiple_chain", "add_chain", "create_void_list",
+        "load_as_default_data", "get_item", "set_item", "_cos", "_mod", "_cosmod",
+        "no_done", "cos_comparison_passive", "cos_comparison_active", "cos",
+        "mean_local", "variance_local", "vector_chain_compute", "private_dict"
+    );
+    if (!__all__) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddObject(module, "__all__", __all__) < 0) {
+        Py_DECREF(__all__);
         Py_DECREF(module);
         return NULL;
     }

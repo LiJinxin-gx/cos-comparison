@@ -1015,7 +1015,7 @@ def load_as_default_data(data, start=None, shape=None):
 
     # Create tensor: note that the underlying vector is a copy of the region,
     # so start is 0 for the new tensor's own vector, shape is the requested region shape
-    return vector_map_as_tensor(vector, shape, start=0, end=total_elements, p=0, cache=None)
+    return vector_map_as_tensor(vector, shape, start=0, p=0)
 
 def get_item(obj, index):
     """Get item from nested list with multi-dimensional index."""
@@ -1057,132 +1057,177 @@ class default_contain:
         return self.default_dict.get(index, self.default)
 
 class vector_map_as_tensor:
-    __slots__ = ("vector", "tensor_size", "dimension", "start", "end", "p", "cache")
-    def __init__(self, vector, tensor_size, start=0, end=None, p=0, cache=None):
+    __slots__ = ("vector", "shape", "strides", "start", "p")
+    def __init__(self, vector, shape, start=0, p=0, strides=None):
         self.vector = vector
-        self.tensor_size = tensor_size
-        self.dimension = len(tensor_size)
+        self.shape = tuple(shape)
         self.start = start
-        self.end = len(vector) if end is None else end
         self.p = p
-        self.cache = multiple_chain(tensor_size[p+1:]) if cache is None else cache
+        # Precompute strides once at creation
+        if strides is None:
+            ndim = len(self.shape)
+            strides = [1] * ndim
+            for i in range(ndim - 2, -1, -1):
+                strides[i] = strides[i+1] * self.shape[i+1]
+            self.strides = tuple(strides)
+        else:
+            self.strides = tuple(strides)
+
+    @property
+    def dimension(self):
+        return len(self.shape)
+
+    @property
+    def end(self):
+        return self.start + self.shape[self.p] * self.strides[self.p]
+
+    @property
+    def tensor_size(self):
+        # Backward compatibility alias
+        return self.shape
+
+    @property
+    def cache(self):
+        # Backward compatibility alias
+        return self.strides[self.p]
+
     def __repr__(self):
-        return f"<vector_map_as_tensor: dim={len(self.tensor_size)-self.p}, start={self.start}, end={self.end}, p={self.p}, cache={self.cache}>"
+        return f"<vector_map_as_tensor: dim={len(self.shape)-self.p}, start={self.start}, end={self.end}, p={self.p}>"
 
     def __getitem__(self, index):
-        # Handle tuple of integers
-        if isinstance(index, tuple) and all(isinstance(i, int) for i in index):
-            return self.__get_item__(*index)
+        # Handle tuple of indices (int/slice mix)
+        if isinstance(index, tuple):
+            obj = self
+            for i, idx in enumerate(index):
+                if isinstance(idx, slice):
+                    if i != len(index) - 1:
+                        raise IndexError("slice can only be the last index")
+                    return obj[idx]
+                obj = obj[idx]
+            return obj
+
         # Handle single slice
         if isinstance(index, slice):
-            length = self.tensor_size[self.p]
+            length = self.shape[self.p]
             start, stop, step = index.indices(length)
             if step != 1:
                 raise NotImplementedError("step != 1 not supported for slice")
-            new_start = self.start + start * self.cache
-            new_end = self.start + stop * self.cache
-            new_size = list(self.tensor_size)
-            new_size[self.p] = stop - start
-            new_size = tuple(new_size)
-            return self.__class__(vector=self.vector, tensor_size=new_size, start=new_start, end=new_end, p=self.p, cache=self.cache)
+            new_start = self.start + start * self.strides[self.p]
+            new_shape = list(self.shape)
+            new_shape[self.p] = stop - start
+            return self.__class__(vector=self.vector, shape=tuple(new_shape),
+                                  start=new_start, p=self.p, strides=self.strides)
+
         # Handle single integer
         if isinstance(index, int):
             if index < 0:
-                index += self.tensor_size[self.p]
+                index += self.shape[self.p]
             new_p = self.p + 1
-            new_start = self.start + index * self.cache
-            if new_p == self.dimension:
+            new_start = self.start + index * self.strides[self.p]
+            if new_p == len(self.shape):
                 return self.vector[new_start]
-            new_cache = multiple_chain(self.tensor_size[new_p+1:]) if new_p < self.dimension -1 else 1
-            return self.__class__(self.vector, self.tensor_size, start=new_start, end=new_start + self.cache, p=new_p, cache=new_cache)
+            return self.__class__(vector=self.vector, shape=self.shape,
+                                  start=new_start, p=new_p, strides=self.strides)
         raise TypeError(f"Invalid index type: {type(index)}")
 
     def __setitem__(self, key, value):
-        if isinstance(key, tuple) and all(isinstance(i, int) for i in key):
+        # Handle tuple of indices (int/slice mix)
+        if isinstance(key, tuple):
+            obj = self
+            for i, idx in enumerate(key):
+                if isinstance(idx, slice):
+                    if i != len(key) - 1:
+                        raise IndexError("slice can only be the last index")
+                    obj[idx] = value
+                    return
+                obj = obj[idx]
+            # All int indices: set scalar
             idx = self.start
             for i, dim_i in enumerate(key):
-                stride = multiple_chain(self.tensor_size[self.p + i + 1:]) if self.p + i < self.dimension -1 else 1
-                idx += dim_i * stride
+                idx += dim_i * self.strides[self.p + i]
             self.vector[idx] = value
             return
+
         if isinstance(key, slice):
-            if self.p != self.dimension - 1:
+            if self.p != len(self.shape) - 1:
                 raise IndexError("Slice assignment only allowed at leaf dimension")
-            length = self.tensor_size[self.p]
+            length = self.shape[self.p]
             start, stop, step = key.indices(length)
             if step != 1:
                 raise NotImplementedError("step != 1 not supported for slice assignment")
             count = stop - start
-            start_idx = start
+            start_idx = self.start + start * self.strides[self.p]
+            stride = self.strides[self.p]
             # Scalar assignment
             if isinstance(value, (int, float)):
                 for i in range(count):
-                    self.vector[self.start + (start_idx + i) * self.cache] = value
+                    self.vector[start_idx + i * stride] = value
                 return
             # List/tuple assignment
             if isinstance(value, (list, tuple)):
                 if len(value) != count:
                     raise ValueError("length of sequence does not match slice length")
                 for i in range(count):
-                    self.vector[self.start + (start_idx + i) * self.cache] = value[i]
+                    self.vector[start_idx + i * stride] = value[i]
                 return
             # Vector assignment
             if isinstance(value, vector_map_as_tensor):
                 if value.end - value.start != count:
                     raise ValueError("length of Vector does not match slice length")
+                val_stride = value.strides[value.p]
                 for i in range(count):
-                    self.vector[self.start + (start_idx + i) * self.cache] = value.vector[value.start + i]
+                    self.vector[start_idx + i * stride] = value.vector[value.start + i * val_stride]
                 return
-            # Buffer protocol support (array.array, memoryview, numpy arrays, etc.)
+            # Buffer protocol support
             if hasattr(value, '__buffer__'):
-                # Try to get as array of doubles
-                try:
-                    mv = memoryview(value)
-                    # If already double format, use directly; else cast from bytes
+                mv = memoryview(value)
+                if mv.format in ('d', 'B') and mv.itemsize in (8, 1):
                     if mv.format == 'd' and mv.itemsize == 8:
                         buf = mv
                     else:
-                        buf = mv.cast('d')
+                        buf = mv.cast('B')
                     if len(buf) != count:
                         raise ValueError("buffer length does not match slice length")
                     for i in range(count):
-                        self.vector[self.start + (start_idx + i) * self.cache] = buf[i]
+                        self.vector[start_idx + i * stride] = buf[i]
+                    return
+                try:
+                    buf = mv.cast('d')
+                    if len(buf) != count:
+                        raise ValueError("buffer length does not match slice length")
+                    for i in range(count):
+                        self.vector[start_idx + i * stride] = buf[i]
                     return
                 except (TypeError, ValueError):
                     pass
             raise TypeError("value must be scalar, sequence, Vector, or buffer-like object")
+
         if isinstance(key, int):
             if key < 0:
-                key += self.tensor_size[self.p]
-            if self.p == self.dimension - 1:
-                self.vector[self.start + key] = value
+                key += self.shape[self.p]
+            if self.p == len(self.shape) - 1:
+                self.vector[self.start + key * self.strides[self.p]] = value
                 return
-            raise NotImplementedError("sub-tensor assignment not supported")
+            raise IndexError("not enough indices for assignment")
         raise TypeError(f"Invalid index type: {type(key)}")
 
     def __get_item__(self, *indexs):
-        if len(indexs) != self.dimension - self.p:
-            raise IndexError(f"expected {self.dimension - self.p} indices, got {len(indexs)}")
+        ndim = len(self.shape) - self.p
+        if len(indexs) != ndim:
+            raise IndexError(f"expected {ndim} indices, got {len(indexs)}")
         idx = self.start
         for i, dim_i in enumerate(indexs):
-            stride = multiple_chain(self.tensor_size[self.p + i + 1:]) if self.p + i < self.dimension -1 else 1
-            idx += dim_i * stride
+            idx += dim_i * self.strides[self.p + i]
         return self.vector[idx]
 
     def __set_item__(self, indexs, value):
-        p = self.p
-        remaining = len(self.tensor_size) - p
+        remaining = len(self.shape) - self.p
         if len(indexs) == remaining:
             ptr = self.start
-            cache = self.cache
             for i, idx in enumerate(indexs):
-                ptr += idx * cache
-                if i < remaining - 1:
-                    cache //= self.tensor_size[p + i]
+                ptr += idx * self.strides[self.p + i]
             self.vector[ptr] = value
-        elif len(indexs) == 0:
-            return
-        else:
+        elif len(indexs) != 0:
             raise IndexError("It was given some effectless index.")
 
     def __iter__(self):
@@ -1190,77 +1235,142 @@ class vector_map_as_tensor:
             yield self[i]
 
     def __len__(self):
-        return self.tensor_size[self.p]
+        return self.shape[self.p]
 
     def _check_shape(self, other):
-        if self.dimension != other.dimension or self.tensor_size != other.tensor_size:
+        if not isinstance(other, vector_map_as_tensor):
+            raise TypeError("It can not compute with other type.")
+        if self.shape != other.shape:
             raise ValueError("the shape of two tensors are not same.")
+        if self.p != other.p:
+            raise ValueError("the current depths are not same.")
 
+    # ---------- binary arithmetic ----------
     def __add__(self, other):
-        if not isinstance(other, vector_map_as_tensor):
-            raise TypeError("operands must be vector_map_as_tensor")
-        self._check_shape(other)
-        result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-        for i in range(self.end - self.start):
-            result.vector[i] = self.vector[self.start + i] + other.vector[other.start + i]
-        return result
-
-    def __sub__(self, other):
-        if not isinstance(other, vector_map_as_tensor):
-            raise TypeError("operands must be vector_map_as_tensor")
-        self._check_shape(other)
-        result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-        for i in range(self.end - self.start):
-            result.vector[i] = self.vector[self.start + i] - other.vector[other.start + i]
-        return result
-
-    def __mul__(self, other):
-        if isinstance(other, (int, float)):
-            result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-            for i in range(self.end - self.start):
-                result.vector[i] = self.vector[self.start + i] * other
-            return result
         if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
-            result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] + other.vector[other.start + i]
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        elif isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] + other
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for +")
+    
+    def __radd__(self, other):
+        return self.__add__(other)
+    
+    def __iadd__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
             for i in range(self.end - self.start):
-                result.vector[i] = self.vector[self.start + i] * other.vector[other.start + i]
-            return result
-        raise TypeError("unsupported operand type(s) for *")
+                self.vector[self.start + i] += other.vector[other.start + i]
+            return self
+        if isinstance(other, (int, float)):
+            for i in range(self.end - self.start):
+                self.vector[self.start + i] += other
+            return self
+        raise TypeError("unsupported operand type(s) for +=")
 
+    def __sub__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] - other.vector[other.start + i]
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        elif isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] - other
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for -")
+    
+    def __rsub__(self, other):
+        if isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = other - self.vector[self.start + i]
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for -")
+
+    def __mul__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] * other.vector[other.start + i]
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        elif isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] * other
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for *")
+    
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __truediv__(self, other):
-        if isinstance(other, (int, float)):
-            if other == 0:
-                raise ZeroDivisionError("division by zero")
-            result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-            for i in range(self.end - self.start):
-                result.vector[i] = self.vector[self.start + i] / other
-            return result
         if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
-            result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-            for i in range(self.end - self.start):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
                 b = other.vector[other.start + i]
                 if b == 0:
                     raise ZeroDivisionError("division by zero")
-                result.vector[i] = self.vector[self.start + i] / b
-            return result
+                new_vec[i] = self.vector[self.start + i] / b
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        elif isinstance(other, (int, float)):
+            if other == 0:
+                raise ZeroDivisionError("division by zero")
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] / other
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for /")
+    
+    def __rtruediv__(self, other):
+        if isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                b = self.vector[self.start + i]
+                if b == 0:
+                    raise ZeroDivisionError("division by zero")
+                new_vec[i] = other / b
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
         raise TypeError("unsupported operand type(s) for /")
 
-    def __iadd__(self, other):
-        if not isinstance(other, vector_map_as_tensor):
-            raise TypeError("operands must be vector_map_as_tensor")
-        self._check_shape(other)
-        for i in range(self.end - self.start):
-            self.vector[self.start + i] += other.vector[other.start + i]
-        return self
+    def __pow__(self, other):
+        if isinstance(other, vector_map_as_tensor):
+            self._check_shape(other)
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other.vector[other.start + i]
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        elif isinstance(other, (int, float)):
+            total = self.end - self.start
+            new_vec = [0.0] * total
+            for i in range(total):
+                new_vec[i] = self.vector[self.start + i] ** other
+            return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
+        raise TypeError("unsupported operand type(s) for **")
 
     def __isub__(self, other):
-        if not isinstance(other, vector_map_as_tensor):
-            raise TypeError("operands must be vector_map_as_tensor")
         self._check_shape(other)
         for i in range(self.end - self.start):
             self.vector[self.start + i] -= other.vector[other.start + i]
@@ -1295,26 +1405,6 @@ class vector_map_as_tensor:
             return self
         raise TypeError("unsupported operand type(s) for /=")
 
-    def __pow__(self, other):
-        if isinstance(other, vector_map_as_tensor):
-            self._check_shape(other)
-            total = 1
-            for s in self.tensor_size:
-                total *= s
-            new_vec = (c_double * total)()
-            for i in range(total):
-                new_vec[i] = self.vector[self.start + i] ** other.vector[other.start + i]
-            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
-        elif isinstance(other, (int, float)):
-            total = 1
-            for s in self.tensor_size:
-                total *= s
-            new_vec = (c_double * total)()
-            for i in range(total):
-                new_vec[i] = self.vector[self.start + i] ** other
-            return self.__class__(vector=new_vec, tensor_size=self.tensor_size, start=0, end=total, p=0, cache=None)
-        raise TypeError("unsupported operand type(s) for **")
-
     def __ipow__(self, other):
         if isinstance(other, vector_map_as_tensor):
             self._check_shape(other)
@@ -1327,30 +1417,33 @@ class vector_map_as_tensor:
             return self
         raise TypeError("unsupported operand type(s) for **=")
 
+    # ---------- unary arithmetic ----------
     def __neg__(self):
-        result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-        for i in range(self.end - self.start):
-            result.vector[i] = -self.vector[self.start + i]
-        return result
+        total = self.end - self.start
+        new_vec = [0.0] * total
+        for i in range(total):
+            new_vec[i] = -self.vector[self.start + i]
+        return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
 
     def __pos__(self):
-        result = self.__class__([0.0]*(self.end - self.start), self.tensor_size[self.p:], start=0, end=self.end-self.start, p=0, cache=None)
-        for i in range(self.end - self.start):
-            result.vector[i] = self.vector[self.start + i]
-        return result
+        total = self.end - self.start
+        new_vec = [0.0] * total
+        for i in range(total):
+            new_vec[i] = self.vector[self.start + i]
+        return self.__class__(vector=new_vec, shape=self.shape[self.p:], start=0, p=0)
 
     def __abs__(self):
-        total = 0.0
+        square_sum = 0.0
         for i in range(self.end - self.start):
             val = self.vector[self.start + i]
-            total += val * val
-        return total ** 0.5
+            square_sum += val * val
+        return sqrt(square_sum)
 
     def mean(self):
         count = self.end - self.start
         if count == 0:
             return None
-        # Welford's online algorithm for numerically stable mean
+        # Welford's online algorithm
         mean = 0.0
         for i in range(count):
             val = self.vector[self.start + i]
@@ -1362,7 +1455,7 @@ class vector_map_as_tensor:
         count = self.end - self.start
         if count == 0:
             return None
-        # Welford's online algorithm for numerically stable variance
+        # Welford's online algorithm
         mean = 0.0
         M2 = 0.0
         for i in range(count):
@@ -1385,7 +1478,7 @@ def vector_chain_compute(A):
     def compute(vector):
         nonlocal a
         leng = len(a)
-        return (sum((m*n for m,n in zip(vector,a[i]))) for i in range(leng))
+        return tuple(sum(m*n for m,n in zip(vector, a[i])) for i in range(leng))
     def fix(new):
         nonlocal a
         a = new
@@ -1403,7 +1496,7 @@ private_dict = {
 
 # ---------- expose the public API ----------
 __all__ = [
-    'NaN', 'sqrt',
+    'NaN', 'sqrt', '_cos', '_mod', '_cosmod',
     'cos_comparison_passive', 'cos_comparison_passive_1d', 'cos_comparison_passive_2d', 'cos_comparison_passive_3d', 'cos_comparison_passive_4d',
     'cos_comparison_active', 'cos_comparison_active_1d', 'cos_comparison_active_2d', 'cos_comparison_active_3d', 'cos_comparison_active_4d',
     'cos', 'cos_1d', 'cos_2d', 'cos_3d', 'cos_4d',

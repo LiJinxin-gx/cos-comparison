@@ -1,3 +1,7 @@
+"""
+Testing and debugging utilities.
+Provides Timer class for performance benchmarking and other development helpers.
+"""
 #It gives basic tools to debug.
 
 #--------- import ----------

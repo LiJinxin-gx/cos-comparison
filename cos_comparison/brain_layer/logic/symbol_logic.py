@@ -1,3 +1,7 @@
+"""
+Symbolic logic system for cognitive reasoning.
+Implements three-valued logic, atomic propositions, variables and logical inference primitives.
+"""
 # It provides symbol logic ability.
 
 #-------- import --------

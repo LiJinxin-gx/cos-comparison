@@ -1,3 +1,7 @@
+"""
+Sense layer: sensory receptor classes for external data input.
+Implements Data and Auto_Data classes that wrap core tensors with multi-thread/multi-process parallel processing support.
+"""
 # It give a tool to recept data.
 
 from abc import ABC

@@ -11,7 +11,7 @@ command = os.system
 getpid = os.getpid
 getppid = os.getppid
 home_executable = sys.executable
-
+kill = os.kill
 
 # ------ process interaction ------
 class BaseProcess(subprocess.Popen):

@@ -25,7 +25,7 @@ class Trigger:
     def exec(self):
         try:
             s = self.stack
-            self.stack[self.b_res_index] = self.callback(*(s[i] for i in self.args_index),**{a:s[b] for a,b in selfkwargs_index})
+            self.stack[self.b_res_index] = self.callback(*(s[i] for i in self.args_index),**{a:s[b] for a,b in self.kwargs_index})
             return 0
         except:
             return 1

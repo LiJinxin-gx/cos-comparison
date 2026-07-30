@@ -1,3 +1,7 @@
+"""
+Probabilistic logic system for uncertain reasoning.
+Implements event classes, probability operations and Bayesian inference primitives.
+"""
 #It gives some tools to deal with probability.
 
 #----------- event class -----------
