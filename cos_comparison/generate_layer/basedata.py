@@ -16,12 +16,12 @@ class DataBase(core.vector_map_as_tensor):
             if func(temp):
                 yield temp
     def filter(self,func):
-        return tuple(self.filter_s())
+        return tuple(self.filter_s(func))
     
-    def point(self,index,vaule):
+    def point(self,index,value):
         self.__set_item__(index,value)
         
     def comparison_passive(self,*arg,**kwarg):
-        core.cos_comparison_passive(self,*arg,**kwarg)
+        return core.cos_comparison_passive(self,*arg,**kwarg)
     def comparison_active(self,*arg,**kwarg):
-        core.cos_comparison_active(self,*arg,**kwarg)
+        return core.cos_comparison_active(self,*arg,**kwarg)

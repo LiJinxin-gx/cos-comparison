@@ -18,7 +18,7 @@ class BaseMemory(ABC):
         pass
 
 class Memory(BaseMemory):
-    __slots__ = ("memory","save_func","commit_func", "refer_func","close_func")
+    __slots__ = ("memory","init_func","save_func","commit_func", "refer_func","close_func")
     def __init__(self,memory,
                  init_func=None,
                  save_func=None,
@@ -33,11 +33,11 @@ class Memory(BaseMemory):
         self.close_func = close_func if close_func  else no_done
     def initialize(self,*args,**kwargs):
         return self.init_func(self,*args,**kwargs)
-    def save(self,*args,**kwarg):
-        return self.save_func(*args,**kwargs)
+    def save(self,*args,**kwargs):
+        return self.save_func(self,*args,**kwargs)
     def commit(self,*args,**kwargs):
-        return self.commit_func(*args,**kwargs)
+        return self.commit_func(self,*args,**kwargs)
     def refer(self,*args,**kwargs):
-        return self.refer_func(*args,**kwargs)
-    def refer(self,*args,**kwargs):
-        return self.refer_func(*args,**kwargs)
+        return self.refer_func(self,*args,**kwargs)
+    def close(self,*args,**kwargs):
+        return self.close_func(self,*args,**kwargs)

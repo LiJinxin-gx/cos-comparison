@@ -8,7 +8,11 @@ class DatabaseMemory(Memory):
     def __init__(self,database=":memory:"):
         memory = sqlite3.connect(database)
         super().__init__(memory)
-        self.initize()
+        self.initialize()
+    def __enter__(self):
+        return self
+    def __exit__(self,exc_type,exc_val,exc_tb):
+        self.close()
     def initialize(self):
         self.cursor = self.memory.cursor()
     def commit(self):
