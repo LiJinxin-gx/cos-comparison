@@ -17,6 +17,12 @@ class DatabaseMemory(Memory):
         self.cursor = self.memory.cursor()
     def commit(self):
         self.memory.commit()
+    def roolback(self):
+        self.memory.roolback()
     def close(self):
         self.cursor.close()
         self.memory.close()
+    def execute(self,command,arg=()):
+        self.memory.execute(command,arg)
+    def execute(self,command,args=()):
+        self.memory.executemany(command,args)

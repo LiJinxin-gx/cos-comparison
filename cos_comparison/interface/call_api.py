@@ -9,12 +9,19 @@ class BaseCallContainer(ABC):
     __slots__ = ("container",)
     def __init__(self,obj):
         self.container = obj
-    def call(self,name,args=(),kwargs=None):
-        # It does not use "__getattr__",because it will cause bugs while get inner attribute like "container".
+    def call(self,name,args=(),kwargs=None,init_func=None):
+        # It does not use "__getattr__",because it will cause bugs while get inner attribute such as "container".
         kwargs= kwargs if kwargs else {}
-        return getattr(self.container,name)(*args,**kwargs)
+        return self.get_call(name,init_func=init_func)(*args,**kwargs)
+    def get_call(self,name,init_func=None):
+        if init_func:
+            return init_func(getattr(self.container,name))
+        else:
+            return getattr(self.container,name)
     def get(self,name):
         return getattr(self.container,name)
+    def set(self,name,value):
+        return setattr(self.container,name,value)
 
 class Module_CallContain(BaseCallContainer):
     def __init__(self,module_name,*args,package=None,**kwarg):
@@ -28,6 +35,13 @@ class C_CallContainer(BaseCallContainer):
 class CDLL_CallContainer(C_CallContainer):
     def __init__(self, library_path, *args, **kwargs):
         super().__init__(library_path, ctypes.CDLL, *args, **kwargs)
+    def get_call(self,name,argstype=(),restype=None,init_func):
+        caller = super().get_call(name,init_func=init_func)
+        caller.argstype = argstype
+        caller.restype = restype
+        return caller
+    def call(self,name,args=()):
+        return super().call(name,args=args)
 
 class WinDLL_CallContainer(C_CallContainer):
     def __init__(self, library_path, *args, **kwargs):

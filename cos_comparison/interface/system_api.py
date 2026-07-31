@@ -7,7 +7,11 @@ import threading
 import subprocess
 
 # ------- system -------
-command = os.system
+def command(commands):
+    obj = subprocess.Popen(commands,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    out,err = obj.communicate()
+    return out,err,obj.returncode
+
 getpid = os.getpid
 getppid = os.getppid
 home_executable = sys.executable

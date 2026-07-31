@@ -87,13 +87,13 @@ Helper: nested list / Vector → Data
 static Data* _pyobj_to_data(PyObject *obj) {
     if (PyObject_IsInstance(obj, (PyObject*)&VectorizeType)) {
         Vector *v = (Vector*)obj;
-        int ndim = v->dimension - v->p;
+        int ndim = v->dimension;
         Data *data = (Data*)calloc(1, sizeof(Data));
         if (!data) { PyErr_NoMemory(); return NULL; }
         data->dimension = ndim;
         data->shape = (int*)malloc(ndim * sizeof(int));
         if (!data->shape) { free(data); PyErr_NoMemory(); return NULL; }
-        memcpy(data->shape, v->shape + v->p, ndim * sizeof(int));
+        memcpy(data->shape, v->shape, ndim * sizeof(int));
         data->strides = (int*)malloc(ndim * sizeof(int));
         if (!data->strides) { free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
         int stride = 1;
@@ -102,18 +102,37 @@ static Data* _pyobj_to_data(PyObject *obj) {
             stride *= data->shape[i];
         }
         int total = stride;
-        if (v->p == 0 && v->start == 0 && total == Data_total(v->data)) {
-            /* Full tensor: share data directly (zero-copy) */
-            data->data = v->data->data;
-            data->owns_data = 0;
-        } else {
-            /* Partial view: copy data */
-            size_t elem_size = (v->data->dtype == 1) ? sizeof(unsigned char) : sizeof(double);
-            data->data = (double*)malloc(total * elem_size);
-            if (!data->data) { free(data->strides); free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
-            memcpy(data->data, (char*)v->data->data + v->start * elem_size, total * elem_size);
-            data->owns_data = 1;
+        /* Always copy data to ensure contiguous, handles non-contiguous views */
+        data->data = (double*)malloc(total * sizeof(double));
+        if (!data->data) { free(data->strides); free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
+        data->owns_data = 1;
+        /* Iterate all elements with carry method */
+        int *indices = (int*)malloc(total * sizeof(int));
+        if (!indices) { Data_free(data); return NULL; }
+        int *idx = (int*)malloc(ndim * sizeof(int));
+        memset(idx, 0, ndim * sizeof(int));
+        int pos = 0;
+        while (1) {
+            int flat = v->start + v->offset;
+            for (int i = 0; i < ndim; ++i) {
+                flat += v->strides[i] * (v->start_offset[i] + idx[i] * v->step_offset[i]);
+            }
+            indices[pos++] = flat;
+            int dim = ndim - 1;
+            while (dim >= 0) {
+                idx[dim]++;
+                if (idx[dim] < v->shape[dim]) break;
+                idx[dim] = 0;
+                dim--;
+            }
+            if (dim < 0) break;
         }
+        free(idx);
+        double *dptr = (double*)data->data;
+        for (int i = 0; i < total; ++i) {
+            dptr[i] = ((double*)v->data->data)[indices[i]];
+        }
+        free(indices);
         data->dtype = v->data->dtype;
         return data;
     }
@@ -159,7 +178,14 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
         vec->strides[i] = vec->strides[i+1] * vec->shape[i+1];
     }
     vec->start = 0;
-    vec->p = 0;
+    vec->offset = 0;
+    vec->start_offset = (int*)malloc(data->dimension * sizeof(int));
+    vec->step_offset = (int*)malloc(data->dimension * sizeof(int));
+    for (int i = 0; i < data->dimension; ++i) {
+        vec->start_offset[i] = 0;
+        vec->step_offset[i] = 1;
+    }
+    vec->buf = NULL;
     vec->flags = VECTOR_FLAG_OWNED;
     // tp_alloc already tracks GC objects in Python 3.14, no need to call again
     // PyObject_GC_Track(vec);
@@ -291,7 +317,14 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     memcpy(vec->data->data, data->data, total * sizeof(double));
     vec->owner = NULL;
     vec->start = start;
-    vec->p = 0;
+    vec->offset = 0;
+    vec->start_offset = (int*)malloc(data->dimension * sizeof(int));
+    vec->step_offset = (int*)malloc(data->dimension * sizeof(int));
+    for (int i = 0; i < data->dimension; ++i) {
+        vec->start_offset[i] = 0;
+        vec->step_offset[i] = 1;
+    }
+    vec->buf = NULL;
     Data_free(data);
     vec->flags = VECTOR_FLAG_OWNED;
     // tp_alloc already tracks GC objects in Python 3.14
@@ -1718,7 +1751,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     Data *output_data = NULL;
     if (output_obj && PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
         Vector *v = (Vector*)output_obj;
-        if (v->p == 0) output_data = v->data;
+        output_data = v->data;
     }
 
     int *local_size = NULL; int ls_dim = 0;
@@ -2055,7 +2088,41 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
                                      &return_callback, &release_gil))
         return NULL;
 
-    Data *data = vec->data;
+    /* Create contiguous copy of view data for core computation */
+    Data *contig_data = Data_create(vec->dimension, vec->shape);
+    if (!contig_data) return NULL;
+    int total = 1;
+    for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
+    int *indices = (int*)malloc(total * sizeof(int));
+    if (!indices) { Data_free(contig_data); return PyErr_NoMemory(); }
+    /* Iterate all indices with carry method */
+    {
+        int *idx = (int*)malloc(vec->dimension * sizeof(int));
+        memset(idx, 0, vec->dimension * sizeof(int));
+        int pos = 0;
+        while (1) {
+            int flat = vec->start + vec->offset;
+            for (int i = 0; i < vec->dimension; ++i) {
+                flat += vec->strides[i] * (vec->start_offset[i] + idx[i] * vec->step_offset[i]);
+            }
+            indices[pos++] = flat;
+            int dim = vec->dimension - 1;
+            while (dim >= 0) {
+                idx[dim]++;
+                if (idx[dim] < vec->shape[dim]) break;
+                idx[dim] = 0;
+                dim--;
+            }
+            if (dim < 0) break;
+        }
+        free(idx);
+    }
+    for (int i = 0; i < total; ++i) {
+        Data_set_flat(contig_data, i, Data_get_flat(vec->data, indices[i]));
+    }
+    free(indices);
+    
+    Data *data = contig_data;
     int dim = vec->dimension;
     Data *output_data = NULL;
 
@@ -2310,6 +2377,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     // Free all allocated memory
     free(window_size); free(start); free(end); free(step); free(d);
     free(output_start); free(output_step);
+    Data_free(contig_data);
 
     Py_XDECREF(name_space);
     return py_result;
@@ -2355,7 +2423,41 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
 
     if (!kernel_obj) { PyErr_SetString(PyExc_ValueError, "kernel must be provided for active mode"); return NULL; }
 
-    Data *data = vec->data;
+    /* Create contiguous copy of view data for core computation */
+    Data *contig_data = Data_create(vec->dimension, vec->shape);
+    if (!contig_data) return NULL;
+    int total = 1;
+    for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
+    int *indices = (int*)malloc(total * sizeof(int));
+    if (!indices) { Data_free(contig_data); return PyErr_NoMemory(); }
+    /* Iterate all indices with carry method */
+    {
+        int *idx = (int*)malloc(vec->dimension * sizeof(int));
+        memset(idx, 0, vec->dimension * sizeof(int));
+        int pos = 0;
+        while (1) {
+            int flat = vec->start + vec->offset;
+            for (int i = 0; i < vec->dimension; ++i) {
+                flat += vec->strides[i] * (vec->start_offset[i] + idx[i] * vec->step_offset[i]);
+            }
+            indices[pos++] = flat;
+            int dim = vec->dimension - 1;
+            while (dim >= 0) {
+                idx[dim]++;
+                if (idx[dim] < vec->shape[dim]) break;
+                idx[dim] = 0;
+                dim--;
+            }
+            if (dim < 0) break;
+        }
+        free(idx);
+    }
+    for (int i = 0; i < total; ++i) {
+        Data_set_flat(contig_data, i, Data_get_flat(vec->data, indices[i]));
+    }
+    free(indices);
+    
+    Data *data = contig_data;
     int dim = vec->dimension;
     Data *output_data = NULL;
     Data *kernel = _pyobj_to_data(kernel_obj);
@@ -2581,6 +2683,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     // Free all allocated memory
     Data_free(kernel); free(start); free(end); free(step);
     free(output_start); free(output_step);
+    Data_free(contig_data);
 
     Py_XDECREF(name_space);
     return py_result;
@@ -2869,11 +2972,17 @@ PyMODINIT_FUNC PyInit_cos_comparison_pydll(void) {
     }
 
     // Add __all__ (public API list, matches pure Python backend)
-    PyObject *__all__ = Py_BuildValue("[sssssssssssssssssss]",
-        "NaN", "sqrt", "multiple_chain", "add_chain", "create_void_list",
-        "load_as_default_data", "get_item", "set_item", "_cos", "_mod", "_cosmod",
-        "no_done", "cos_comparison_passive", "cos_comparison_active", "cos",
-        "mean_local", "variance_local", "vector_chain_compute", "private_dict"
+    PyObject *__all__ = Py_BuildValue("[ssssssssssssssssssssssssssssssssssssssssss]",
+        "NaN", "sqrt",
+        "cos_comparison_passive", "cos_comparison_passive_1d", "cos_comparison_passive_2d", "cos_comparison_passive_3d", "cos_comparison_passive_4d",
+        "cos_comparison_active", "cos_comparison_active_1d", "cos_comparison_active_2d", "cos_comparison_active_3d", "cos_comparison_active_4d",
+        "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
+        "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
+        "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
+        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "get_item", "set_item", "_cos", "_mod", "_cosmod",
+        "vector_chain_compute",
+        "vector_map_as_tensor", "func_name_space", "default_contain",
+        "private_dict"
     );
     if (!__all__) {
         Py_DECREF(module);

@@ -1,9 +1,19 @@
 #It provide a base memory class and tool with a rule.
 
 from abc import ABC
+from enum import Flag,auto
 
 def no_done(*args,**kwargs):
     pass
+
+class Status(Flag):
+    READ = auto()
+    WRITE = auto()
+    EXECUTE = auto()
+
+ST_READ = Status.READ
+ST_WRITE = Status.WRITE
+ST_EXECUTE = Status.EXECUTE
 
 class BaseMemory(ABC):
     def initialize(self):
@@ -41,3 +51,7 @@ class Memory(BaseMemory):
         return self.refer_func(self,*args,**kwargs)
     def close(self,*args,**kwargs):
         return self.close_func(self,*args,**kwargs)
+    def process(self,caller=None,args=(),kwargs=None):
+        return caller(self.memory,*args,**kwargs)
+    def call(self,name,args=(),kwargs=None):
+        return getattr(self,name)(*args,**kwargs)

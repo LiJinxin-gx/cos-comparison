@@ -114,7 +114,7 @@ class FileCommunicate(IOCommunicate):
     __slots__ = ()
     def __init__(self,file_path,mode="rb",buffering=-1):
         obj = open(file_path,mode,buffering=buffering)
-        super().__init__(obj=obj,
+        super().__init__(obj=obj,target = obj,
                          reader=lambda target,size=-1 : target.read(size),
                          writer=lambda target,data : target.write(data),
                          closer=lambda target : target.close())
