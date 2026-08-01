@@ -1,6 +1,26 @@
 cos-comparison Project History
 =============================
 
+v0.3.9 (2026-07-31)
+-------------------
+Major indexing architecture upgrade, NumPy-like fancy indexing for all backends:
+- Complete rewrite of vector_map_as_tensor indexing system: replaced old depth-based `p` attribute with modern stride+offset architecture, new properties: `start`, `offset`, `start_offset`, `step_offset`, `strides`
+- Index formula: `flat_idx = start + offset + sum(strides[k] * (start_offset[k] + i_k * step_offset[k]))`
+- Full N-dimensional fancy indexing: supports arbitrary int/slice mixed indices, negative indices, arbitrary step sizes, automatic dimension collapse on integer indexing, matches NumPy indexing semantics
+- All slicing operations create views, no data copying: even non-contiguous step slices share underlying memory, zero copy overhead
+- Correct non-contiguous view support: all arithmetic operations (+-*/**), in-place operations, mean/variance statistics, and core comparison functions correctly handle arbitrary strides and step sizes
+- Iterative carry-based index traversal: 100% recursion-free, no stack overflow even for high-dimensional tensors
+- Enhanced PyBuffer protocol: zero-copy path for double/unsigned char formats, automatic conversion for float/int/short/long/long long formats, improved read/write performance and robustness
+- Further SIMD optimizations: cross-compiler ivdep hints for all linear loops, improved auto-vectorization on MSVC/GCC/Clang
+- Backward compatibility: `p` property remains as read-only returning 0, `end`/`cache`/`tensor_size` properties preserved, all existing code works without modification
+- All three backends updated: pure Python (reference), C extension, and ctypes backends all implement new indexing with 100% behavioral parity
+- Fixed module import errors in skeleton layers (memory_layer, action_layer), all 7 cognitive layers now import cleanly
+- Fixed C extension __all__ export list, all public types (vector_map_as_tensor, func_name_space, default_contain) correctly exported
+- Cleaned up residual old indexing code, removed technical debt, improved code generality and simplicity
+- Dual version (standard GIL / free-threaded Python 3.14) clean build with zero errors and zero warnings
+- Comprehensive testing: basic indexing, slicing, step slices, dimension collapse, view arithmetic, view statistics, setitem, 3D tensors, cross-backend consistency all pass
+- Zero external dependencies, C11 standard compliant, cross-compiler portable (MSVC/GCC/Clang)
+
 v0.3.8 (2026-07-26)
 -------------------
 Stability, portability, performance and LSP compliance patch release:
