@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cos-comparison"
-version = "0.3.7"
+version = "0.3.9"
 description = "Local similarity comparison for feature extraction – biologically inspired, zero‑training edge/pattern detection, multi-backend acceleration."
 readme = "README.md"
 license = "MIT"
