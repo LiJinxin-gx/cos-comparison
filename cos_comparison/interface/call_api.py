@@ -35,7 +35,7 @@ class C_CallContainer(BaseCallContainer):
 class CDLL_CallContainer(C_CallContainer):
     def __init__(self, library_path, *args, **kwargs):
         super().__init__(library_path, ctypes.CDLL, *args, **kwargs)
-    def get_call(self,name,argstype=(),restype=None,init_func):
+    def get_call(self,name,argstype=(),restype=None,init_func=None):
         caller = super().get_call(name,init_func=init_func)
         caller.argstype = argstype
         caller.restype = restype

@@ -22,7 +22,7 @@ class No_limit:
         return True
 
 #------- type supports -------
-class Vabiable:
+class Variable:
     __slots__ = ("name","value")
     def __init__(self,name,value=None):
         self.name = name
@@ -41,7 +41,7 @@ class Atomic_proposition:
         self.verb=verb
         self.objects=objects
         self.adv=adv
-        self.limit=limit if limit is None else No_limit()
+        self.limit=limit if limit is not None else No_limit()
         self.status=status
     def __bool__(self)->bool:
         return bool(self.status & Logic_true)
@@ -91,7 +91,7 @@ class Logic_context:
         logic_bind = tuple(logic_bind)
         n = 0
         for bind in self.binds:
-            if bind[0:2] == tuple(logic_bind):
+            if bind[0:2] == tuple(logic_bind)[0:2]:
                 return self.binds.pop(n)
             n +=1
         return None

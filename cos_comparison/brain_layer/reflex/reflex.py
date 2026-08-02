@@ -9,7 +9,7 @@ class Empty:
 DEVNULL=0 #default vaule to discard some value
 
 class Trigger:
-    __slots__ = ("trigger","callback","stack","res_index","args_index")
+    __slots__ = ("trigger","callback","stack","a_res_index","b_res_index","args_index")
     def __init__(self,
                  trigger,callback,
                  stack=None,

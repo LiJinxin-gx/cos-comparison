@@ -72,7 +72,7 @@ class event_context:
         self.binds = binds if binds else {}
     def __iter__(self):
         for bind in self.binds:
-            yield (*bind,bind[bind])
+            yield (*bind,self.binds[bind])
             
     def add_bind(self,binds): 
         for bind in binds:
