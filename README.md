@@ -37,13 +37,24 @@ This project follows a biologically inspired seven-layer cognitive architecture,
 |-|-|-|-|-|
 |1|`core`|Brainstem / Cerebellum|✅ Production|Low-level local comparison calculation, three-backend acceleration, free-thread support|
 |2|`sense_layer`|Sensory Cortex|🟡 Early Development|Receive external stimuli, extract raw features (Data/Auto_Data classes available)|
-|3|`memory_layer`|Hippocampus / Cerebral Cortex|🔴 Skeleton|Short-term and long-term memory storage|
+|3|`memory_layer`|Hippocampus / Cerebral Cortex|🟡 Early Development|Short-term and long-term memory storage|
 |4|`brain_layer`|Prefrontal Cortex|🟡 Early Development|High-level cognition, logical reasoning (symbolic logic system implemented)|
-|5|`action_layer`|Motor Cortex|🔴 Skeleton|Control action output, interact with environment|
-|6|`generate_layer`|Broca's / Wernicke's Area|🔴 Skeleton|Generate language, images and other high-level outputs|
+|5|`action_layer`|Motor Cortex|🔵 Exploratory Development|Control action output, interact with environment|
+|6|`generate_layer`|Broca's / Wernicke's Area|🔵 Exploratory Development|Generate language, images and other high-level outputs|
 |7|`extension_layer`|Association Cortex|🔴 Skeleton|Extended functions and special capabilities|
 
 > **Note**: Non-core layers are currently in early development and do not affect the stability of the core feature extraction API. The core `cos_comparison.core` module is fully production-ready and follows semantic versioning guarantees. All non-core modules now import without fatal errors as of v0.3.6.
+
+---
+
+## 🚀 What's New in Version 0.3.10
+
+Version 0.3.10 is a enhance verison of v0.3.9,fixing some bugs and bringing some features in top-level module.
+
+* **Top-level module support enhanced**:Enhance the support of top-level ,fixing some bugs.
+* **Transition Period for the Removal of Old Features**:Some old feature will be removed (plan) in v0.4.0 to improve new feature.But it still keep stable as proible.
+
+> **Note**: the project will upgrade to v0.4 ,which maybe has **a litter change** in low-level implementation methods.
 
 ---
 
@@ -131,7 +142,7 @@ Test environment: Windows 11 x64, 18-thread CPU, Python 3.14.6, JIT enabled, MSV
 ```python
 from cos_comparison import core
 
-# Create test data
+# Create test data of default type
 data = core.create_void_list((5,5))
 for i in range(5):
     for j in range(5):
@@ -158,7 +169,8 @@ assert v[1][1] == 123.0
 print(core.get_mode())
 
 # Force pure Python mode for debugging
-core.set_mode("cos_comparison")
+# Note : suggest to add the character "." to show as a relative import
+core.set_mode(".cos_comparison")
 ```
 
 ---
