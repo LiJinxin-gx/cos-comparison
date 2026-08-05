@@ -54,19 +54,6 @@ typedef struct {
     int       flags;          /* internal flags (VECTOR_FLAG_*) */
 } Vector;
 
-/* Backward compatibility helpers */
-static inline int Vector_end(Vector *self) {
-    if (self->dimension == 0) return self->start + self->offset;
-    int last = self->dimension - 1;
-    return self->start + self->offset +
-        (self->start_offset[last] + self->shape[last] * self->step_offset[last]) * self->strides[last];
-}
-static inline int Vector_cache(Vector *self) {
-    if (self->dimension == 0) return 1;
-    int last = self->dimension - 1;
-    return self->strides[last] * self->step_offset[last];
-}
-
 static PyTypeObject VectorizeType;
 
 /* forward declarations */
@@ -113,11 +100,6 @@ static PyObject* Vector_get_strides(Vector *self, void *closure) {
         PyTuple_SET_ITEM(tup, i, PyLong_FromLong(self->strides[i]));
     }
     return tup;
-}
-
-static PyObject* Vector_get_p(Vector *self, void *closure) {
-    /* Backward compatibility: always 0 in new indexing scheme */
-    return PyLong_FromLong(0);
 }
 
 static PyObject* Vector_get_start_offset(Vector *self, void *closure) {
@@ -182,6 +164,8 @@ static PyGetSetDef Vector_getseters[] = {
      "Tuple representing the shape of the current tensor view (backward compatibility alias for shape).", NULL},
     {"shape", (getter)Vector_get_shape, NULL,
      "Tuple representing the shape of the current tensor view.", NULL},
+    {"__shape__", (getter)Vector_get_shape, NULL,
+     "Shape protocol support for fast infer_shape.", NULL},
     {"strides", (getter)Vector_get_strides, NULL,
      "Tuple representing the strides of the current tensor view.", NULL},
     {"start_offset", (getter)Vector_get_start_offset, NULL,
@@ -190,8 +174,6 @@ static PyGetSetDef Vector_getseters[] = {
      "Tuple of per-dimension step sizes.", NULL},
     {"offset", (getter)Vector_get_offset, NULL,
      "Accumulated offset from integer indexing.", NULL},
-    {"p", (getter)Vector_get_p, NULL,
-     "Backward compatibility attribute, always 0.", NULL},
     {"vector", (getter)Vector_get_vector, NULL,
      "Flat list of underlying data (copy, for API compatibility with pure Python backend).", NULL},
     {NULL}  /* Sentinel */
@@ -494,13 +476,12 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     PyObject *start_offset_obj = Py_None;
     PyObject *step_offset_obj = Py_None;
     int start = 0;
-    int p = 0;
     int offset = 0;
     
-    static char *kwlist[] = {"vector", "shape", "start", "p", "strides", "offset", "start_offset", "step_offset", NULL};
+    static char *kwlist[] = {"vector", "shape", "start", "strides", "offset", "start_offset", "step_offset", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OiiiOO", kwlist,
-                                     &vector, &shape_obj, &start, &p, &strides_obj, &offset, &start_offset_obj, &step_offset_obj))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OioOOO", kwlist,
+                                     &vector, &shape_obj, &start, &strides_obj, &offset, &start_offset_obj, &step_offset_obj))
         return -1;
 
     self->flags = 0;
@@ -515,29 +496,19 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         Py_INCREF(self->owner);
         self->flags |= VECTOR_FLAG_VIEW;
         
-        // Backward compatibility: handle old p parameter
-        int new_dim = src->dimension - p;
-        int offset_p = 0;
-        if (p > 0) {
-            for (int i = 0; i < p; ++i) {
-                offset_p += src->strides[i] * (src->start_offset[i] + 0 * src->step_offset[i]);
-            }
-        }
-        self->offset += offset_p;
-        
-        self->shape = (int*)malloc(new_dim * sizeof(int));
-        self->strides = (int*)malloc(new_dim * sizeof(int));
-        self->start_offset = (int*)malloc(new_dim * sizeof(int));
-        self->step_offset = (int*)malloc(new_dim * sizeof(int));
+        self->shape = (int*)malloc(src->dimension * sizeof(int));
+        self->strides = (int*)malloc(src->dimension * sizeof(int));
+        self->start_offset = (int*)malloc(src->dimension * sizeof(int));
+        self->step_offset = (int*)malloc(src->dimension * sizeof(int));
         if (!self->shape || !self->strides || !self->start_offset || !self->step_offset) {
             PyErr_NoMemory();
             return -1;
         }
-        memcpy(self->shape, src->shape + p, new_dim * sizeof(int));
-        memcpy(self->strides, src->strides + p, new_dim * sizeof(int));
-        memcpy(self->start_offset, src->start_offset + p, new_dim * sizeof(int));
-        memcpy(self->step_offset, src->step_offset + p, new_dim * sizeof(int));
-        self->dimension = new_dim;
+        memcpy(self->shape, src->shape, src->dimension * sizeof(int));
+        memcpy(self->strides, src->strides, src->dimension * sizeof(int));
+        memcpy(self->start_offset, src->start_offset, src->dimension * sizeof(int));
+        memcpy(self->step_offset, src->step_offset, src->dimension * sizeof(int));
+        self->dimension = src->dimension;
         self->start = src->start + start;
         return 0;
     }
@@ -662,50 +633,20 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         self->dimension = dim;
         self->start = start;
         
-        // Backward compatibility: handle old p parameter
-        if (p != 0) {
-            int new_dim = dim - p;
-            int *new_shape = (int*)malloc(new_dim * sizeof(int));
-            int *new_strides = (int*)malloc(new_dim * sizeof(int));
-            int *new_so = (int*)malloc(new_dim * sizeof(int));
-            int *new_sto = (int*)malloc(new_dim * sizeof(int));
-            if (!new_shape || !new_strides || !new_so || !new_sto) {
-                PyErr_NoMemory();
-                return -1;
-            }
-            memcpy(new_shape, shape + p, new_dim * sizeof(int));
-            // Allocate and compute strides
-            self->strides = (int*)malloc(dim * sizeof(int));
-            if (!self->strides) { PyErr_NoMemory(); return -1; }
-            self->strides[dim - 1] = 1;
-            for (int i = dim - 2; i >= 0; --i) {
-                self->strides[i] = self->strides[i+1] * self->shape[i+1];
-            }
-            memcpy(new_strides, self->strides + p, new_dim * sizeof(int));
-            free(self->strides);
-            free(shape);
-            for (int i = 0; i < new_dim; ++i) { new_so[i] = 0; new_sto[i] = 1; }
-            self->shape = new_shape;
-            self->strides = new_strides;
-            self->start_offset = new_so;
-            self->step_offset = new_sto;
-            self->dimension = new_dim;
-        } else {
-            // Allocate and compute strides for Vector
-            self->strides = (int*)malloc(dim * sizeof(int));
-            if (!self->strides) { PyErr_NoMemory(); return -1; }
-            self->strides[dim - 1] = 1;
-            for (int i = dim - 2; i >= 0; --i) {
-                self->strides[i] = self->strides[i+1] * self->shape[i+1];
-            }
-            // Allocate and init start/step offsets
-            self->start_offset = (int*)malloc(dim * sizeof(int));
-            self->step_offset = (int*)malloc(dim * sizeof(int));
-            if (!self->start_offset || !self->step_offset) { PyErr_NoMemory(); return -1; }
-            for (int i = 0; i < dim; ++i) {
-                self->start_offset[i] = 0;
-                self->step_offset[i] = 1;
-            }
+        // Allocate and compute strides for Vector
+        self->strides = (int*)malloc(dim * sizeof(int));
+        if (!self->strides) { PyErr_NoMemory(); return -1; }
+        self->strides[dim - 1] = 1;
+        for (int i = dim - 2; i >= 0; --i) {
+            self->strides[i] = self->strides[i+1] * self->shape[i+1];
+        }
+        // Allocate and init start/step offsets
+        self->start_offset = (int*)malloc(dim * sizeof(int));
+        self->step_offset = (int*)malloc(dim * sizeof(int));
+        if (!self->start_offset || !self->step_offset) { PyErr_NoMemory(); return -1; }
+        for (int i = 0; i < dim; ++i) {
+            self->start_offset[i] = 0;
+            self->step_offset[i] = 1;
         }
         
         // Override strides if provided
@@ -804,51 +745,22 @@ fallback_sequence:
     self->flags |= VECTOR_FLAG_OWNED;
     self->start = start;
     
-    // Backward compatibility: handle old p parameter
-    if (p != 0) {
-        int new_dim = dim - p;
-        int *new_shape = (int*)malloc(new_dim * sizeof(int));
-        int *new_strides = (int*)malloc(new_dim * sizeof(int));
-        int *new_so = (int*)malloc(new_dim * sizeof(int));
-        int *new_sto = (int*)malloc(new_dim * sizeof(int));
-        if (!new_shape || !new_strides || !new_so || !new_sto) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        memcpy(new_shape, shape + p, new_dim * sizeof(int));
-        // Compute full strides first
-        int *full_strides = (int*)malloc(dim * sizeof(int));
-        full_strides[dim - 1] = 1;
-        for (int i = dim - 2; i >= 0; --i) {
-            full_strides[i] = full_strides[i+1] * shape[i+1];
-        }
-        memcpy(new_strides, full_strides + p, new_dim * sizeof(int));
-        free(full_strides);
-        free(shape);
-        for (int i = 0; i < new_dim; ++i) { new_so[i] = 0; new_sto[i] = 1; }
-        self->shape = new_shape;
-        self->strides = new_strides;
-        self->start_offset = new_so;
-        self->step_offset = new_sto;
-        self->dimension = new_dim;
-    } else {
-        self->shape = shape;
-        self->dimension = dim;
-        // Allocate and compute strides
-        self->strides = (int*)malloc(dim * sizeof(int));
-        if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
-        self->strides[dim - 1] = 1;
-        for (int i = dim - 2; i >= 0; --i) {
-            self->strides[i] = self->strides[i+1] * self->shape[i+1];
-        }
-        // Allocate and init offsets
-        self->start_offset = (int*)malloc(dim * sizeof(int));
-        self->step_offset = (int*)malloc(dim * sizeof(int));
-        if (!self->start_offset || !self->step_offset) { Data_free(data); PyErr_NoMemory(); return -1; }
-        for (int i = 0; i < dim; ++i) {
-            self->start_offset[i] = 0;
-            self->step_offset[i] = 1;
-        }
+    self->shape = shape;
+    self->dimension = dim;
+    // Allocate and compute strides
+    self->strides = (int*)malloc(dim * sizeof(int));
+    if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
+    self->strides[dim - 1] = 1;
+    for (int i = dim - 2; i >= 0; --i) {
+        self->strides[i] = self->strides[i+1] * self->shape[i+1];
+    }
+    // Allocate and init offsets
+    self->start_offset = (int*)malloc(dim * sizeof(int));
+    self->step_offset = (int*)malloc(dim * sizeof(int));
+    if (!self->start_offset || !self->step_offset) { Data_free(data); PyErr_NoMemory(); return -1; }
+    for (int i = 0; i < dim; ++i) {
+        self->start_offset[i] = 0;
+        self->step_offset[i] = 1;
     }
     
     // Override strides if provided
@@ -1263,8 +1175,8 @@ static PyObject *Vector_variance(Vector *self, PyObject *args) {
 
 static PyObject *Vector_repr(Vector *self) {
     return PyUnicode_FromFormat(
-                                "<vector_map_as_tensor: dim=%d, start=%d, end=%d, offset=%d>",
-                                self->dimension, self->start, Vector_end(self), self->offset);
+                                "<vector_map_as_tensor: dim=%d, start=%d, offset=%d>",
+                                self->dimension, self->start, self->offset);
 }
 
 static inline int _shape_equal(const int *a, const int *b, int dim) {

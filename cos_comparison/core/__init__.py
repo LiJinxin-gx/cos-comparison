@@ -90,7 +90,7 @@ _module_globals = globals()
 # High-frequency core APIs that are directly injected into module namespace
 # for zero-overhead access, __getattr__ remains as fallback for other attributes
 _HOT_API = {
-    "create_void_list", "load_as_default_data", "vector_map_as_tensor",
+    "create_void_list", "load_as_default_data", "infer_shape", "vector_map_as_tensor",
     "vector_chain_compute", "set_item", "get_item",
     "_cos", "_mod", "_cosmod", "_default_algorithm",
     "NaN",

@@ -332,6 +332,28 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     return (PyObject*)vec;
 }
 
+static PyObject* py_infer_shape(PyObject *self, PyObject *args) {
+    PyObject *data_obj;
+    if (!PyArg_ParseTuple(args, "O", &data_obj))
+        return NULL;
+    
+    int *shape = NULL;
+    int dim = 0;
+    
+    if (_infer_shape(data_obj, &shape, &dim) < 0) {
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    
+    PyObject *tup = PyTuple_New(dim);
+    if (!tup) { free(shape); return NULL; }
+    for (int i = 0; i < dim; ++i) {
+        PyTuple_SET_ITEM(tup, i, PyLong_FromLong(shape[i]));
+    }
+    free(shape);
+    return tup;
+}
+
 static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *data_obj;
     PyObject *start_obj = Py_None;
@@ -2820,6 +2842,8 @@ static PyMethodDef methods[] = {
         "Create a multi-dimensional nested list filled with default value."},
     {"load_as_default_data", (PyCFunction)py_load_as_default_data, METH_VARARGS | METH_KEYWORDS,
         "Load data as a default data type."},
+    {"infer_shape", (PyCFunction)py_infer_shape, METH_VARARGS,
+        "Infer the shape of multi-dimensional data."},
     {"get_item", py_get_item, METH_VARARGS,
         "Get item from nested list with multi-dimensional index."},
     {"set_item", py_set_item, METH_VARARGS,
@@ -2972,14 +2996,14 @@ PyMODINIT_FUNC PyInit_cos_comparison_pydll(void) {
     }
 
     // Add __all__ (public API list, matches pure Python backend)
-    PyObject *__all__ = Py_BuildValue("[ssssssssssssssssssssssssssssssssssssssssss]",
+    PyObject *__all__ = Py_BuildValue("[sssssssssssssssssssssssssssssssssssssssssss]",
         "NaN", "sqrt",
         "cos_comparison_passive", "cos_comparison_passive_1d", "cos_comparison_passive_2d", "cos_comparison_passive_3d", "cos_comparison_passive_4d",
         "cos_comparison_active", "cos_comparison_active_1d", "cos_comparison_active_2d", "cos_comparison_active_3d", "cos_comparison_active_4d",
         "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
         "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
         "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
-        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "get_item", "set_item", "_cos", "_mod", "_cosmod",
+        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod",
         "vector_chain_compute",
         "vector_map_as_tensor", "func_name_space", "default_contain",
         "private_dict"

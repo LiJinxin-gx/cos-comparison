@@ -38,15 +38,55 @@ def vector_chain_compute(A):
         return a
     return compute,fix,get
 
-def create_void_list(length_list=(1,), default=None):
+def infer_shape(data):
+    """
+    Infer the shape of multi-dimensional data.
+    Priority: PyBuffer protocol > __shape__ attribute > recursive length detection.
+    Returns shape tuple, or None if cannot infer.
+    """
+    # Try PyBuffer protocol first
+    if hasattr(data, '__buffer__'):
+        try:
+            mv = memoryview(data)
+            if mv.ndim > 0:
+                return tuple(mv.shape)
+        except (TypeError, ValueError):
+            pass
+    
+    # Try __shape__ attribute (fast path for our own tensors)
+    if hasattr(data, '__shape__'):
+        try:
+            return tuple(data.__shape__)
+        except (TypeError, ValueError):
+            pass
+    
+    # Fallback: recursive length detection (general algorithm)
+    shape = []
+    temp = data
+    while True:
+        try:
+            n = len(temp)
+            shape.append(n)
+            if n == 0:
+                break
+            temp = temp[0]
+        except (TypeError, IndexError, AttributeError):
+            break
+    
+    return tuple(shape) if shape else None
+
+def create_void_list(length_list=(1,), default=0.0):
     """
     create a default void list.
     """
     length_list = tuple(length_list)
+    total = 1
+    for s in length_list:
+        total *= s
     return vector_map_as_tensor(
-        [default for _ in range(multiple_chain(length_list))],
-        length_list
-        )
+        [default for _ in range(total)],
+        shape=length_list
+    )
 
 def load_as_default_data(data, start=None, shape=None):
     """
@@ -55,17 +95,10 @@ def load_as_default_data(data, start=None, shape=None):
     shape: tuple of int, size of the region to load in each dimension
     Supports loading sub-regions from multi-dimensional data, hides underlying type details
     """
-    # First infer full shape of input data
-    temp = data
-    full_shape = []
-    while True:
-        try:
-            full_shape.append(len(temp))
-            temp = temp[0]
-        except (TypeError, IndexError, AttributeError):
-            break
-    if not full_shape:
-        raise ValueError("data is empty or scalar; cannot infer shape")
+    # Infer full shape of input data
+    full_shape = infer_shape(data)
+    if full_shape is None:
+        raise ValueError("cannot infer shape of input data")
     dimension = len(full_shape)
     full_shape = tuple(full_shape)
 
@@ -107,25 +140,26 @@ def load_as_default_data(data, start=None, shape=None):
         total_elements *= s
     vector = [0.0] * total_elements
 
-    num_list = [None] + [1] * dimension
-    flag = dimension
+    num_list = [0] * dimension
     pos = 0
-    while flag:
-        if flag == dimension:
-            # Calculate multi-dim index relative to region start
-            idx = tuple(start[i] + num_list[i+1] - 1 for i in range(dimension))
-            vector[pos] = get_item(data, idx)
-            pos += 1
-        if num_list[flag] < shape[flag - 1]:
-            num_list[flag] += 1
-            flag = dimension
-        else:
-            num_list[flag] = 1
-            flag -= 1
+    while True:
+        # Calculate multi-dim index relative to region start
+        idx = tuple(start[i] + num_list[i] for i in range(dimension))
+        vector[pos] = get_item(data, idx)
+        pos += 1
+        # Increment with carry
+        dim = dimension - 1
+        while dim >= 0:
+            num_list[dim] += 1
+            if num_list[dim] < shape[dim]:
+                break
+            num_list[dim] = 0
+            dim -= 1
+        if dim < 0:
+            break
 
-    # Create tensor: note that the underlying vector is a copy of the region,
-    # so start is 0 for the new tensor's own vector, shape is the requested region shape
-    return vector_map_as_tensor(vector, shape, start=0, p=0)
+    # Create tensor
+    return vector_map_as_tensor(vector, shape=shape, start=0)
 
 def get_item(object, index):
     if hasattr(object,"__get_item__"):
@@ -151,25 +185,22 @@ def no_done(*arg,**kwarg):
 #     --------------- type support -----------------
 class vector_map_as_tensor:
     __slots__ = ("vector", "shape", "strides", "start", "offset", "start_offset", "step_offset")
-    def __init__(self, vector, shape, start=0, p=0, strides=None, offset=0, start_offset=None, step_offset=None):
+    def __init__(self, vector=(1,), shape=(1,), *, start=0, strides=None, offset=0, start_offset=None, step_offset=None):
         self.vector = vector
         self.start = start
         self.offset = offset
-        
-        # Backward compatibility: convert old p parameter to new indexing
-        if p != 0:
-            shape = tuple(shape[p:])
-            if strides is not None:
-                strides = tuple(strides[p:])
         
         self.shape = tuple(shape)
         ndim = len(self.shape)
         
         # Precompute strides if not provided (C-order contiguous)
         if strides is None:
-            strides = [1] * ndim
-            for i in range(ndim - 2, -1, -1):
-                strides[i] = strides[i+1] * self.shape[i+1]
+            if ndim == 0:
+                strides = ()
+            else:
+                strides = [1] * ndim
+                for i in range(ndim - 2, -1, -1):
+                    strides[i] = strides[i+1] * self.shape[i+1]
         self.strides = tuple(strides)
         
         # Initialize per-dimension offsets
@@ -183,30 +214,18 @@ class vector_map_as_tensor:
             self.step_offset = tuple(step_offset)
 
     @property
-    def p(self):
-        """Backward compatibility: always 0 in new indexing scheme."""
-        return 0
+    def __shape__(self):
+        """Shape protocol support for fast infer_shape."""
+        return self.shape
 
     @property
     def dimension(self):
         return len(self.shape)
 
     @property
-    def end(self):
-        """Backward compatibility: end offset for contiguous last-dimension views."""
-        if len(self.shape) == 0:
-            return self.start + self.offset
-        return self.start + self.offset + (self.start_offset[-1] + self.shape[-1] * self.step_offset[-1]) * self.strides[-1]
-
-    @property
     def tensor_size(self):
+        """Backward compatible alias for shape."""
         return self.shape
-
-    @property
-    def cache(self):
-        if len(self.strides) == 0:
-            return 1
-        return self.strides[-1] * self.step_offset[-1]
 
     def __repr__(self):
         return f"<vector_map_as_tensor: dim={len(self.shape)}, shape={self.shape}, start={self.start}, offset={self.offset}>"
@@ -623,7 +642,7 @@ class default_contain:
     def __init__(self, default, default_dict=None):
         self.default, self.default_dict = default, (default_dict if default_dict else {})
     def __len__(self)->int:
-        return -1
+        return 1
     def __getitem__(self, index):
         return self.default_dict.get(index, self.default)
 
@@ -1165,7 +1184,7 @@ __all__ = [
     'cos', 'cos_1d', 'cos_2d', 'cos_3d', 'cos_4d',
     'mean_local', 'mean_local_1d', 'mean_local_2d', 'mean_local_3d', 'mean_local_4d',
     'local_variance', 'local_variance_1d', 'local_variance_2d', 'local_variance_3d', 'local_variance_4d',
-    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'get_item', 'set_item', '_cos', '_mod', '_cosmod',
+    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'infer_shape', 'get_item', 'set_item', '_cos', '_mod', '_cosmod',
     'vector_chain_compute',
     'vector_map_as_tensor', 'func_name_space', 'default_contain',
     'private_dict'
