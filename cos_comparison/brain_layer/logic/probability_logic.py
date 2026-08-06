@@ -10,7 +10,7 @@ class UnionEvent(frozenset): #A+B+...
     def __init__(self,*event):
         self.name = "UnionEvent"
     def __new__(cls,*event):
-        return super().__new__(event)
+        return super().__new__(cls,event)
     def __hash__(self):
         return hash(("Union",super().__hash__()))
 
@@ -19,7 +19,7 @@ class IntersectionEvent(frozenset): #AB...
     def __init__(self,*event):
         self.name = "IntersectionEvent"
     def __new__(cls,*event):
-        return super().__new__(event)
+        return super().__new__(cls,event)
     def __hash__(self):
         return hash(("Intersection",super().__hash__()))
 

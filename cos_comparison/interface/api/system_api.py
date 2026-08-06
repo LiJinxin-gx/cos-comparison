@@ -24,7 +24,7 @@ class BaseProcess(subprocess.Popen):
         kwargs.setdefault("stdout", subprocess.PIPE)
         kwargs.setdefault("stderr", subprocess.PIPE)
         kwargs.setdefault("text", text)
-        super().__init__(args, text=text, **kwargs)
+        super().__init__(args, **kwargs)
 
 
 class Process(BaseProcess):

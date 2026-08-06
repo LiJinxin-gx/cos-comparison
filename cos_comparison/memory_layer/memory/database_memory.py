@@ -9,7 +9,7 @@ class DatabaseToolWrap:
         self.tool = tool
         self.conn_func = conn_func if conn_func else no_done
     def connect(self,database):
-        self.conn_func(self.tool,datavase)
+        self.conn_func(self.tool,database)
 
 try:
     import sqlite3 as default_tool
@@ -19,7 +19,7 @@ except:
 class DatabaseMemory(Memory):
     __slots__ = ("cursor",)
     def __init__(self,database_tool=None,database=":memory:",refer_func=None):
-        database_tool = default_tool if database is None else database_tool
+        database_tool = default_tool if database_tool is None else database_tool
         memory = database_tool.connect(database)
         super().__init__(memory)
         self.refer_func = refer_func

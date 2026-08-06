@@ -647,9 +647,9 @@ def cos_comparison_passive(data, *arg, window_size=None, w1=1.0, w2=1.0, b1=0.0,
             flat = [d.data[i] for i in range(total)]
             # Create result tensor, use same class as input if input is vector_map_as_tensor
             if isinstance(data, vector_map_as_tensor):
-                result = data.__class__(flat, shape, start=0)
+                result = data.__class__(vector=flat, shape=shape, start=0)
             else:
-                result = vector_map_as_tensor(flat, shape, start=0)
+                result = vector_map_as_tensor(vector=flat, shape=shape, start=0)
             try:
                 _lib.Data_free.argtypes = [POINTER(Data)]
                 _lib.Data_free.restype = None
@@ -798,9 +798,9 @@ def cos_comparison_active(data, *arg, kernel=None, w1=1.0, w2=1.0, b1=0.0, b2=0.
             flat = [d.data[i] for i in range(total)]
             # Create result tensor, use same class as input if input is vector_map_as_tensor
             if isinstance(data, vector_map_as_tensor):
-                result = data.__class__(flat, shape, start=0)
+                result = data.__class__(vector=flat, shape=shape, start=0)
             else:
-                result = vector_map_as_tensor(flat, shape, start=0)
+                result = vector_map_as_tensor(vector=flat, shape=shape, start=0)
             try:
                 _lib.Data_free.argtypes = [POINTER(Data)]
                 _lib.Data_free.restype = None
@@ -941,7 +941,7 @@ def no_done(*arg, **kwarg):
 def infer_shape(data):
     """
     Infer the shape of multi-dimensional data.
-    Priority: PyBuffer protocol > __shape__ attribute > recursive length detection.
+    Priority: PyBuffer protocol > __shape__() method > recursive length detection.
     Returns shape tuple, or None if cannot infer.
     """
     # Try PyBuffer protocol first
@@ -953,14 +953,16 @@ def infer_shape(data):
         except (TypeError, ValueError):
             pass
     
-    # Try __shape__ attribute (fast path for our own tensors)
-    if hasattr(data, '__shape__'):
+    # Try __shape__ method (fast path for our own tensors, overridable by subclasses)
+    if hasattr(data, '__shape__') and callable(data.__shape__):
         try:
-            return tuple(data.__shape__)
+            result = data.__shape__()
+            if result is not None:
+                return tuple(result)
         except (TypeError, ValueError):
             pass
     
-    # Fallback: recursive length detection (general algorithm)
+    # Fallback: iterative length detection (general algorithm, no recursion)
     shape = []
     temp = data
     while True:
@@ -975,39 +977,78 @@ def infer_shape(data):
     
     return tuple(shape) if shape else None
 
-def create_void_list(length_list=(1,), default=None):
+def create_void_list(length_list=(1,), default=0.0):
     """Create a multi-dimensional nested list filled with default value."""
     if not length_list:
         return default
     length_list = tuple(length_list)
     total = multiple_chain(length_list)
-    return vector_map_as_tensor([default for _ in range(total)], length_list)
+    return vector_map_as_tensor(vector=[default for _ in range(total)], shape=length_list)
 
-def load_as_default_data(data, start=None, shape=None):
+def load_as_default_data(data, start=None, shape=None, step=None):
     """
-    Load data as vector_map_as_tensor, matching pure Python implementation
-    start: tuple of int, start coordinates in each dimension
-    shape: tuple of int, size of the region to load in each dimension
-    Supports loading sub-regions from multi-dimensional data, hides underlying type details
+    Load data as vector_map_as_tensor, matching pure Python implementation.
+    
+    Args:
+        data: Input data (nested list, buffer-like, or vector_map_as_tensor)
+        start: tuple of int, start coordinates in each dimension (default: all zeros)
+        shape: tuple of int, size of the region to load in each dimension (default: full shape)
+        step: tuple of int, step size in each dimension (default: all ones)
+    
+    Supports loading sub-regions with arbitrary step sizes from multi-dimensional data.
+    Hides underlying type details - works with lists, arrays, memoryview, and tensors.
+    Uses efficient slice operations when input is already a tensor type.
     """
+    # Fast path: input is already our tensor type - use native slicing
+    if isinstance(data, vector_map_as_tensor):
+        slices = []
+        dim = data.dimension
+        for i in range(dim):
+            s = start[i] if start is not None else None
+            e = (start[i] + shape[i]) if (start is not None and shape is not None) else None
+            st = step[i] if step is not None else None
+            slices.append(slice(s, e, st))
+        result = data[tuple(slices)]
+        # Return a copy (contiguous) to match expected behavior
+        total = 1
+        for s in result.shape:
+            total *= s
+        new_vector = [0.0] * total
+        idx = 0
+        for flat_idx in result._iter_flat():
+            new_vector[idx] = result.vector[flat_idx]
+            idx += 1
+        return vector_map_as_tensor(vector=new_vector, shape=result.shape, start=0)
+    
     # Infer full shape of input data
     full_shape = infer_shape(data)
     if full_shape is None:
         raise ValueError("cannot infer shape of input data")
     dimension = len(full_shape)
     full_shape = tuple(full_shape)
-
-    # Default shape is full shape if not provided
+    
+    # Default step is all ones
+    if step is None:
+        step = tuple(1 for _ in range(dimension))
+    else:
+        step = tuple(step)
+        if len(step) != dimension:
+            raise ValueError(f"step length {len(step)} does not match data dimension {dimension}")
+        for i in range(dimension):
+            if step[i] <= 0:
+                raise ValueError(f"step[{i}] = {step[i]} must be positive")
+    
+    # Default shape is full shape (adjusted for step) if not provided
     if shape is None:
-        shape = full_shape
+        shape = tuple((full_shape[i] + step[i] - 1) // step[i] for i in range(dimension))
     else:
         shape = tuple(shape)
         if len(shape) != dimension:
             raise ValueError(f"shape length {len(shape)} does not match data dimension {dimension}")
         for i in range(dimension):
-            if shape[i] < 0 or shape[i] > full_shape[i]:
-                raise ValueError(f"shape[{i}] = {shape[i]} out of bounds for dimension size {full_shape[i]}")
-
+            if shape[i] < 0:
+                raise ValueError(f"shape[{i}] = {shape[i]} cannot be negative")
+    
     # Default start is all zeros if not provided
     if start is None:
         start = tuple(0 for _ in range(dimension))
@@ -1016,30 +1057,53 @@ def load_as_default_data(data, start=None, shape=None):
         if len(start) != dimension:
             raise ValueError(f"start length {len(start)} does not match data dimension {dimension}")
         for i in range(dimension):
-            if start[i] < 0 or start[i] + shape[i] > full_shape[i]:
-                raise ValueError(f"start[{i}] = {start[i]} out of bounds for dimension size {full_shape[i]} with shape {shape[i]}")
-
-    # Calculate strides for each dimension (to convert multi-dim index to 1d offset)
-    strides = [1] * dimension
-    for i in range(dimension-2, -1, -1):
-        strides[i] = strides[i+1] * full_shape[i+1]
-
-    # Calculate 1d start offset in the full data
-    start_1d = 0
-    for i in range(dimension):
-        start_1d += start[i] * strides[i]
-
-    # Flatten the requested region using carry mechanism
+            if start[i] < 0:
+                raise ValueError(f"start[{i}] = {start[i]} cannot be negative")
+            if shape[i] > 0 and start[i] + (shape[i] - 1) * step[i] >= full_shape[i]:
+                raise ValueError(f"start[{i}] + (shape[{i}]-1)*step[{i}] = {start[i] + (shape[i] - 1) * step[i]} "
+                                 f"out of bounds for dimension size {full_shape[i]}")
+    
+    # Fast path: PyBuffer protocol with contiguous data and step=1
+    if hasattr(data, '__buffer__') and all(s == 1 for s in step):
+        try:
+            mv = memoryview(data)
+            if mv.ndim == dimension and mv.format == 'd':
+                total = 1
+                for s in shape:
+                    total *= s
+                vector = [0.0] * total
+                
+                num_list = [0] * dimension
+                pos = 0
+                while True:
+                    idx = tuple(start[i] + num_list[i] for i in range(dimension))
+                    vector[pos] = mv[idx]
+                    pos += 1
+                    dim = dimension - 1
+                    while dim >= 0:
+                        num_list[dim] += 1
+                        if num_list[dim] < shape[dim]:
+                            break
+                        num_list[dim] = 0
+                        dim -= 1
+                    if dim < 0:
+                        break
+                
+                return vector_map_as_tensor(vector=vector, shape=shape, start=0)
+        except (TypeError, ValueError):
+            pass
+    
+    # General path: iterate using carry mechanism
     total_elements = 1
     for s in shape:
         total_elements *= s
     vector = [0.0] * total_elements
-
+    
     num_list = [0] * dimension
     pos = 0
     while True:
-        # Calculate multi-dim index relative to region start
-        idx = tuple(start[i] + num_list[i] for i in range(dimension))
+        # Calculate multi-dim index: start[i] + num_list[i] * step[i]
+        idx = tuple(start[i] + num_list[i] * step[i] for i in range(dimension))
         vector[pos] = get_item(data, idx)
         pos += 1
         # Increment with carry
@@ -1052,9 +1116,9 @@ def load_as_default_data(data, start=None, shape=None):
             dim -= 1
         if dim < 0:
             break
-
+    
     # Create tensor
-    return vector_map_as_tensor(vector, shape=shape, start=0)
+    return vector_map_as_tensor(vector=vector, shape=shape, start=0)
 
 def get_item(obj, index):
     """Get item from nested list with multi-dimensional index."""
@@ -1091,13 +1155,13 @@ class default_contain:
     def __init__(self, default, default_dict=None):
         self.default, self.default_dict = default, (default_dict if default_dict else {})
     def __len__(self):
-        return float('nan')
+        return 1
     def __getitem__(self, index):
         return self.default_dict.get(index, self.default)
 
 class vector_map_as_tensor:
     __slots__ = ("vector", "shape", "strides", "start", "offset", "start_offset", "step_offset")
-    def __init__(self, vector=(1,), shape=(1,), *, start=0, strides=None, offset=0, start_offset=None, step_offset=None):
+    def __init__(self, *, vector=(1,), shape=(1,), start=0, strides=None, offset=0, start_offset=None, step_offset=None):
         self.vector = vector
         self.start = start
         self.offset = offset
@@ -1125,9 +1189,8 @@ class vector_map_as_tensor:
         else:
             self.step_offset = tuple(step_offset)
 
-    @property
     def __shape__(self):
-        """Shape protocol support for fast infer_shape."""
+        """Shape protocol method for fast infer_shape. Can be overridden by subclasses."""
         return self.shape
 
     @property
@@ -1143,9 +1206,16 @@ class vector_map_as_tensor:
         return f"<vector_map_as_tensor: dim={len(self.shape)}, shape={self.shape}, start={self.start}, offset={self.offset}>"
 
     def _flat_index(self, indices):
-        """Compute flat index from per-dimension indices."""
+        """Compute flat index from per-dimension indices.
+        
+        Handles negative indices properly. Iterative implementation, no recursion.
+        """
         idx = self.start + self.offset
         for i, ind in enumerate(indices):
+            dim_len = self.shape[i]
+            # Handle negative indices
+            if ind < 0:
+                ind += dim_len
             idx += self.strides[i] * (self.start_offset[i] + ind * self.step_offset[i])
         return idx
 

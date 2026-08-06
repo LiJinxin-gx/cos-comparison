@@ -60,4 +60,4 @@ class Monitor:
     async def _run(self):
         await asyncio.gather(*[_monitor(self.target,target,trigger,callback,t) for target,trigger,callback,t in self.callbacks])
     def run(self):
-        threading.Thread(target=asyncio.run(self._run),daemon=True).start()
+        threading.Thread(target=lambda: asyncio.run(self._run()),daemon=True).start()

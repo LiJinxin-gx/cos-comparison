@@ -14,15 +14,32 @@
  * Optional SIMD auto-vectorization hints - safe no-op fallback for all compilers
  * These are only hints to the compiler, no architecture-specific intrinsics used
  * --------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * Portable SIMD & optimization hints (best-effort, degrade gracefully)
+ * --------------------------------------------------------------------------- */
 #if defined(_MSC_VER)
   /* MSVC: ignore vector dependencies for auto-vectorization */
   #define COS_SIMD_LOOP __pragma(loop(ivdep))
+  /* MSVC: hint to unroll loops (best effort) */
+  #define COS_UNROLL_LOOP(n) __pragma(loop(ivdep, unroll(n)))
+  /* MSVC: assume pointer alignment */
+  #define COS_ASSUME_ALIGNED(ptr, align) __assume_aligned((ptr), (align))
 #elif defined(__GNUC__) || defined(__clang__)
   /* GCC/Clang: ignore vector dependencies for auto-vectorization */
   #define COS_SIMD_LOOP _Pragma("GCC ivdep")
+  /* GCC/Clang: hint to unroll loops (best effort) */
+  #if defined(__clang__)
+    #define COS_UNROLL_LOOP(n) _Pragma("clang loop unroll_count(n)")
+  #else
+    #define COS_UNROLL_LOOP(n) _Pragma("GCC unroll n")
+  #endif
+  /* GCC/Clang: assume pointer alignment (built-in function) */
+  #define COS_ASSUME_ALIGNED(ptr, align) ((ptr) = __builtin_assume_aligned((ptr), (align)))
 #else
-  /* Unknown compiler: no-op, no effect */
+  /* Unknown compiler: all no-ops, safe fallback */
   #define COS_SIMD_LOOP
+  #define COS_UNROLL_LOOP(n)
+  #define COS_ASSUME_ALIGNED(ptr, align) ((void)0)
 #endif
 
 /* Restrict qualifier for compiler alias analysis */
@@ -32,6 +49,24 @@
   #define COS_RESTRICT __restrict__
 #else
   #define COS_RESTRICT
+#endif
+
+/* Inline keyword for portable C */
+#if defined(_MSC_VER)
+  #define COS_INLINE __inline
+#elif defined(__GNUC__) || defined(__clang__)
+  #define COS_INLINE static inline
+#else
+  #define COS_INLINE static
+#endif
+
+/* Likely/unlikely branch prediction hints */
+#if defined(__GNUC__) || defined(__clang__)
+  #define COS_LIKELY(x) __builtin_expect(!!(x), 1)
+  #define COS_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+  #define COS_LIKELY(x) (x)
+  #define COS_UNLIKELY(x) (x)
 #endif
 
 /* Flag definitions for Vector.flags */
@@ -93,6 +128,15 @@ static PyObject* Vector_get_shape(Vector *self, void *closure) {
     return tup;
 }
 
+/* __shape__ method - overridable by subclasses for custom shape inference */
+static PyObject* Vector_shape_method(Vector *self, PyObject *Py_UNUSED(ignored)) {
+    return Vector_get_shape(self, NULL);
+}
+
+static PyObject* Vector_get_dimension(Vector *self, void *closure) {
+    return PyLong_FromLong(self->dimension);
+}
+
 static PyObject* Vector_get_strides(Vector *self, void *closure) {
     PyObject *tup = PyTuple_New(self->dimension);
     if (!tup) return NULL;
@@ -122,6 +166,10 @@ static PyObject* Vector_get_step_offset(Vector *self, void *closure) {
 
 static PyObject* Vector_get_offset(Vector *self, void *closure) {
     return PyLong_FromLong(self->offset);
+}
+
+static PyObject* Vector_get_start(Vector *self, void *closure) {
+    return PyLong_FromLong(self->start);
 }
 
 static PyObject* Vector_get_vector(Vector *self, void *closure) {
@@ -164,8 +212,8 @@ static PyGetSetDef Vector_getseters[] = {
      "Tuple representing the shape of the current tensor view (backward compatibility alias for shape).", NULL},
     {"shape", (getter)Vector_get_shape, NULL,
      "Tuple representing the shape of the current tensor view.", NULL},
-    {"__shape__", (getter)Vector_get_shape, NULL,
-     "Shape protocol support for fast infer_shape.", NULL},
+    {"dimension", (getter)Vector_get_dimension, NULL,
+     "Number of dimensions (rank) of the tensor.", NULL},
     {"strides", (getter)Vector_get_strides, NULL,
      "Tuple representing the strides of the current tensor view.", NULL},
     {"start_offset", (getter)Vector_get_start_offset, NULL,
@@ -174,12 +222,16 @@ static PyGetSetDef Vector_getseters[] = {
      "Tuple of per-dimension step sizes.", NULL},
     {"offset", (getter)Vector_get_offset, NULL,
      "Accumulated offset from integer indexing.", NULL},
+    {"start", (getter)Vector_get_start, NULL,
+     "Global start offset in the flat underlying array.", NULL},
     {"vector", (getter)Vector_get_vector, NULL,
      "Flat list of underlying data (copy, for API compatibility with pure Python backend).", NULL},
     {NULL}  /* Sentinel */
 };
 
 static PyMethodDef Vector_methods[] = {
+    {"__shape__", (PyCFunction)Vector_shape_method, METH_NOARGS,
+        "Shape protocol method for fast infer_shape. Can be overridden by subclasses."},
     {"mean", (PyCFunction)Vector_mean, METH_NOARGS,
         "Compute the mean of the current slice."},
     {"variance", (PyCFunction)Vector_variance, METH_NOARGS,
@@ -418,10 +470,71 @@ static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, 
     return 0;
 }
 
+/* Forward declarations for sequence parsing helpers */
+static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim);
+static int _parse_int_sequence(PyObject *obj, int **out_arr, int *out_len);
+static int _override_int_array(PyObject *obj, int *dest, int dest_len, const char *name);
+
 static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
     int dim = 0;
+    int *sh = NULL;
+    
+    /* Priority 1: Try PyBuffer protocol first (fastest for buffer objects) */
+    if (PyObject_CheckBuffer(obj)) {
+        Py_buffer view;
+        if (PyObject_GetBuffer(obj, &view, PyBUF_FORMAT | PyBUF_ND) == 0) {
+            if (view.ndim > 0) {
+                dim = view.ndim;
+                sh = (int*)malloc(dim * sizeof(int));
+                if (!sh) {
+                    PyBuffer_Release(&view);
+                    PyErr_NoMemory();
+                    return -1;
+                }
+                for (int i = 0; i < dim; ++i) {
+                    sh[i] = (int)view.shape[i];
+                }
+                PyBuffer_Release(&view);
+                *shape = sh;
+                *dimension = dim;
+                return 0;
+            }
+            PyBuffer_Release(&view);
+        } else {
+            PyErr_Clear();
+        }
+    }
+    
+    /* Priority 2: Try __shape__ method (fast path for our own tensors, overridable) */
+    if (PyObject_HasAttrString(obj, "__shape__")) {
+        PyObject *method = PyObject_GetAttrString(obj, "__shape__");
+        if (method && PyCallable_Check(method)) {
+            PyObject *result = PyObject_CallNoArgs(method);
+            Py_DECREF(method);
+            if (result && result != Py_None) {
+                /* Accept any sequence type (tuple, list, etc.) from __shape__ method */
+                int *sh = NULL;
+                int dim = 0;
+                if (_parse_shape_tuple(result, &sh, &dim) == 0) {
+                    Py_DECREF(result);
+                    *shape = sh;
+                    *dimension = dim;
+                    return 0;
+                }
+                Py_DECREF(result);
+            } else if (result) {
+                Py_DECREF(result);
+            }
+        } else if (method) {
+            Py_DECREF(method);
+        } else {
+            PyErr_Clear();
+        }
+    }
+    
+    /* Priority 3: Fallback - iterative length detection (general algorithm, no recursion) */
     int cap = 4;
-    int *sh = (int*)malloc(cap * sizeof(int));
+    sh = (int*)malloc(cap * sizeof(int));
     if (!sh) { PyErr_NoMemory(); return -1; }
     PyObject *cur = obj;
     Py_INCREF(cur);
@@ -453,17 +566,73 @@ static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
 
 /* Helper to parse a shape tuple */
 static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim) {
-    if (!PyTuple_Check(obj)) return -1;
-    *out_dim = (int)PyTuple_Size(obj);
+    /* Accept any sequence type (tuple, list, etc.) - not just tuples.
+       Uses Python sequence protocol for maximum generality and duck-typing support. */
+    if (!PySequence_Check(obj)) return -1;
+    Py_ssize_t len = PySequence_Size(obj);
+    if (len < 0) return -1;
+    *out_dim = (int)len;
     *out_shape = (int*)malloc(*out_dim * sizeof(int));
     if (!*out_shape) return -1;
     for (int i = 0; i < *out_dim; ++i) {
-        PyObject *item = PyTuple_GetItem(obj, i);
+        PyObject *item = PySequence_GetItem(obj, i);
         if (!item || !PyLong_Check(item)) {
+            Py_XDECREF(item);
             free(*out_shape);
             return -1;
         }
         (*out_shape)[i] = (int)PyLong_AsLong(item);
+        Py_DECREF(item);
+    }
+    return 0;
+}
+
+/* Parse any sequence of integers into a newly allocated int array.
+   Uses Python sequence protocol - works with tuple, list, and any sequence type.
+   Returns 0 on success, -1 on failure. Caller must free *out_arr on success. */
+static int _parse_int_sequence(PyObject *obj, int **out_arr, int *out_len) {
+    if (!PySequence_Check(obj)) return -1;
+    Py_ssize_t len = PySequence_Size(obj);
+    if (len < 0) return -1;
+    *out_len = (int)len;
+    *out_arr = (int*)malloc(*out_len * sizeof(int));
+    if (!*out_arr) return -1;
+    for (int i = 0; i < *out_len; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (!item || !PyLong_Check(item)) {
+            Py_XDECREF(item);
+            free(*out_arr);
+            return -1;
+        }
+        (*out_arr)[i] = (int)PyLong_AsLong(item);
+        Py_DECREF(item);
+    }
+    return 0;
+}
+
+/* Override a destination int array with values from a sequence object.
+   If obj is Py_None or not a sequence, does nothing (returns 0).
+   If sequence length doesn't match dest_len, raises ValueError.
+   Uses Python sequence protocol - works with tuple, list, and any sequence type.
+   Returns 0 on success, -1 on failure. */
+static int _override_int_array(PyObject *obj, int *dest, int dest_len, const char *name) {
+    if (obj == Py_None) return 0;
+    if (!PySequence_Check(obj)) return 0;
+    Py_ssize_t n = PySequence_Size(obj);
+    if (n < 0) return -1;
+    if ((int)n != dest_len) {
+        PyErr_Format(PyExc_ValueError, "%s length must match shape length", name);
+        return -1;
+    }
+    for (int i = 0; i < (int)n; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (!item || !PyLong_Check(item)) {
+            Py_XDECREF(item);
+            PyErr_Format(PyExc_TypeError, "%s must be sequence of integers", name);
+            return -1;
+        }
+        dest[i] = (int)PyLong_AsLong(item);
+        Py_DECREF(item);
     }
     return 0;
 }
@@ -478,11 +647,24 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
     int start = 0;
     int offset = 0;
     
+    /* All arguments are keyword-only (matches pure Python: def __init__(self, *, ...)) */
+    if (PyTuple_Size(args) > 0) {
+        PyErr_SetString(PyExc_TypeError, "function takes no positional arguments");
+        return -1;
+    }
+    
     static char *kwlist[] = {"vector", "shape", "start", "strides", "offset", "start_offset", "step_offset", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OioOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OOiOiOO", kwlist,
                                      &vector, &shape_obj, &start, &strides_obj, &offset, &start_offset_obj, &step_offset_obj))
         return -1;
+
+    /* Default values */
+    if (!vector) {
+        vector = PyTuple_New(1);
+        if (!vector) return -1;
+        PyTuple_SET_ITEM(vector, 0, PyLong_FromLong(1));
+    }
 
     self->flags = 0;
     self->buf = NULL;
@@ -649,39 +831,10 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
             self->step_offset[i] = 1;
         }
         
-        // Override strides if provided
-        if (strides_obj != Py_None && PyTuple_Check(strides_obj)) {
-            int n = (int)PyTuple_Size(strides_obj);
-            if (n != self->dimension) {
-                PyErr_SetString(PyExc_ValueError, "strides length must match shape length");
-                return -1;
-            }
-            for (int i = 0; i < n; ++i) {
-                self->strides[i] = (int)PyLong_AsLong(PyTuple_GetItem(strides_obj, i));
-            }
-        }
-        // Override start_offset if provided
-        if (start_offset_obj != Py_None && PyTuple_Check(start_offset_obj)) {
-            int n = (int)PyTuple_Size(start_offset_obj);
-            if (n != self->dimension) {
-                PyErr_SetString(PyExc_ValueError, "start_offset length must match shape length");
-                return -1;
-            }
-            for (int i = 0; i < n; ++i) {
-                self->start_offset[i] = (int)PyLong_AsLong(PyTuple_GetItem(start_offset_obj, i));
-            }
-        }
-        // Override step_offset if provided
-        if (step_offset_obj != Py_None && PyTuple_Check(step_offset_obj)) {
-            int n = (int)PyTuple_Size(step_offset_obj);
-            if (n != self->dimension) {
-                PyErr_SetString(PyExc_ValueError, "step_offset length must match shape length");
-                return -1;
-            }
-            for (int i = 0; i < n; ++i) {
-                self->step_offset[i] = (int)PyLong_AsLong(PyTuple_GetItem(step_offset_obj, i));
-            }
-        }
+        // Override strides/start_offset/step_offset if provided (accepts any sequence type)
+        if (_override_int_array(strides_obj, self->strides, self->dimension, "strides") < 0) return -1;
+        if (_override_int_array(start_offset_obj, self->start_offset, self->dimension, "start_offset") < 0) return -1;
+        if (_override_int_array(step_offset_obj, self->step_offset, self->dimension, "step_offset") < 0) return -1;
         
         return 0;
     }
@@ -694,8 +847,8 @@ fallback_sequence:
     int dim = 0;
     int explicit_shape = 0;
 
-    /* Try explicit shape first */
-    if (shape_obj != Py_None && PyTuple_Check(shape_obj) && _parse_shape_tuple(shape_obj, &shape, &dim) == 0) {
+    /* Try explicit shape first (accepts any sequence type: tuple, list, etc.) */
+    if (shape_obj != Py_None && _parse_shape_tuple(shape_obj, &shape, &dim) == 0) {
         explicit_shape = 1;
     } else {
         /* No explicit shape: infer from nested structure */
@@ -763,39 +916,11 @@ fallback_sequence:
         self->step_offset[i] = 1;
     }
     
-    // Override strides if provided
-    if (strides_obj != Py_None && PyTuple_Check(strides_obj)) {
-        int n = (int)PyTuple_Size(strides_obj);
-        if (n != self->dimension) {
-            PyErr_SetString(PyExc_ValueError, "strides length must match shape length");
-            return -1;
-        }
-        for (int i = 0; i < n; ++i) {
-            self->strides[i] = (int)PyLong_AsLong(PyTuple_GetItem(strides_obj, i));
-        }
-    }
-    // Override start_offset if provided
-    if (start_offset_obj != Py_None && PyTuple_Check(start_offset_obj)) {
-        int n = (int)PyTuple_Size(start_offset_obj);
-        if (n != self->dimension) {
-            PyErr_SetString(PyExc_ValueError, "start_offset length must match shape length");
-            return -1;
-        }
-        for (int i = 0; i < n; ++i) {
-            self->start_offset[i] = (int)PyLong_AsLong(PyTuple_GetItem(start_offset_obj, i));
-        }
-    }
-    // Override step_offset if provided
-    if (step_offset_obj != Py_None && PyTuple_Check(step_offset_obj)) {
-        int n = (int)PyTuple_Size(step_offset_obj);
-        if (n != self->dimension) {
-            PyErr_SetString(PyExc_ValueError, "step_offset length must match shape length");
-            return -1;
-        }
-        for (int i = 0; i < n; ++i) {
-            self->step_offset[i] = (int)PyLong_AsLong(PyTuple_GetItem(step_offset_obj, i));
-        }
-    }
+    // Override strides/start_offset/step_offset if provided (accepts any sequence type)
+    if (_override_int_array(strides_obj, self->strides, self->dimension, "strides") < 0) return -1;
+    if (_override_int_array(start_offset_obj, self->start_offset, self->dimension, "start_offset") < 0) return -1;
+    if (_override_int_array(step_offset_obj, self->step_offset, self->dimension, "step_offset") < 0) return -1;
+    
     return 0;
 }
 
@@ -832,11 +957,15 @@ static Py_ssize_t Vector_len(Vector *self) {
     return self->shape[0];
 }
 
-/* Vector_subscript: supports any mix of int/slice indices, arbitrary steps */
+/* Vector_subscript: supports any mix of int/slice indices, arbitrary steps
+ * Deeply optimized C implementation with SIMD hints, two-pass strategy
+ * Matches pure Python behavior: tuple = multi-index, single int/slice = single index
+ */
 static PyObject *Vector_subscript(Vector *self, PyObject *item) {
-    /* Normalize single index to tuple */
     PyObject *index_tuple;
     int tuple_created = 0;
+    
+    /* Normalize: tuple stays as-is, single int/slice gets wrapped into 1-element tuple */
     if (PyTuple_Check(item)) {
         index_tuple = item;
     } else {
@@ -879,7 +1008,8 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     }
     
     int pos = 0;
-    /* Process each index */
+    /* Process each index - SIMD hint for compiler auto-vectorization */
+    COS_SIMD_LOOP
     for (int i = 0; i < n_idx; ++i) {
         PyObject *idx_obj = PyTuple_GET_ITEM(index_tuple, i);
         if (PyLong_Check(idx_obj)) {
@@ -915,7 +1045,8 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
             pos++;
         }
     }
-    /* Add remaining unindexed dimensions */
+    /* Add remaining unindexed dimensions - SIMD hint */
+    COS_SIMD_LOOP
     for (int i = n_idx; i < self->dimension; ++i) {
         new_shape[pos] = self->shape[i];
         new_strides[pos] = self->strides[i];
@@ -934,7 +1065,7 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
         return PyFloat_FromDouble(val);
     }
     
-    /* Otherwise create new view */
+    /* Otherwise create new view - use Py_TYPE for subclass support (no hardcoded type) */
     PyTypeObject *type = Py_TYPE(self);
     Vector *view = (Vector*)type->tp_alloc(type, 0);
     if (!view) {
@@ -1043,8 +1174,8 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
         return 0;
     }
     
-    /* List/tuple assignment */
-    if (PyList_Check(value) || PyTuple_Check(value)) {
+    /* Sequence assignment (accepts any sequence type: list, tuple, etc.) */
+    if (PySequence_Check(value)) {
         Py_ssize_t seq_len = PySequence_Size(value);
         if ((int)seq_len != total) {
             PyErr_Format(PyExc_ValueError, "expected %d values, got %zd", total, seq_len);

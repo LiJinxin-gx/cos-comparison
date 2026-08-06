@@ -3,6 +3,7 @@
 
 #include "type_data.h"
 #include <Python.h>
+#include <math.h>
 
 /* Callback context for error handling and name space passing */
 typedef struct {

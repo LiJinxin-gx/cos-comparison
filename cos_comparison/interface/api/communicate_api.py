@@ -90,7 +90,7 @@ class PIPECommunicate(FdCommunicate):
                 r,w=os.pipe()
                 read_fd = read_fd if read_fd else r
                 write_fd = write_fd if write_fd else w
-        super().__init__(obj=read_fd,target=write_fd)
+        super().__init__(fd=read_fd,target_fd=write_fd)
 
 class SocketCommunicate(IOCommunicate):
     __slots__ = ()

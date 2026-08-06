@@ -10,13 +10,13 @@ class Receptor:
         return self[*index]
 
 class TensorReceptor(Receptor):
-    def __init__(self):
+    def __init__(self,data):
         try:
             data = memoryview(data)
         except:
             pass
         super().__init__(data)
-    def compaison_passive(self,output=None,**kwargs):
+    def comparison_passive(self,output=None,**kwargs):
         core.cos_comparison_passive(self.data,output=output,**kwargs)
-    def compaison_active(self,output=None,**kwargs):
+    def comparison_active(self,output=None,**kwargs):
         core.cos_comparison_active(self.data,output=output,**kwargs)

@@ -1,1 +1,1 @@
-from .basedata import *
+from .generator import *

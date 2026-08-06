@@ -19,18 +19,28 @@ static void DefaultContain_dealloc(DefaultContain *self) {
 }
 
 static int DefaultContain_init(DefaultContain *self, PyObject *args, PyObject *kwargs) {
-	PyObject *default_value = Py_None;
-	static char *kwlist[] = {"default_value", NULL};
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &default_value))
+	PyObject *default_value = NULL;
+	PyObject *default_dict = Py_None;
+	static char *kwlist[] = {"default", "default_dict", NULL};
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &default_value, &default_dict))
 		return -1;
-	self->default_dict = PyDict_New();
-	if (!self->default_dict) return -1;
+	if (default_dict != Py_None && PyDict_Check(default_dict)) {
+		self->default_dict = PyDict_Copy(default_dict);
+		if (!self->default_dict) return -1;
+	} else {
+		self->default_dict = PyDict_New();
+		if (!self->default_dict) return -1;
+	}
 	self->default_value = default_value;
 	Py_INCREF(default_value);
 	return 0;
 }
 
 static int DefaultContain_contains(DefaultContain *self, PyObject *item) {
+	return 1;
+}
+
+static Py_ssize_t DefaultContain_len(DefaultContain *self) {
 	return 1;
 }
 
@@ -44,22 +54,15 @@ static PyObject* DefaultContain_getitem(DefaultContain *self, PyObject *item) {
 	return self->default_value;
 }
 
-static int DefaultContain_setitem(DefaultContain *self, PyObject *item, PyObject *value) {
-	if (value == NULL) {
-		return PyDict_DelItem(self->default_dict, item);
-	}
-	return PyDict_SetItem(self->default_dict, item, value);
-}
-
 static PySequenceMethods DefaultContain_as_sequence = {
-	0, 0, 0, 0,
+	(lenfunc)DefaultContain_len, 0, 0, 0,
 	(objobjproc)DefaultContain_contains,
 };
 
 static PyMappingMethods DefaultContain_as_mapping = {
 	0,
 	(binaryfunc)DefaultContain_getitem,
-	(objobjargproc)DefaultContain_setitem,
+	0,
 };
 
 static PyObject* DefaultContain_repr(DefaultContain *self) {
