@@ -10,36 +10,18 @@
 #include <math.h>
 #include "type_data.h"
 
-/* -----------------------------------------------------------------------------
- * Optional SIMD auto-vectorization hints - safe no-op fallback for all compilers
- * These are only hints to the compiler, no architecture-specific intrinsics used
- * --------------------------------------------------------------------------- */
 /* ---------------------------------------------------------------------------
  * Portable SIMD & optimization hints (best-effort, degrade gracefully)
  * --------------------------------------------------------------------------- */
 #if defined(_MSC_VER)
   /* MSVC: ignore vector dependencies for auto-vectorization */
   #define COS_SIMD_LOOP __pragma(loop(ivdep))
-  /* MSVC: hint to unroll loops (best effort) */
-  #define COS_UNROLL_LOOP(n) __pragma(loop(ivdep, unroll(n)))
-  /* MSVC: assume pointer alignment */
-  #define COS_ASSUME_ALIGNED(ptr, align) __assume_aligned((ptr), (align))
 #elif defined(__GNUC__) || defined(__clang__)
   /* GCC/Clang: ignore vector dependencies for auto-vectorization */
   #define COS_SIMD_LOOP _Pragma("GCC ivdep")
-  /* GCC/Clang: hint to unroll loops (best effort) */
-  #if defined(__clang__)
-    #define COS_UNROLL_LOOP(n) _Pragma("clang loop unroll_count(n)")
-  #else
-    #define COS_UNROLL_LOOP(n) _Pragma("GCC unroll n")
-  #endif
-  /* GCC/Clang: assume pointer alignment (built-in function) */
-  #define COS_ASSUME_ALIGNED(ptr, align) ((ptr) = __builtin_assume_aligned((ptr), (align)))
 #else
-  /* Unknown compiler: all no-ops, safe fallback */
+  /* Unknown compiler: safe no-op fallback */
   #define COS_SIMD_LOOP
-  #define COS_UNROLL_LOOP(n)
-  #define COS_ASSUME_ALIGNED(ptr, align) ((void)0)
 #endif
 
 /* Restrict qualifier for compiler alias analysis */
@@ -284,6 +266,89 @@ static PySequenceMethods Vector_as_sequence = {
     0,                                        /* sq_inplace_repeat */
 };
 
+/* ------------------------------------------------------------------
+Buffer protocol export (memoryview(vector) support)
+Exposes the underlying contiguous double/uchar storage using the
+Vector's logical start/offset/step slicing parameters. Read-only.
+------------------------------------------------------------------ */
+static int Vector_getbuffer(PyObject *self, Py_buffer *view, int flags) {
+    Vector *v = (Vector*)self;
+    Data *d = v->data;
+    if (!d || !d->data) {
+        PyErr_SetString(PyExc_BufferError, "vector has no underlying data");
+        return -1;
+    }
+    if (flags & PyBUF_WRITABLE) {
+        PyErr_SetString(PyExc_BufferError, "vector buffer is read-only");
+        return -1;
+    }
+    int itemsize = (d->dtype == 1) ? 1 : 8;
+    const char *format = (d->dtype == 1) ? "B" : "d";
+    int want_nd = !!(flags & PyBUF_ND);
+    int want_strides = !!(flags & PyBUF_STRIDES);
+    int want_format = !!(flags & PyBUF_FORMAT);
+    Py_ssize_t *shape_buf = NULL, *strides_buf = NULL;
+if (want_nd || want_strides) {
+            size_t n = (v->dimension > 0) ? (size_t)v->dimension : 1;
+            shape_buf = (Py_ssize_t*)PyMem_Malloc(sizeof(Py_ssize_t) * n);
+            if (!shape_buf) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            if (want_strides) {
+                strides_buf = (Py_ssize_t*)PyMem_Malloc(sizeof(Py_ssize_t) * n);
+                if (!strides_buf) {
+                    PyMem_Free(shape_buf);
+                    PyErr_NoMemory();
+                    return -1;
+                }
+            }
+            for (int i = 0; i < v->dimension; ++i) {
+                shape_buf[i] = v->shape[i];
+                if (strides_buf) strides_buf[i] = (Py_ssize_t)v->strides[i] * v->step_offset[i] * itemsize;
+            }
+            if (!want_nd) {
+                PyMem_Free(shape_buf);
+                shape_buf = NULL;
+            }
+            if (!want_strides) {
+                PyMem_Free(strides_buf);
+                strides_buf = NULL;
+            }
+    }
+    Py_ssize_t offset = (Py_ssize_t)v->start + (Py_ssize_t)v->offset;
+    Py_ssize_t total = 1;
+    for (int i = 0; i < v->dimension; ++i) {
+        offset += (Py_ssize_t)v->strides[i] * v->start_offset[i];
+        total *= v->shape[i];
+    }
+    Py_ssize_t len = total * itemsize;
+    Py_INCREF(self);
+    view->buf = (void*)((char*)d->data + offset * itemsize);
+    view->obj = self;
+    view->len = len;
+    view->readonly = 1;
+    view->itemsize = itemsize;
+    view->format = want_format ? (char*)format : NULL;
+    view->ndim = want_nd ? v->dimension : 0;
+    view->shape = shape_buf;
+    view->strides = strides_buf;
+    view->suboffsets = NULL;
+    view->internal = NULL;
+    return 0;
+}
+
+static void Vector_releasebuffer(PyObject *self, Py_buffer *view) {
+    (void)self;
+    PyMem_Free(view->shape);
+    PyMem_Free(view->strides);
+}
+
+static PyBufferProcs Vector_as_buffer = {
+    (getbufferproc)Vector_getbuffer,      /* bf_getbuffer */
+    (releasebufferproc)Vector_releasebuffer, /* bf_releasebuffer */
+};
+
 // Forward declarations for number methods
 static PyObject* Vector_pow(PyObject *a, PyObject *b, PyObject *mod);
 static PyObject* Vector_ipow(PyObject *self, PyObject *other, PyObject *mod);
@@ -378,22 +443,22 @@ static inline Vector* _vector_new_view(Vector *self) {
     view->offset = self->offset;
     
     // Allocate and copy shape
-    view->shape = (int*)malloc(self->dimension * sizeof(int));
+    view->shape = (int*)malloc((size_t)(self->dimension) * sizeof(int));
     if (!view->shape) { Py_DECREF(view); return NULL; }
     memcpy(view->shape, self->shape, self->dimension * sizeof(int));
     
     // Allocate and copy strides
-    view->strides = (int*)malloc(self->dimension * sizeof(int));
+    view->strides = (int*)malloc((size_t)(self->dimension) * sizeof(int));
     if (!view->strides) { free(view->shape); Py_DECREF(view); return NULL; }
     memcpy(view->strides, self->strides, self->dimension * sizeof(int));
     
     // Allocate and copy start_offset
-    view->start_offset = (int*)malloc(self->dimension * sizeof(int));
+    view->start_offset = (int*)malloc((size_t)(self->dimension) * sizeof(int));
     if (!view->start_offset) { free(view->shape); free(view->strides); Py_DECREF(view); return NULL; }
     memcpy(view->start_offset, self->start_offset, self->dimension * sizeof(int));
     
     // Allocate and copy step_offset
-    view->step_offset = (int*)malloc(self->dimension * sizeof(int));
+    view->step_offset = (int*)malloc((size_t)(self->dimension) * sizeof(int));
     if (!view->step_offset) { free(view->shape); free(view->strides); free(view->start_offset); Py_DECREF(view); return NULL; }
     memcpy(view->step_offset, self->step_offset, self->dimension * sizeof(int));
     
@@ -412,12 +477,12 @@ static int _flatten_list_to_data(PyObject *obj, double *out, int *idx, int dim, 
     }
 
     /* Iterative flatten using carry mechanism - no recursion, no stack overflow */
-    int *num_list = (int*)malloc((dim + 1) * sizeof(int));
+    int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     if (!num_list) { PyErr_NoMemory(); return -1; }
     for (int i = 0; i <= dim; ++i) num_list[i] = 1;
     int flag = dim;
     int pos = 0;
-    int *indices = (int*)malloc(dim * sizeof(int));
+    int *indices = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!indices) { free(num_list); PyErr_NoMemory(); return -1; }
 
     while (flag) {
@@ -485,7 +550,7 @@ static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
         if (PyObject_GetBuffer(obj, &view, PyBUF_FORMAT | PyBUF_ND) == 0) {
             if (view.ndim > 0) {
                 dim = view.ndim;
-                sh = (int*)malloc(dim * sizeof(int));
+                sh = (int*)malloc((size_t)(dim) * sizeof(int));
                 if (!sh) {
                     PyBuffer_Release(&view);
                     PyErr_NoMemory();
@@ -534,7 +599,7 @@ static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
     
     /* Priority 3: Fallback - iterative length detection (general algorithm, no recursion) */
     int cap = 4;
-    sh = (int*)malloc(cap * sizeof(int));
+    sh = (int*)malloc((size_t)(cap) * sizeof(int));
     if (!sh) { PyErr_NoMemory(); return -1; }
     PyObject *cur = obj;
     Py_INCREF(cur);
@@ -542,7 +607,7 @@ static int _infer_shape(PyObject *obj, int **shape, int *dimension) {
         Py_ssize_t len = PySequence_Size(cur);
         if (dim >= cap) {
             cap *= 2;
-            int *new_sh = (int*)realloc(sh, cap * sizeof(int));
+            int *new_sh = (int*)realloc(sh, (size_t)cap * sizeof(int));
             if (!new_sh) {
                 free(sh);
                 Py_XDECREF(cur);
@@ -572,7 +637,7 @@ static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim) {
     Py_ssize_t len = PySequence_Size(obj);
     if (len < 0) return -1;
     *out_dim = (int)len;
-    *out_shape = (int*)malloc(*out_dim * sizeof(int));
+    *out_shape = (int*)malloc((size_t)(*out_dim) * sizeof(int));
     if (!*out_shape) return -1;
     for (int i = 0; i < *out_dim; ++i) {
         PyObject *item = PySequence_GetItem(obj, i);
@@ -595,7 +660,7 @@ static int _parse_int_sequence(PyObject *obj, int **out_arr, int *out_len) {
     Py_ssize_t len = PySequence_Size(obj);
     if (len < 0) return -1;
     *out_len = (int)len;
-    *out_arr = (int*)malloc(*out_len * sizeof(int));
+    *out_arr = (int*)malloc((size_t)(*out_len) * sizeof(int));
     if (!*out_arr) return -1;
     for (int i = 0; i < *out_len; ++i) {
         PyObject *item = PySequence_GetItem(obj, i);
@@ -678,10 +743,10 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         Py_INCREF(self->owner);
         self->flags |= VECTOR_FLAG_VIEW;
         
-        self->shape = (int*)malloc(src->dimension * sizeof(int));
-        self->strides = (int*)malloc(src->dimension * sizeof(int));
-        self->start_offset = (int*)malloc(src->dimension * sizeof(int));
-        self->step_offset = (int*)malloc(src->dimension * sizeof(int));
+        self->shape = (int*)malloc((size_t)(src->dimension) * sizeof(int));
+        self->strides = (int*)malloc((size_t)(src->dimension) * sizeof(int));
+        self->start_offset = (int*)malloc((size_t)(src->dimension) * sizeof(int));
+        self->step_offset = (int*)malloc((size_t)(src->dimension) * sizeof(int));
         if (!self->shape || !self->strides || !self->start_offset || !self->step_offset) {
             PyErr_NoMemory();
             return -1;
@@ -758,11 +823,11 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         
         if (!need_convert) {
             /* Zero-copy path: directly use buffer memory */
-            data = (Data*)calloc(1, sizeof(Data));
+            data = (Data*)calloc((size_t)(1), sizeof(Data));
             if (!data) { free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
             data->dimension = dim;
             data->shape = shape;
-            data->strides = (int*)malloc(dim * sizeof(int));
+            data->strides = (int*)malloc((size_t)(dim) * sizeof(int));
             if (!data->strides) { free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
             int stride = 1;
             for (int i = dim - 1; i >= 0; --i) {
@@ -792,13 +857,13 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
             COS_SIMD_LOOP
             for (int i = 0; i < total; ++i) {
                 double val;
-                const char *p = in + i*elem_size;
+                const char *p = in + i * (size_t)elem_size;
                 switch (conv_type) {
-                    case 2: val = (double)*(const float*)p; break;
-                    case 3: val = (double)*(const int*)p; break;
-                    case 4: val = (double)*(const short*)p; break;
-                    case 5: val = (double)*(const long*)p; break;
-                    case 6: val = (double)*(const long long*)p; break;
+                    case 2: { float    tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; } break;
+                    case 3: { int      tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; } break;
+                    case 4: { short    tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; } break;
+                    case 5: { long     tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; } break;
+                    case 6: { long long tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; } break;
                     default: val = 0.0;
                 }
                 out[i] = val;
@@ -816,15 +881,17 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
         self->start = start;
         
         // Allocate and compute strides for Vector
-        self->strides = (int*)malloc(dim * sizeof(int));
+        self->strides = (int*)malloc((size_t)(dim) * sizeof(int));
         if (!self->strides) { PyErr_NoMemory(); return -1; }
-        self->strides[dim - 1] = 1;
-        for (int i = dim - 2; i >= 0; --i) {
-            self->strides[i] = self->strides[i+1] * self->shape[i+1];
+        if (dim > 0) {
+            self->strides[dim - 1] = 1;
+            for (int i = dim - 2; i >= 0; --i) {
+                self->strides[i] = self->strides[i+1] * self->shape[i+1];
+            }
         }
         // Allocate and init start/step offsets
-        self->start_offset = (int*)malloc(dim * sizeof(int));
-        self->step_offset = (int*)malloc(dim * sizeof(int));
+        self->start_offset = (int*)malloc((size_t)(dim) * sizeof(int));
+        self->step_offset = (int*)malloc((size_t)(dim) * sizeof(int));
         if (!self->start_offset || !self->step_offset) { PyErr_NoMemory(); return -1; }
         for (int i = 0; i < dim; ++i) {
             self->start_offset[i] = 0;
@@ -901,15 +968,17 @@ fallback_sequence:
     self->shape = shape;
     self->dimension = dim;
     // Allocate and compute strides
-    self->strides = (int*)malloc(dim * sizeof(int));
+    self->strides = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
-    self->strides[dim - 1] = 1;
-    for (int i = dim - 2; i >= 0; --i) {
-        self->strides[i] = self->strides[i+1] * self->shape[i+1];
+    if (dim > 0) {
+        self->strides[dim - 1] = 1;
+        for (int i = dim - 2; i >= 0; --i) {
+            self->strides[i] = self->strides[i+1] * self->shape[i+1];
+        }
     }
     // Allocate and init offsets
-    self->start_offset = (int*)malloc(dim * sizeof(int));
-    self->step_offset = (int*)malloc(dim * sizeof(int));
+    self->start_offset = (int*)malloc((size_t)(dim) * sizeof(int));
+    self->step_offset = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!self->start_offset || !self->step_offset) { Data_free(data); PyErr_NoMemory(); return -1; }
     for (int i = 0; i < dim; ++i) {
         self->start_offset[i] = 0;
@@ -996,10 +1065,10 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     }
     
     /* Allocate new arrays for the result view */
-    int *new_shape = (int*)malloc(new_dim * sizeof(int));
-    int *new_strides = (int*)malloc(new_dim * sizeof(int));
-    int *new_so = (int*)malloc(new_dim * sizeof(int));
-    int *new_sto = (int*)malloc(new_dim * sizeof(int));
+    int *new_shape = (int*)malloc((size_t)(new_dim) * sizeof(int));
+    int *new_strides = (int*)malloc((size_t)(new_dim) * sizeof(int));
+    int *new_so = (int*)malloc((size_t)(new_dim) * sizeof(int));
+    int *new_sto = (int*)malloc((size_t)(new_dim) * sizeof(int));
     int new_offset = self->offset;
     if (!new_shape || !new_strides || !new_so || !new_sto) {
         if (tuple_created) Py_DECREF(index_tuple);
@@ -1235,13 +1304,13 @@ static int Vector_ass_subscript(Vector *self, PyObject *item, PyObject *value) {
         for (int i = 0; i < total; ++i) {
             const char *p = (const char*)buf.buf + i * buf.strides[0];
             double val;
-            if (strcmp(buf.format, "d") == 0) val = *(const double*)p;
-            else if (strcmp(buf.format, "f") == 0) val = (double)*(const float*)p;
-            else if (strcmp(buf.format, "i") == 0 || strcmp(buf.format, "I") == 0) val = (double)*(const int*)p;
-            else if (strcmp(buf.format, "l") == 0 || strcmp(buf.format, "L") == 0) val = (double)*(const long*)p;
-            else if (strcmp(buf.format, "q") == 0 || strcmp(buf.format, "Q") == 0) val = (double)*(const long long*)p;
-            else if (strcmp(buf.format, "h") == 0 || strcmp(buf.format, "H") == 0) val = (double)*(const short*)p;
-            else if (strcmp(buf.format, "B") == 0 || strcmp(buf.format, "b") == 0) val = (double)*(const unsigned char*)p;
+            if (strcmp(buf.format, "d") == 0) { memcpy(&val, p, sizeof(val)); }
+            else if (strcmp(buf.format, "f") == 0) { float tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
+            else if (strcmp(buf.format, "i") == 0 || strcmp(buf.format, "I") == 0) { int tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
+            else if (strcmp(buf.format, "l") == 0 || strcmp(buf.format, "L") == 0) { long tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
+            else if (strcmp(buf.format, "q") == 0 || strcmp(buf.format, "Q") == 0) { long long tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
+            else if (strcmp(buf.format, "h") == 0 || strcmp(buf.format, "H") == 0) { short tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
+            else if (strcmp(buf.format, "B") == 0 || strcmp(buf.format, "b") == 0) { unsigned char tmp; memcpy(&tmp, p, sizeof(tmp)); val = (double)tmp; }
             else {
                 PyBuffer_Release(&buf);
                 PyErr_SetString(PyExc_TypeError, "unsupported buffer format");
@@ -1325,19 +1394,19 @@ static Vector* _new_vector_like(Vector *src) {
     if (!result->data) { Py_DECREF(result); return NULL; }
     result->owner = NULL;
     result->flags = VECTOR_FLAG_OWNED;
-    result->shape = (int*)malloc(ndim * sizeof(int));
+    result->shape = (int*)malloc((size_t)(ndim) * sizeof(int));
     if (!result->shape) { Data_free(result->data); Py_DECREF(result); return NULL; }
     memcpy(result->shape, src->shape, ndim * sizeof(int));
     // Precompute strides for new tensor
-    result->strides = (int*)malloc(ndim * sizeof(int));
+    result->strides = (int*)malloc((size_t)(ndim) * sizeof(int));
     if (!result->strides) { free(result->shape); Data_free(result->data); Py_DECREF(result); return NULL; }
     result->strides[ndim - 1] = 1;
     for (int i = ndim - 2; i >= 0; --i) {
         result->strides[i] = result->strides[i+1] * result->shape[i+1];
     }
     // Init offsets
-    result->start_offset = (int*)malloc(ndim * sizeof(int));
-    result->step_offset = (int*)malloc(ndim * sizeof(int));
+    result->start_offset = (int*)malloc((size_t)(ndim) * sizeof(int));
+    result->step_offset = (int*)malloc((size_t)(ndim) * sizeof(int));
     if (!result->start_offset || !result->step_offset) {
         free(result->shape); free(result->strides); Data_free(result->data); Py_DECREF(result);
         return NULL;
@@ -1941,6 +2010,7 @@ static PyTypeObject VectorizeType = {
     .tp_as_number = &Vector_as_number,
     .tp_as_sequence = &Vector_as_sequence,
     .tp_as_mapping = &Vector_as_mapping,
+    .tp_as_buffer = &Vector_as_buffer,
     .tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
     .tp_doc       = "Maps a 1D list to a multi-dimensional tensor view (C-backed).",
     .tp_methods   = Vector_methods,

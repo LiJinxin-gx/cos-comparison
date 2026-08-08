@@ -17,7 +17,7 @@ class Transaction:
 class MapMemory(Memory):
     __slots__ = ("cache","close_commit","closer")
     def __init__(self,map_obj=None,close_commit=False,closer=None):
-        self.cache = set()
+        self.cache = []
         self.close_commit = close_commit
         self.closer = closer
         super().__init__(memory=map_obj)
@@ -30,7 +30,7 @@ class MapMemory(Memory):
         else:
             return self.memory[key]
     def save(self,key,value,nesting=False,create=True):
-        self.cache.add( Transaction(key,value,nesting=nesting,create=create) )
+        self.cache.append( Transaction(key,value,nesting=nesting,create=create) )
     def real_save(self,key,value,nesting=False,create=True):
         """
         the save function to save data in cache to support atomic event,you should commit it.
@@ -47,7 +47,7 @@ class MapMemory(Memory):
                         obj = obj[k]
                     else:
                         raise
-                obj[end] =value
+            obj[end] =value
         else:
             self.memory[key] = value
     def commit(self):
@@ -67,6 +67,6 @@ class TableMemory(MapMemory):
     def __init__(self,table_obj=None,close_commit=False,closer=None):
         super().__init__(table_obj,close_commit=close_commit,closer=closer)
     def save(self,keys,value):
-        super().save(keys,value,nesting=True,create=True)
+        return super().save(keys,value,nesting=True,create=True)
     def refer(self,keys):
-        super().refer(keys,nesting=True)
+        return super().refer(keys,nesting=True)

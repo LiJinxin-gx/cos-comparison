@@ -6,18 +6,8 @@ To support extension,it adopt context injection to introduct parallel synchroniz
 from .base_tensor import Tensor
 
 from ... import core
-try:
-    from ...interface.api import parallel_rlock as inner_lock
-except ImportError:
-    from ...interface.tools import VoidContext as inner_lock
-
-try:
-    from ...interface.api import share_array
-    from ...interface.api import load_array
-except ImportError:
-    from array import array as load_array
-    def share_array(dtype,length):
-        return load_array(dtype,(0.0 for _ in range(length)))
+from ...interface.api import parallel_rlock as inner_lock
+from ...interface.api import share_array, load_array
 
 class Task:
     __slots__ = ("caller","args","kwargs")

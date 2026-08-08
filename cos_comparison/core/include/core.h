@@ -34,7 +34,7 @@ typedef double (*algo_fn)(double, double, double, CallbackContext*);
 static inline Data* _compute_output_shape(int dim, const int num[],
                                           const int output_start[], const int output_step[]) {
     (void)output_start; // unused, output always starts at 0 when created by core
-    int *out_shape = (int*)malloc(dim * sizeof(int));
+    int *out_shape = (int*)malloc((size_t)(dim) * sizeof(int));
     for (int i = 0; i < dim; ++i)
         out_shape[i] = (num[i] - 1) * output_step[i] + 1;
     Data *out = Data_create(dim, out_shape);
@@ -142,7 +142,7 @@ static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int dep
     }
     PyErr_Clear();
     /* Generic path: traverse indices one by one */
-    PyObject **stack = (PyObject**)malloc(dim * sizeof(PyObject*));
+    PyObject **stack = (PyObject**)malloc((size_t)(dim) * sizeof(PyObject*));
     if (!stack) { PyErr_NoMemory(); return; }
     PyObject *current = obj;
     int i;
@@ -204,7 +204,7 @@ Data* cos_local_mean(const Data *data,
                      const int start[], const int end[],
                      const int step[],
                      const int output_start[], const int output_step[],
-                     PyObject *output_obj, Data *output);
+                     PyObject *output_obj, Data *output, const double weights[]);
 
 Data* cos_local_variance(const Data *data,
                          const int window_size[],

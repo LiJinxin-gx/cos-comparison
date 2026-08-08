@@ -2,7 +2,12 @@
 Probabilistic logic system for uncertain reasoning.
 Implements event classes, probability operations and Bayesian inference primitives.
 """
+
 #It gives some tools to deal with probability.
+# core formal  is Bayes' formal : P(B|A) * P(A|C) = P(A|B) * P(B|C) = P(AB|C)
+#formal base.
+# P(AB|C) = P(A|B) * P(B|C) = P(B|A) * P(A|C)  (Bayes' formal)
+# P(A+B | C) = P(A|C) + P(B|C)  - P(AB|C)
 
 #----------- event class -----------
 class UnionEvent(frozenset): #A+B+...
@@ -11,6 +16,8 @@ class UnionEvent(frozenset): #A+B+...
         self.name = "UnionEvent"
     def __new__(cls,*event):
         return super().__new__(cls,event)
+    def __eq__(self,other):
+        return hash(self) == hash(other)
     def __hash__(self):
         return hash(("Union",super().__hash__()))
 
@@ -20,6 +27,8 @@ class IntersectionEvent(frozenset): #AB...
         self.name = "IntersectionEvent"
     def __new__(cls,*event):
         return super().__new__(cls,event)
+    def __eq__(self,other):
+        return hash(self) == hash(other)
     def __hash__(self):
         return hash(("Intersection",super().__hash__()))
 
@@ -65,11 +74,12 @@ class event_bind:
 
 #--------- context ----------
 class event_context:
-    # core formal  is Bayes' formal : P(B|A) * P(A|C) = P(A|B) * P(B|C) = P(AB|C)
-    __slots__ = ("name","binds")
-    def __init__(self,name="",binds=None):
+    #logic context container and processer to isolate different logical context.
+    __slots__ = ("name","binds","probability_func")
+    def __init__(self,name="",binds=None,probability_func=None):
         self.name = name
         self.binds = binds if binds else {}
+        self.probability_func = probability_func if probability_func else lambda binds : 0
     def __iter__(self):
         for bind in self.binds:
             yield (*bind,self.binds[bind])
@@ -86,9 +96,9 @@ class event_context:
         try:
             return self.binds[(A,B)] #search directly.
         except KeyError:
-            #formal base.
-            # P(AB|C) = P(A|B) * P(B|C) = P(B|A) * P(A|C)  (Bayes' formal)
-            # P(A+B | C) = P(A|C) + P(B|C)  - P(AB|C)
-            pass
+            #In fact, it should not be hardcoded as specific algorithms for logical reasoning.
+            #It can be implemented through delegation to enable customizable and extendable logical reasoning.
+            #This adopts a trust-based approach to handling callers and delegates the computational responsibility to them.
+            return probability_func(self.binds)
         except:
             raise

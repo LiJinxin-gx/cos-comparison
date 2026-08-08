@@ -34,7 +34,9 @@ static int Add_Object(PyObject *module) {
 		if (PyType_Ready(m->type) < 0) {
 			return i + 1;
 		}
-		PyModule_AddObject(module, m->name, (PyObject*)m->type);
+		if (PyModule_AddObject(module, m->name, (PyObject*)m->type) < 0) {
+			return -(i + 1);
+		}
 	}
 	return 0;
 }

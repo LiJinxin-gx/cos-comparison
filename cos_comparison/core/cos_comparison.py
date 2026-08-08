@@ -296,6 +296,27 @@ class vector_map_as_tensor:
     def __repr__(self):
         return f"<vector_map_as_tensor: dim={len(self.shape)}, shape={self.shape}, start={self.start}, offset={self.offset}>"
 
+    def __buffer__(self, flags):
+        """PEP 688 buffer export: memoryview(self) exposes the tensor as a
+        contiguous C-order double array. Non-contiguous views are materialized
+        into a fresh copy, keeping the export semantics simple and portable.
+        """
+        total = 1
+        for s in self.shape:
+            total *= s
+        data = bytearray(total * 8)
+        view = memoryview(data).cast('d', (total,))
+        pos = 0
+        for flat in self._iter_flat():
+            view[pos] = self.vector[flat]
+            pos += 1
+        try:
+            if self.shape:
+                return memoryview(data).cast('d', self.shape)
+        except (TypeError, ValueError):
+            pass
+        return memoryview(data).cast('d', (total,))
+
     def _flat_index(self, indices):
         """Compute flat index from per-dimension indices.
         
@@ -1152,8 +1173,10 @@ def mean_local(data, *arg, local_size=None, step=None,weight=None,
         local_size = default_contain(1)
     if step is None:
         step = default_contain(1)
+    if isinstance(local_size, int):
+        local_size = (local_size,)
 
-    # Build an all‑one kernel according to the given shape
+    # Build an all-one kernel according to the given shape
     def _build_ones(shape):
         if isinstance(shape, default_contain):
             return shape               # let active mode handle it
@@ -1189,13 +1212,15 @@ def mean_local(data, *arg, local_size=None, step=None,weight=None,
 def local_variance(data, *arg, local_size=None, step=None,
                    output=None, output_start=None, output_step=None, **kwarg):
     """
-    Generic local variance (arbitrary N‑dim).
+    Generic local variance (arbitrary N-D).
     Supports external container via `output`, `output_start`, `output_step`.
     """
     if local_size is None:
         local_size = default_contain(1)
     if step is None:
         step = default_contain(1)
+    if isinstance(local_size, int):
+        local_size = (local_size,)
 
     def _build_ones(shape):
         if isinstance(shape, default_contain):

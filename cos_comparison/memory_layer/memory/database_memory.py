@@ -1,27 +1,17 @@
 #database tools
 
 from .basememory import *
-from ...core import no_done
-
-class DatabaseToolWrap:
-    __slots__ = ("tool","conn_func","exec_func","execmany_func","cursor_func")
-    def __init__(self,tool,conn_func=None,cursor_func=None):
-        self.tool = tool
-        self.conn_func = conn_func if conn_func else no_done
-    def connect(self,database):
-        self.conn_func(self.tool,database)
-
-try:
-    import sqlite3 as default_tool
-except:
-    pass
+from ...interface.api import DatabaseToolWrap, DATABASE_DRIVER
 
 class DatabaseMemory(Memory):
-    __slots__ = ("cursor",)
-    def __init__(self,database_tool=None,database=":memory:",refer_func=None):
-        database_tool = default_tool if database_tool is None else database_tool
-        memory = database_tool.connect(database)
-        super().__init__(memory)
+    __slots__ = ("cursor", "wrap")
+    def __init__(self, database_tool=None, database=":memory:", refer_func=None):
+        tool = DATABASE_DRIVER if database_tool is None else database_tool
+        if tool is None:
+            raise RuntimeError("DatabaseMemory: no database driver available, provide one via database_tool=")
+        self.wrap = DatabaseToolWrap(tool)
+        self.cursor = None
+        super().__init__(self.wrap.connect(database))
         self.refer_func = refer_func
         self.initialize()
     def __enter__(self):
@@ -30,7 +20,7 @@ class DatabaseMemory(Memory):
         self.close()
     def initialize(self):
         try:
-            self.cursor = self.memory.cursor()
+            self.cursor = self.wrap.cursor(self.memory)
             return 0
         except:
             return 1
@@ -39,7 +29,8 @@ class DatabaseMemory(Memory):
     def rollback(self):
         self.memory.rollback()
     def close(self):
-        self.cursor.close()
+        if self.cursor is not None:
+            self.cursor.close()
         self.memory.close()
     def execute(self,command,arg=()):
         try:
@@ -49,5 +40,10 @@ class DatabaseMemory(Memory):
     def executemany(self,command,args=()):
         try:
             self.cursor.executemany(command,args)
+            return 0
         except:
-            self.memory.executemany(command,args)
+            try:
+                self.memory.executemany(command,args)
+                return 1
+            except:
+                return 2

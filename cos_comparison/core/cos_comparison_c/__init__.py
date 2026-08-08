@@ -10,8 +10,7 @@ and placed in a location where ctypes can find it.
 """
 
 import ctypes
-import os
-import sys
+import os.path
 from ctypes import c_int, c_double, c_void_p, POINTER, Structure, CFUNCTYPE
 from math import sqrt
 
@@ -468,21 +467,31 @@ _algo_map[_mod] = _mod_c
 _algo_map[_cosmod] = _cosmod_c
 
 # ---------- Callback wrappers (NEW) ----------
+# ctx transport uses the name object's id() mapped through a registry.
+# This avoids ctypes.cast(..., ctypes.py_object), which depends on raw
+# memory layout and is unreliable (may crash) under newer Python versions.
+_callback_registry = {}
+
+def _get_cb_name(ctx):
+    if not ctx:
+        return None
+    return _callback_registry.get(ctypes.cast(ctx, c_void_p).value)
+
 def _start_cb(ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         if hasattr(name_space, 'start_callback') and name_space.start_callback:
             name_space.start_callback(name_space)
 
 def _end_cb(ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         if hasattr(name_space, 'end_callback') and name_space.end_callback:
             name_space.end_callback(name_space)
 
 def _iter_cb(ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         # iter_callback is used for iter_a_callback and iter_b_callback in Python
         if hasattr(name_space, 'iter_a_callback') and name_space.iter_a_callback:
             name_space.iter_a_callback(name_space)
@@ -490,20 +499,20 @@ def _iter_cb(ctx):
             name_space.iter_b_callback(name_space)
 
 def _local_error_cb(ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         if hasattr(name_space, 'local_error_callback') and name_space.local_error_callback:
             name_space.local_error_callback(name_space)
 
 def _global_error_cb(ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         if hasattr(name_space, 'global_error_callback') and name_space.global_error_callback:
             name_space.global_error_callback(name_space)
 
 def _return_cb(output, ctx):
-    if ctx:
-        name_space = ctypes.cast(ctx, ctypes.py_object).value
+    name_space = _get_cb_name(ctx)
+    if name_space is not None:
         if hasattr(name_space, 'return_callback') and name_space.return_callback:
             return name_space.return_callback(output, name_space)
     return output
@@ -597,14 +606,16 @@ def cos_comparison_passive(data, *arg, window_size=None, w1=1.0, w2=1.0, b1=0.0,
         cb_struct = Callback()
         cb_struct.start = ctypes.cast(START_CB, c_void_p) if start_callback else None
         cb_struct.end = ctypes.cast(END_CB, c_void_p) if end_callback else None
-        cb_struct.iter = ctypes.cast(ITER_CB, c_void_p)
+        if iter_a_callback or iter_b_callback:
+            cb_struct.iter = ctypes.cast(ITER_CB, c_void_p)
+        else:
+            cb_struct.iter = None
         cb_struct.local_error = ctypes.cast(LOCAL_ERR_CB, c_void_p) if local_error_callback else None
         cb_struct.global_error = ctypes.cast(GLOBAL_ERR_CB, c_void_p) if global_error_callback else None
         cb_struct.return_cb = ctypes.cast(RETURN_CB, c_void_p) if return_callback else None
 
-        # Pass name_space as ctx
-        name_obj = ctypes.py_object(name)
-        ctx = ctypes.cast(ctypes.pointer(name_obj), c_void_p)
+        _callback_registry[id(name)] = name
+        ctx = id(name)
 
         # output pre-allocation zero-copy
         use_pointer_opt = False
@@ -671,13 +682,12 @@ def cos_comparison_passive(data, *arg, window_size=None, w1=1.0, w2=1.0, b1=0.0,
             result = return_callback(result, name)
             
     finally:
-        # Free temporary input data (C-side copy, not the original Python object data)
-        try:
-            _lib.Data_free.argtypes = [POINTER(Data)]
-            _lib.Data_free.restype = None
-            _lib.Data_free(data_c)
-        except AttributeError:
-            pass
+        # NOTE: data_c is a Python-managed ctypes Structure (its buffers are
+        # Python-owned arrays). It must NOT be released via C Data_free, which
+        # only frees structs allocated with Data_create. Python GC handles it.
+        if 'name' in locals():
+            _callback_registry.pop(id(name), None)
+        pass
 
     return result
 
@@ -750,13 +760,16 @@ def cos_comparison_active(data, *arg, kernel=None, w1=1.0, w2=1.0, b1=0.0, b2=0.
         cb_struct = Callback()
         cb_struct.start = ctypes.cast(START_CB, c_void_p) if start_callback else None
         cb_struct.end = ctypes.cast(END_CB, c_void_p) if end_callback else None
-        cb_struct.iter = ctypes.cast(ITER_CB, c_void_p)
+        if iter_a_callback or iter_b_callback:
+            cb_struct.iter = ctypes.cast(ITER_CB, c_void_p)
+        else:
+            cb_struct.iter = None
         cb_struct.local_error = ctypes.cast(LOCAL_ERR_CB, c_void_p) if local_error_callback else None
         cb_struct.global_error = ctypes.cast(GLOBAL_ERR_CB, c_void_p) if global_error_callback else None
         cb_struct.return_cb = ctypes.cast(RETURN_CB, c_void_p) if return_callback else None
 
-        name_obj = ctypes.py_object(name)
-        ctx = ctypes.cast(ctypes.pointer(name_obj), c_void_p)
+        _callback_registry[id(name)] = name
+        ctx = id(name)
 
         use_pointer_opt = False
         out_view = None
@@ -822,14 +835,13 @@ def cos_comparison_active(data, *arg, kernel=None, w1=1.0, w2=1.0, b1=0.0, b2=0.
             result = return_callback(result, name)
             
     finally:
-        # Free temporary input data (C-side copies, not original Python object data)
-        try:
-            _lib.Data_free.argtypes = [POINTER(Data)]
-            _lib.Data_free.restype = None
-            _lib.Data_free(data_c)
-            _lib.Data_free(kernel_c)
-        except AttributeError:
-            pass
+        # NOTE: data_c/kernel_c are Python-managed ctypes Structures (their
+        # buffers are Python-owned arrays). They must NOT be released via C
+        # Data_free; Python GC handles them. Only result_c (allocated by C
+        # Data_create) is released above.
+        if 'name' in locals():
+            _callback_registry.pop(id(name), None)
+        pass
 
     return result
 
@@ -854,13 +866,11 @@ def cos(a, b, algorithm=_cos):
         res = _lib.cos_full(ctypes.byref(data_a), ctypes.byref(data_b), sim_cb)
         return res
     finally:
-        try:
-            _lib.Data_free.argtypes = [POINTER(Data)]
-            _lib.Data_free.restype = None
-            _lib.Data_free(data_a)
-            _lib.Data_free(data_b)
-        except AttributeError:
-            pass
+        # NOTE: data_a/data_b are Python-managed ctypes Structures (their
+        # buffers are Python-owned arrays). They must NOT be released via C
+        # Data_free, which would free() non-heap Python buffers. Python GC
+        # handles them.
+        pass
 
 cos_1d = cos
 cos_2d = cos
@@ -868,13 +878,23 @@ cos_3d = cos
 cos_4d = cos
 
 # ---------- local mean and variance ----------
-def mean_local(data, *arg, local_size=None, step=None, output=None, output_start=None, output_step=None, **kwargs):
+def mean_local(data, *arg, local_size=None, step=None, weight=None,
+               output=None, output_start=None, output_step=None, **kwargs):
+    # Match pure-Python defaults: None/builtin int/1-D sequences are normalized
+    if local_size is None:
+        local_size = (1,) * len(infer_shape(data) or (1,))
+        _shape = local_size
+    elif isinstance(local_size, int):
+        local_size = (local_size,)
+    else:
+        local_size = tuple(local_size)
+
     def ones(shape):
         if len(shape) == 1:
             return [1.0] * shape[0]
         else:
             return [ones(shape[1:]) for _ in range(shape[0])]
-    kernel = ones(local_size)
+    kernel = weight if weight else ones(local_size)
     N = 1
     for s in local_size:
         N *= s
@@ -886,6 +906,12 @@ def mean_local(data, *arg, local_size=None, step=None, output=None, output_start
     return result
 
 def local_variance(data, *arg, local_size=None, step=None, output=None, output_start=None, output_step=None, **kwargs):
+    if local_size is None:
+        local_size = (1,) * len(infer_shape(data) or (1,))
+    elif isinstance(local_size, int):
+        local_size = (local_size,)
+    else:
+        local_size = tuple(local_size)
     mean = mean_local(data, *arg, local_size=local_size, step=step, **kwargs)
     def square(x):
         if isinstance(x, vector_map_as_tensor):
@@ -1204,6 +1230,27 @@ class vector_map_as_tensor:
 
     def __repr__(self):
         return f"<vector_map_as_tensor: dim={len(self.shape)}, shape={self.shape}, start={self.start}, offset={self.offset}>"
+
+    def __buffer__(self, flags):
+        """PEP 688 buffer export: memoryview(self) exposes the tensor as a
+        contiguous C-order double array. Non-contiguous views are materialized
+        into a fresh copy, keeping the export semantics simple and portable.
+        """
+        total = 1
+        for s in self.shape:
+            total *= s
+        data = bytearray(total * 8)
+        view = memoryview(data).cast('d', (total,))
+        pos = 0
+        for flat in self._iter_flat():
+            view[pos] = self.vector[flat]
+            pos += 1
+        try:
+            if self.shape:
+                return memoryview(data).cast('d', self.shape)
+        except (TypeError, ValueError):
+            pass
+        return memoryview(data).cast('d', (total,))
 
     def _flat_index(self, indices):
         """Compute flat index from per-dimension indices.

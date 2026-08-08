@@ -62,7 +62,7 @@ class Logic_bind:
     def __init__(self,reason,result,limit=None,status=sure_true):
         self.reason=reason
         self.result=result
-        self.limit=limit if limit is None else No_limit()
+        self.limit=limit if limit is not None else No_limit()
         self.status=status
     def __bool__(self)->bool:
         return bool(self.status & Logic_true)

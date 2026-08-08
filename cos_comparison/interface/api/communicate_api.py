@@ -5,8 +5,7 @@ import socket
 
 from abc import ABC
 
-def no_done(*args,**kwargs):
-    pass
+from ..tools import no_done
 
 #class chain
 #BaseCommunicate(ABC)

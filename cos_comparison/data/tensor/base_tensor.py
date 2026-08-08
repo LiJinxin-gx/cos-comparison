@@ -21,10 +21,10 @@ class Tensor(core.vector_map_as_tensor,BaseTensor):
     # start, strides, offset, start_offset, step_offset) are passed through
     # completely via *args/**kwargs.
     def __init__(self,*args,data=None,split_start=None,split_shape=None,**kwargs):
-        if data is None:
-            super().__init__(*args,**kwargs)
-        else:
+        if data is not None:
             loaded = core.load_as_default_data(data, start=split_start, shape=split_shape)
             # explicit vector/shape come from the loaded data source; every
             # other optional parent setting in kwargs is still forwarded.
-            super().__init__(*args,vector=loaded.vector,shape=loaded.shape,**kwargs)
+            kwargs["vector"] = loaded.vector
+            kwargs["shape"] = loaded.shape
+        super().__init__(*args,**kwargs)

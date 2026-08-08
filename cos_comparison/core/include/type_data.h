@@ -62,13 +62,13 @@ static inline int Data_total_elements(const Data *self) {
 /* --------------------------------- */
 
 static inline Data* Data_create(int dimension, const int shape[]) {
-	Data *self = (Data*)calloc(1, sizeof(Data));
+	Data *self = (Data*)calloc((size_t)(1), sizeof(Data));
 	if (!self) return NULL;
 	self->dimension = dimension;
-	self->shape = (int*)malloc(dimension * sizeof(int));
+	self->shape = (int*)malloc((size_t)(dimension) * sizeof(int));
 	if (!self->shape) { free(self); return NULL; }
 	memcpy(self->shape, shape, dimension * sizeof(int));
-	self->strides = (int*)malloc(dimension * sizeof(int));
+	self->strides = (int*)malloc((size_t)(dimension) * sizeof(int));
 	if (!self->strides) { free(self->shape); free(self); return NULL; }
 	int stride = 1;
 	for (int i = dimension - 1; i >= 0; --i) {
@@ -76,7 +76,7 @@ static inline Data* Data_create(int dimension, const int shape[]) {
 		stride *= shape[i];
 	}
 	int total = stride;
-	self->data = (double*)calloc(total, sizeof(double));
+	self->data = (double*)calloc((size_t)(total), sizeof(double));
 	if (!self->data) { free(self->strides); free(self->shape); free(self); return NULL; }
 	self->owns_data = 1;
 	self->dtype = 0;

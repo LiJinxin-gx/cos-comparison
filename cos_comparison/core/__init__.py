@@ -10,7 +10,7 @@ for maximum runtime performance while maintaining full extensibility.
 
 import importlib
 import json
-import os
+import os.path
 from typing import Any, Dict, List, Optional, Tuple
 
 # -------------------------------------------------------------------
@@ -19,10 +19,10 @@ from typing import Any, Dict, List, Optional, Tuple
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 # Default backends in priority order (relative to the core package)
-# ctypes backend is included but disabled by default due to stability issues
+# ctypes backend ships as an optional fallback; pure Python is always last
 _DEFAULT_BACKENDS = (
     {"name": ".cos_comparison_pydll", "enabled": True},
-    {"name": ".cos_comparison_c", "enabled": False},
+    {"name": ".cos_comparison_c", "enabled": True},
     {"name": ".cos_comparison", "enabled": True},
 )
 
@@ -135,7 +135,7 @@ def _load_backend(module_name: str) -> bool:
         
         _current_backend_name = module_name
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 

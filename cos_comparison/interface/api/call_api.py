@@ -31,17 +31,17 @@ class C_CallContainer(BaseCallContainer):
     def __init__(self, library_path, loader=ctypes.CDLL, *args, **kwargs):
         lib = loader(library_path, *args, **kwargs)
         super().__init__(lib)
-
-class CDLL_CallContainer(C_CallContainer):
-    def __init__(self, library_path, *args, **kwargs):
-        super().__init__(library_path, ctypes.CDLL, *args, **kwargs)
-    def get_call(self,name,argstype=(),restype=None,init_func=None):
+    def get_call(self,name,argstypes=(),restype=None,init_func=None):
         caller = super().get_call(name,init_func=init_func)
-        caller.argstype = argstype
+        caller.argstypes = argstype
         caller.restype = restype
         return caller
     def call(self,name,args=()):
         return super().call(name,args=args)
+
+class CDLL_CallContainer(C_CallContainer):
+    def __init__(self, library_path, *args, **kwargs):
+        super().__init__(library_path, ctypes.CDLL, *args, **kwargs)
 
 class WinDLL_CallContainer(C_CallContainer):
     def __init__(self, library_path, *args, **kwargs):

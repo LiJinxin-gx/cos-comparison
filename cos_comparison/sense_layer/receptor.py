@@ -7,7 +7,7 @@ class Receptor:
     def initialize(self,caller,*args,**kwargs):
         return caller(self.data,*args,**kwargs)
     def point(self,index):
-        return self[*index]
+        return self.data.__getitem__(*index)
 
 class TensorReceptor(Receptor):
     def __init__(self,data):

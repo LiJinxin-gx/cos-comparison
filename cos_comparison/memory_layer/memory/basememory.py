@@ -3,8 +3,7 @@
 from abc import ABC
 from enum import Flag,auto
 
-def no_done(*args,**kwargs):
-    pass
+from ...interface.tools import no_done
 
 class Status(Flag):
     READ = auto()
@@ -52,6 +51,9 @@ class Memory(BaseMemory):
     def close(self,*args,**kwargs):
         return self.close_func(self,*args,**kwargs)
     def process(self,caller=None,args=(),kwargs=None):
+        caller = caller if caller else no_done
+        kwargs = {} if kwargs is None else kwargs
         return caller(self.memory,*args,**kwargs)
     def call(self,name,args=(),kwargs=None):
+        kwargs = {} if kwargs is None else kwargs
         return getattr(self.memory,name)(*args,**kwargs)

@@ -6,6 +6,6 @@ class ExecuterDriver:
         self.call_list = caller_list
     def call(self,index,args=(),kwargs=None):
         kwargs = kwargs if kwargs else {}
-        self.call_list[index](*args,**kwargs)
+        return self.call_list[index](*args,**kwargs)
         
 
