@@ -12,12 +12,37 @@ import os
 import sys
 import platform
 import shutil
+
+import re
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 
 # Change to the directory of this script so that all relative paths work correctly
 setup_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(setup_dir)
+
+# ----------------------------------------------------------------------
+#  Version management: extract version from pyproject.toml (regex,
+#  Python 3.8+ compatible, no tomllib) and write cos_comparison/VERSION
+#  so the package can expose the single source-of-truth version at runtime.
+# ----------------------------------------------------------------------
+def _write_version_file():
+    pyproject_path = os.path.join(setup_dir, "pyproject.toml")
+    version_path = os.path.join(setup_dir, "cos_comparison", "VERSION.txt")
+    try:
+        with open(pyproject_path, encoding="utf-8") as text_file:
+            text = text_file.read()
+        match = re.search(r"^version\s*=\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
+        if not match or not match.group(1):
+            return
+        version_str = match.group(1).strip()
+        with open(version_path, "w", encoding="utf-8") as version_file:
+            version_file.write(version_str + "\n")
+        print("VERSION file written: {0}".format(version_str))
+    except Exception as exc:
+        print("Warning: skipping VERSION file generation ({0})".format(exc))
+
+_write_version_file()
 
 # Platform-specific compile arguments
 is_windows = platform.system() == "Windows"

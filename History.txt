@@ -1,5 +1,58 @@
 cos-comparison Project History
 =============================
+v0.4.1 (2026-08-08)
+-------------------
+ctypes backend stability hotfix release:
+- Fixed hard crash when calling the ctypes backend without callbacks: the iteration callback pointer is now registered only when `iter_a_callback` / `iter_b_callback` is actually provided, no more unconditional callback invocation through the C API
+- Fixed heap corruption (0xC0000374) in `cos_comparison_passive`, `cos_comparison_active`, `cos`, `mean_local` and `local_variance`: removed invalid `Data_free` calls on Python-managed ctypes buffers (`data_a/data_b/data_c/kernel_c`); only the C-allocated `result_c` is still freed, input buffers are handled entirely by Python/ctypes garbage collection
+- Fixed callback crash on Python 3.14: callback lookup no longer relies on `ctypes.cast(ctx, ctypes.py_object).value` (unstable object-layout-dependent cast); replaced with an id-based registry pipeline - ctx now passes `id(name)`, and the callback name-space is recovered via `_callback_registry` for all six callback types
+- All callback functionality preserved: start/end/iter_a/iter_b/local_error/global_error/return callbacks keep their original signatures, triggering order and return-value contract; registry is fully cleaned up after every call (zero leaks, zero stale entries)
+- No public API changes, no performance regression, pure-Python-side fix only (no C code modified)
+- Verified: `tests/test_full.py` and `tests/test_tensor_comprehensive.py` pass on all three backends; callback scenarios and stress runs (thousands of iterations with and without callbacks) complete cleanly with EXIT=0
+
+v0.4.0 (2026-08-05)
+-------------------
+Major architecture upgrade release - modernized indexing, new features, and performance improvements:
+- **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from vector_map_as_tensor, final migration to stride+offset architecture
+- **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
+- **`__shape__` protocol method**: All tensor types now expose `__shape__()` method for zero-overhead shape inference, overridable by subclasses for custom shape logic
+- **Enhanced `load_as_default_data`**: Added `step` parameter support for sub-sampling during data loading, tensor fast path using native slicing operations, PyBuffer fast path for contiguous double data
+- **Keyword-only initialization**: All vector_map_as_tensor constructors now use keyword arguments for optional parameters, cleaner and safer API
+- **Code simplification**: Removed all backward compatibility shims, simplified indexing logic, more general and maintainable codebase
+- **Enhanced PyBuffer protocol**: Improved zero-copy support for array.array, memoryview, bytes, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char), unified type detection
+- **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, added portable optimization macros (unroll, alignment, branch prediction, inline)
+- **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
+- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
+- **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
+- **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
+- **Updated core module loader**: `infer_shape` added to hot API list for zero-overhead access
+- **Improved portability**: Added portable optimization macros (COS_UNROLL_LOOP, COS_ASSUME_ALIGNED, COS_INLINE, COS_LIKELY/COS_UNLIKELY), all degrade gracefully on unknown compilers
+- **Unified shape inference in core functions**: Replaced ad-hoc shape detection in `cos_comparison_passive` and `cos_comparison_active` with `infer_shape` function, simpler and more consistent code
+- **Math library optimization**: C extension `sqrt` now uses C `math.h` directly with thin Python wrapper (no longer imports from Python math module), ctypes backend imports from Python math module, C code internally uses native C math functions
+- **Fixed integer chain return bug**: `multiple_chain` and `add_chain` now correctly return integers for integer inputs (previously always returned floats), fixes index calculation errors
+- **Type safety improvements**: Comprehensive type safety audit, all type conversions verified, proper error checking throughout
+- **Enhanced `load_as_default_data`**: Added tensor fast path using native slice operations, PyBuffer fast path for contiguous double data, step parameter support for sub-sampling
+- **default_contain consistency fix**: C extension `default_contain` now matches pure Python API exactly - `default` + `default_dict` constructor parameters, no `__setitem__` support, same behavior across all backends
+- **vector_map_as_tensor keyword-only args**: All backends now enforce keyword-only constructor arguments (matching pure Python `def __init__(self, *, ...)`), cleaner and safer API
+- **Free-threaded Python 3.14 verification**: Full functionality verified on free-threaded Python 3.14t, GIL correctly released in compute-heavy functions, no thread safety issues
+- **Dual version (standard GIL / free-threaded Python 3.14) clean build with zero errors and zero warnings**
+- **Comprehensive testing**: All functional tests pass across all three backends, no regressions, 100% recursion-free guarantee
+- **Zero external dependencies, C11 standard compliant, cross-compiler portable (MSVC/GCC/Clang), supports x86/ARM/RISC-V**
+- **C extension __getitem__ deep optimization**: Further optimized Vector_subscript with SIMD auto-vectorization hints, two-pass processing strategy, and Py_TYPE subclass support for maximum performance while maintaining 100% behavioral parity with pure Python reference implementation
+- **Fixed _flat_index negative index bug**: Pure Python and ctypes backends' `_flat_index` function now properly handles negative indices, fixing `__setitem__`, `__get_item__`, and `__set_item__` failures when using negative indices
+- **Added dimension property to C extension**: C extension `vector_map_as_tensor` now exposes `dimension` property (matching pure Python API), ensuring consistent API across all three backends
+- **Unified sequence abstraction**: Replaced all hardcoded tuple-only checks with Python sequence protocol (PySequence_Check) for maximum generality - shape, strides, start_offset, step_offset parameters now accept any sequence type (list, tuple, array, etc.), not just tuples
+- **Added sequence parsing helpers**: Added `_parse_int_sequence` and `_override_int_array` helper functions to reduce code duplication and unify sequence handling logic
+- **Fixed shape list bug in C extension**: C extension previously ignored non-tuple shape parameters (like lists) and inferred shape from vector structure, causing shape=[2,2] to be interpreted as shape=(4,). Now properly handles any sequence type as shape parameter
+- **Enhanced __shape__ method flexibility**: `_infer_shape` now accepts any sequence type returned from `__shape__()` method, not just tuples, allowing subclasses to return custom sequence types
+- **Extended setitem sequence support**: Assignment now accepts any sequence type on the right-hand side, not just lists and tuples
+- **Fixed C extension load_as_default_data step parameter**: C extension previously lacked `step` parameter support (only pure Python and ctypes backends had it), causing behavioral inconsistency. Now all three backends support sub-sampling with arbitrary step sizes during data loading
+- **Added tensor fast path to C extension load_as_default_data**: C extension now uses native slicing operations when input is already a vector_map_as_tensor, matching pure Python and ctypes backends for improved performance
+- **Added `start` property to C extension**: C extension `vector_map_as_tensor` now exposes `start` property (global flat start offset), completing the property set across all backends - shape, dimension, strides, start, offset, start_offset, step_offset are now identical across all three backends
+- **Fixed reference counting in fast path**: Properly managed Python object references in load_as_default_data tensor fast path, eliminated potential memory leaks
+- **Improved bounds checking with step**: C extension load_as_default_data now correctly validates bounds when step > 1, preventing out-of-bounds access
+- **Carry iteration rewrite**: Rewrote sub-region copy loop to use standard 0-based carry iteration with step support, more maintainable and correct
+
 v0.3.10 (2026-08-02)
 -------------------
 Fix some bugs and enhance features.

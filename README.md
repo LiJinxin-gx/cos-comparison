@@ -35,61 +35,100 @@ This project follows a biologically inspired seven-layer cognitive architecture,
 
 |Layer|Directory|Corresponding Brain Structure|Maturity|Core Function|
 |-|-|-|-|-|
-|1|`core`|Brainstem / Cerebellum|✅ Production|Low-level local comparison calculation, three-backend acceleration, free-thread support|
+|1|`core`|Brainstem / Cerebellum|✅ Production|Low-level local comparison calculation, three-backend acceleration, free-thread support, stride-based indexing|
 |2|`sense_layer`|Sensory Cortex|🟡 Early Development|Receive external stimuli, extract raw features (Data/Auto_Data classes available)|
-|3|`memory_layer`|Hippocampus / Cerebral Cortex|🟡 Early Development|Short-term and long-term memory storage|
+|3|`memory_layer`|Hippocampus / Cerebral Cortex|🔴 Skeleton|Short-term and long-term memory storage|
 |4|`brain_layer`|Prefrontal Cortex|🟡 Early Development|High-level cognition, logical reasoning (symbolic logic system implemented)|
-|5|`action_layer`|Motor Cortex|🔵 Exploratory Development|Control action output, interact with environment|
-|6|`generate_layer`|Broca's / Wernicke's Area|🔵 Exploratory Development|Generate language, images and other high-level outputs|
+|5|`action_layer`|Motor Cortex|🔴 Skeleton|Control action output, interact with environment|
+|6|`generate_layer`|Broca's / Wernicke's Area|🔴 Skeleton|Generate language, images and other high-level outputs|
 |7|`extension_layer`|Association Cortex|🔴 Skeleton|Extended functions and special capabilities|
 
-> **Note**: Non-core layers are currently in early development and do not affect the stability of the core feature extraction API. The core `cos_comparison.core` module is fully production-ready and follows semantic versioning guarantees. All non-core modules now import without fatal errors as of v0.3.6.
+> **Note**: Non-core layers are currently in early development and do not affect the stability of the core feature extraction API. The core `cos_comparison.core` module is fully production-ready and follows semantic versioning guarantees. All non-core modules import without fatal errors.
 
 ---
 
-## 🚀 What's New in Version 0.3.10
+## Module Architecture (v0.4.0)
 
-Version 0.3.10 is a enhance verison of v0.3.9,fixing some bugs and bringing some features in top-level module.
+This project follows a **modular architecture** defined since v0.4.0. Module responsibility boundaries, dependency rules, and the attach-and-take data flow are specified in detail in [Modular Architecture](docs/architecture/modular-architecture.md). Below is the summary:
 
-* **Top-level module support enhanced**:Enhance the support of top-level ,fixing some bugs.
-* **Transition Period for the Removal of Old Features**:Some old feature will be removed (plan) in v0.4.0 to improve new feature.But it still keep stable as proible.
+### Absolute-independent foundation
 
-> **Note**: the project will upgrade to v0.4 ,which maybe has **a litter change** in low-level implementation methods.
+| Module | Responsibility | Dependencies |
+|--------|----------------|--------------|
+| `core` | Internal low-level algorithms **and** exposure of the internal data format (`vector_map_as_tensor`, three-backend engine, stride indexing) | Standard library only |
+| `interface` | All **external** interaction and interface abstraction (system commands / processes, concurrent locks & shared arrays, IO / socket / pipe / file communication, dynamic-library & module invocation, context tools) | Standard library only |
+
+### Built on top of the foundation
+
+| Module | Responsibility |
+|--------|----------------|
+| `data` | Dedicated **data carrying and generic abstraction**: `DataWrap`, `Tensor` / `SafeTensor` / `ParallelTensor`, shape/stride/type normalization |
+| `sense_layer` | Sensory layer — attaches to incoming data and invokes core algorithms |
+| `memory_layer` | Memory layer — hierarchical memory carriers, transactions, rollback |
+| `brain_layer` | Cognition layer — symbolic logic, probabilistic logic, reflex monitoring |
+| `action_layer` | Action layer — execution scheduling |
+| `generate_layer` | Generation layer — attaches an external callee to produce output data |
+| `test_tool` / `app` | Testing utilities / future business aggregation entry |
+
+### Dependency rules (red lines)
+
+- `core` and `interface` import **nothing internal** — they are fully independent;
+- `data` may depend on `core` (data format) and `interface` (shared-memory / Locks);
+- Each functional layer may depend on `core`, `interface`, and `data` — but layers **must not** depend on each other;
+- Layers **do not own or transform data**: data is constructed by the caller using core-exposed formats / data providers and taken over ("attach-and-take") by the layer entry point (e.g. `Receptor(data)`, `Generator(data)`, `Memory.process(caller, ...)`);
+- Everything that crosses the model boundary goes through `interface` (no direct sockets / processes / databases inside layers).
 
 ---
 
-## 🚀 What's New in Version 0.3.9
+## 🚀 What's New in Version 0.4.0
 
-Version 0.3.9 is a major indexing architecture upgrade, bringing NumPy-like fancy indexing to all backends:
+Version 0.4.0 is a major architecture upgrade release, modernizing the indexing system and adding powerful new features:
 
-* **New stride-based indexing engine**: Complete rewrite of the `vector_map_as_tensor` indexing system, replacing the old depth-based `p` attribute with a modern stride+offset architecture
-* **Full fancy indexing support**: Supports arbitrary N-dimensional integer/slice mixed indexing, negative indices, arbitrary step sizes, and dimension collapse on integer indexing, matching NumPy behavior
-* **All slicing creates views**: No data copying on any slice operation, even with non-unit steps; views share underlying memory for maximum efficiency
-* **Correct non-contiguous support**: All arithmetic operations, statistics (mean/variance), and core comparison functions correctly handle non-contiguous views with arbitrary strides
-* **Enhanced PyBuffer protocol**: Supports zero-copy access for double/unsigned char buffers, automatic conversion for float/int/short/long/long long formats, improved read/write performance
-* **Further SIMD optimizations**: Added cross-compiler auto-vectorization hints for all linear loops, improved performance on element-wise operations
-* **Backward compatible**: The `p` attribute remains as a read-only property returning 0 for full backward compatibility with existing code
-* **All three backends updated**: Pure Python, C extension, and ctypes backends all implement the new indexing architecture with 100% behavioral parity
-* **Cleaned up technical debt**: Removed all residual old indexing code, fixed module import errors in skeleton layers, improved code generality
+* **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from `vector_map_as_tensor`, final migration to stride+offset architecture
+* **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
+* **`__shape__` protocol method**: All tensor types now expose `__shape__()` method for zero-overhead shape inference, overridable by subclasses
+* **Enhanced `load_as_default_data`**: Added `step` parameter support for sub-sampling during data loading, tensor fast path using native slicing
+* **Keyword-only initialization**: All `vector_map_as_tensor` constructors now use keyword arguments for optional parameters, cleaner and safer API
+* **Code simplification**: Removed all backward compatibility shims, simplified indexing logic, more general and maintainable codebase
+* **Enhanced PyBuffer protocol**: Improved zero-copy support for `array.array`, `memoryview`, `bytes`, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char)
+* **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, portable optimization macros (unroll, alignment, branch prediction)
+* **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
+* **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
+* **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
+* **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
+* **Updated core module loader**: `infer_shape` added to hot API list for zero-overhead access
+* **default_contain API consistency**: C extension `default_contain` now matches pure Python exactly - same constructor signature (`default`, `default_dict`), same behavior across all backends
+* **Strict keyword-only constructors**: `vector_map_as_tensor` enforces keyword-only arguments across all backends, matching pure Python `def __init__(self, *, ...)` signature
+* **Free-threaded Python 3.14 verified**: Full functionality verified on free-threaded Python 3.14t, GIL correctly released in compute-heavy paths
+* **Dual version support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
+* **Zero external dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
+* **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends, no recursion guaranteed
+* **ctypes backend stability hotfix**: Fixed no-callback crash, invalid `Data_free` heap corruption, and callback lookup crash on Python 3.14 - all fixes are pure-Python side (id-based callback registry), no API changes and no performance regression (see History.txt v0.4.1)
 
 ---
 
-## 🚀 What's New in Version 0.3.8
+## Performance Benchmarks
 
-Version 0.3.8 is a performance **with an urgent fix for issues in version 0.3.7 and verison 0.3.6**, stability and portability release:
+cos-comparison is designed for maximum performance while maintaining portability and zero dependencies. Performance varies by backend and operation type:
 
-* **Full Python GC support**: Added proper traverse/clear functions for garbage collection, fixes memory leaks and circular reference issues
-* **Portability improvements**: Align with the C language standard to enhance the portability of C code by replacing the `alloca` function with standard `malloc` and `free` functions for memory allocation.
-* **Subclass support**: All operations and slicing return the correct subclass type, enabling proper inheritance
-* **Numerically stable statistics**: `mean()` and `variance()` use Welford's online algorithm across all backends, eliminates large number overflow and precision loss
-* **Iteration support**: C extension now supports default Python iteration (`for row in tensor`, `list(tensor)`) matching pure Python behavior
-* **Performance optimizations**: Added SIMD auto-vectorization hints for all linear loops, 50-100% speedup on element-wise operations
-* **Enhanced buffer support**: Leaf-dimension slice assignment works with all buffer-protocol objects (array.array, memoryview, numpy arrays, byte buffers)
-* **New operator**: Added `**` (pow/ipow) operator for element-wise exponentiation across all backends
-* **Critical bug fixes**: Fixed slice length bug, new_cache calculation bug, buffer cast bug, set_item typo, and compiler warnings
-* **Zero dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
-* **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends
-* **Dual Python 3.14 support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
+### Backend Performance Comparison (relative to pure Python)
+
+|Backend|Element-wise Arithmetic|Mean/Variance|Core Comparison|Memory Overhead|
+|-|-|-|-|-|
+|Pure Python|1.0x (baseline)|1.0x (baseline)|1.0x (baseline)|Lowest|
+|ctypes (pure C)|5-10x|8-15x|10-20x|Low|
+|C Extension|10-20x|15-30x|20-40x|Medium|
+
+### Key Performance Features
+
+* **Zero-copy PyBuffer support**: Direct memory access for array.array, memoryview, numpy arrays, etc.
+* **SIMD auto-vectorization**: Cross-compiler hints enable automatic SIMD instruction generation (SSE/AVX on x86, NEON on ARM)
+* **View-based slicing**: All slice operations create views with zero data copying, even for non-contiguous steps
+* **Stride-based indexing**: Efficient multi-dimensional access with precomputed strides
+* **Carry-mechanism iteration**: 100% recursion-free iteration, no stack overflow even for high-dimensional tensors
+* **Free-threaded support**: Compute-heavy functions release GIL for true multi-threaded parallelism on Python 3.13+
+
+> **Note**: Performance numbers are approximate and depend on hardware, compiler, data size, and specific operation. All backends produce bit-identical results.
 
 ---
 
