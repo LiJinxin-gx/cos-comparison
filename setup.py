@@ -42,7 +42,10 @@ def _write_version_file():
     except Exception as exc:
         print("Warning: skipping VERSION file generation ({0})".format(exc))
 
-_write_version_file()
+try:
+    _write_version_file()
+except Exception as e:
+    print(f"write vesion file failed,error:\n{e}")
 
 # Platform-specific compile arguments
 is_windows = platform.system() == "Windows"

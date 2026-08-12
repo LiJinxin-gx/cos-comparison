@@ -1,16 +1,6 @@
 cos-comparison Project History
 =============================
-v0.4.1 (2026-08-08)
--------------------
-ctypes backend stability hotfix release:
-- Fixed hard crash when calling the ctypes backend without callbacks: the iteration callback pointer is now registered only when `iter_a_callback` / `iter_b_callback` is actually provided, no more unconditional callback invocation through the C API
-- Fixed heap corruption (0xC0000374) in `cos_comparison_passive`, `cos_comparison_active`, `cos`, `mean_local` and `local_variance`: removed invalid `Data_free` calls on Python-managed ctypes buffers (`data_a/data_b/data_c/kernel_c`); only the C-allocated `result_c` is still freed, input buffers are handled entirely by Python/ctypes garbage collection
-- Fixed callback crash on Python 3.14: callback lookup no longer relies on `ctypes.cast(ctx, ctypes.py_object).value` (unstable object-layout-dependent cast); replaced with an id-based registry pipeline - ctx now passes `id(name)`, and the callback name-space is recovered via `_callback_registry` for all six callback types
-- All callback functionality preserved: start/end/iter_a/iter_b/local_error/global_error/return callbacks keep their original signatures, triggering order and return-value contract; registry is fully cleaned up after every call (zero leaks, zero stale entries)
-- No public API changes, no performance regression, pure-Python-side fix only (no C code modified)
-- Verified: `tests/test_full.py` and `tests/test_tensor_comprehensive.py` pass on all three backends; callback scenarios and stress runs (thousands of iterations with and without callbacks) complete cleanly with EXIT=0
-
-v0.4.0 (2026-08-05)
+v0.4.0 (2026-08-11)
 -------------------
 Major architecture upgrade release - modernized indexing, new features, and performance improvements:
 - **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from vector_map_as_tensor, final migration to stride+offset architecture
@@ -52,6 +42,32 @@ Major architecture upgrade release - modernized indexing, new features, and perf
 - **Fixed reference counting in fast path**: Properly managed Python object references in load_as_default_data tensor fast path, eliminated potential memory leaks
 - **Improved bounds checking with step**: C extension load_as_default_data now correctly validates bounds when step > 1, preventing out-of-bounds access
 - **Carry iteration rewrite**: Rewrote sub-region copy loop to use standard 0-based carry iteration with step support, more maintainable and correct
+- **New `load_data` function**: Added `load_data(source, target, *, source_start, source_step, shape, target_start, target_step)` to all three backends - copies a sub-region from source to target with independent start/step for each side, PyBuffer fast path with write-persistence probing, three-level fallback (memoryview -> getitem/setitem -> get_item/set_item), automatic bounds clamping, returns number of elements copied
+- **C extension `load_data` implementation**: Full C implementation with memoryview-based buffer fast path, write-persistence probe (re-exports buffer to verify writes are not ephemeral snapshots), index tuple reuse for performance, proper reference counting and memory management on all error paths
+- **C4113 warning fix**: Added `(PyCFunction)` cast to `py_no_done` in method table, zero warnings on MSVC /W3
+- **Free-threaded compatibility**: `load_data` verified on both standard GIL and free-threaded Python 3.14t, all core tests pass on both builds
+- **Test coverage**: Added `tests/test_load_data.py` with 9 cross-backend tests covering basic copy, start/step, clamping, 1D/3D, empty copy, list-to-list, return type, and target step
+
+### Round 2 bug fixes and hardening
+- **Fixed memory leak in `load_data` parameter parsing**: `_parse_int_seq` allocates internally; pre-allocated arrays were overwritten and leaked. Refactored to `goto oom/fail` unified error handling, all arrays initialized to NULL and freed on every exit path
+- **Fixed `load_data` probe index**: Probe now uses `source_start`/`target_start` instead of all-zeros, avoiding unintended writes to target position 0 when start is non-zero
+- **Fixed `load_data` write-persistence verification**: Now re-exports target buffer and reads back the probed value via a fresh memoryview (matching pure Python), correctly detecting containers that return ephemeral buffer snapshots
+- **Fixed `py_get_item` reference counting**: `PyTuple_Pack` returns a new reference; removed spurious extra `Py_INCREF` that leaked the index tuple; added NULL check after `PyTuple_Pack`
+- **Removed dead code**: Deleted unused `_get_item_recursive` function
+- **Duck typing for integer sequences**: `_parse_shape_tuple`, `_parse_int_sequence`, and `_override_int_array` now use `PyNumber_Index` instead of `PyLong_Check`, accepting numpy integers and any `__index__`-compliant type
+- **Duck typing for `get_item`/`set_item` fallback**: Index conversion in nested-list fallback paths now uses `PyNumber_Index`, matching Python's native `[]` operator behavior
+- **Fixed zero-copy buffer path memory leak**: The `Data` struct and `data->strides` allocated in the zero-copy PyBuffer path were never freed (VECTOR_FLAG_VIEW suppressed `Data_free`). Now `data->shape` gets its own copy, only VECTOR_FLAG_BUFFER is set, and `Data_free` correctly releases the struct while respecting `owns_data=0`
+- **Added dimension safety guards**: `_data_to_vector` and `_data_to_independent_vector` now reject dimension < 1, added missing malloc failure checks for `start_offset`/`step_offset`, removed commented-out `PyObject_GC_Track` lines
+- **Added `tests/test_round2_fixes.py`**: Validation tests for zero-copy memory leak, duck-typed indices, `load_data` probe correctness, integer-sequence duck typing, and dimension-zero protection
+- All tests pass on both standard GIL and free-threaded Python 3.14, zero compiler errors/warnings
+
+### ctypes backend stability hotfix (merged)
+- Fixed hard crash when calling the ctypes backend without callbacks: the iteration callback pointer is now registered only when `iter_a_callback` / `iter_b_callback` is actually provided, no more unconditional callback invocation through the C API
+- Fixed heap corruption (0xC0000374) in `cos_comparison_passive`, `cos_comparison_active`, `cos`, `mean_local` and `local_variance`: removed invalid `Data_free` calls on Python-managed ctypes buffers (`data_a/data_b/data_c/kernel_c`); only the C-allocated `result_c` is still freed, input buffers are handled entirely by Python/ctypes garbage collection
+- Fixed callback crash on Python 3.14: callback lookup no longer relies on `ctypes.cast(ctx, ctypes.py_object).value` (unstable object-layout-dependent cast); replaced with an id-based registry pipeline - ctx now passes `id(name)`, and the callback name-space is recovered via `_callback_registry` for all six callback types
+- All callback functionality preserved: start/end/iter_a/iter_b/local_error/global_error/return callbacks keep their original signatures, triggering order and return-value contract; registry is fully cleaned up after every call (zero leaks, zero stale entries)
+- No public API changes, no performance regression, pure-Python-side fix only (no C code modified)
+- Verified: `tests/test_full.py` and `tests/test_tensor_comprehensive.py` pass on all three backends; callback scenarios and stress runs (thousands of iterations with and without callbacks) complete cleanly with EXIT=0
 
 v0.3.10 (2026-08-02)
 -------------------

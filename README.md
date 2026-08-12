@@ -8,7 +8,7 @@
 
 ---
 
-## Core Idea
+## 💡 Core Idea
 
 Information is produced by **local comparison** in raw data.  
 This module implements the **centre-surround antagonism** mechanism from neuroscience, extracting edges, textures, and keypoints using only sliding-window similarity.
@@ -19,13 +19,13 @@ $$
 \text{cosmod} = \frac{2(A \cdot B)}{|A|^2 + |B|^2}
 $$
 
-* **A step toward biologically plausible AGI**
-* **No training, no labels, no backpropagation**
-* Works on **1D, 2D, 3D, 4D** data (audio, images, video, volumetric data)
-* Supports **passive** (reflexive boundary detection) and **active** (template matching) modes
-* Three high-performance backends with automatic fallback: Python C extension, ctypes pure C, pure Python
-* Cross-platform support for Windows, Linux, and macOS
-* **Zero external dependencies** for core functionality
+- **A step toward biologically plausible AGI**
+- **No training, no labels, no backpropagation**
+- Works on **1D, 2D, 3D, 4D** data (audio, images, video, volumetric data)
+- Supports **passive** (reflexive boundary detection) and **active** (template matching) modes
+- Three high-performance backends with automatic fallback: Python C extension, ctypes pure C, pure Python
+- Cross-platform support for Windows, Linux, and macOS
+- **Zero external dependencies** for core functionality
 
 ---
 
@@ -33,52 +33,69 @@ $$
 
 Version 0.4.0 is a major architecture upgrade release, modernizing the indexing system and adding powerful new features:
 
-* **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from `vector_map_as_tensor`, final migration to stride+offset architecture
-* **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
-* **`__shape__` protocol method**: All tensor types now expose `__shape__()` method for zero-overhead shape inference, overridable by subclasses
-* **Enhanced `load_as_default_data`**: Added `step` parameter support for sub-sampling during data loading, tensor fast path using native slicing
-* **Keyword-only initialization**: All `vector_map_as_tensor` constructors now use keyword arguments for optional parameters, cleaner and safer API
-* **Code simplification**: Removed all backward compatibility shims, simplified indexing logic, more general and maintainable codebase
-* **Enhanced PyBuffer protocol**: Improved zero-copy support for `array.array`, `memoryview`, `bytes`, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char)
-* **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, portable optimization macros (unroll, alignment, branch prediction)
-* **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
-* **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
-* **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
-* **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
-* **Updated core module loader**: `infer_shape` and `load_data` added to hot API list for zero-overhead access
-* **default_contain API consistency**: C extension `default_contain` now matches pure Python exactly - same constructor signature (`default`, `default_dict`), same behavior across all backends
-* **Strict keyword-only constructors**: `vector_map_as_tensor` enforces keyword-only arguments across all backends, matching pure Python `def __init__(self, *, ...)` signature
-* **Free-threaded Python 3.14 verified**: Full functionality verified on free-threaded Python 3.14t, GIL correctly released in compute-heavy paths
-* **Dual version support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
-* **Zero external dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
-* **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends, no recursion guaranteed
-* **ctypes backend stability hotfix**: Fixed no-callback crash, invalid `Data_free` heap corruption, and callback lookup crash on Python 3.14 - all fixes are pure-Python side (id-based callback registry), no API changes and no performance regression (see History.txt v0.4.0)
-* **Upper-layer (non-core) stability fixes**: `brain_layer.logic`/`brain_layer.map` constructor and attribute fixes (NameError, `__eq__` typo, `arg_names`), `sense_layer.Receptor.point` accepts scalar and tuple indices, `TensorReceptor` passive comparison works again, `DatabaseMemory.refer` default hook fixed, `interface` ctypes `argtypes` / rollback / `Process` shadowing fixed, `data.tensor` tuple `start` mapping fixed
-* **Verified**: full unittest suite (core + upper layers) green on the installed wheel
+- **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from `vector_map_as_tensor`, final migration to stride+offset architecture
+- **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
+- **`__shape__` protocol method**: All tensor types now expose `__shape__()` method for zero-overhead shape inference, overridable by subclasses
+- **Enhanced `load_as_default_data`**: Added `step` parameter support for sub-sampling during data loading, tensor fast path using native slicing
+- **New `load_data` function**: Bulk-copy a sub-region between two data containers with independent start/step for source and target, PyBuffer fast path with write-persistence probing, automatic bounds clamping
+- **Keyword-only initialization**: All `vector_map_as_tensor` constructors now use keyword arguments for optional parameters, cleaner and safer API
+- **Code simplification**: Removed all backward compatibility shims, simplified indexing logic, more general and maintainable codebase
+- **Enhanced PyBuffer protocol**: Improved zero-copy support for `array.array`, `memoryview`, `bytes`, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char)
+- **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, portable optimization macros (unroll, alignment, branch prediction)
+- **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
+- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
+- **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
+- **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
+- **Updated core module loader**: `infer_shape` and `load_data` added to hot API list for zero-overhead access
+- **default_contain API consistency**: C extension `default_contain` now matches pure Python exactly - same constructor signature (`default`, `default_dict`), same behavior across all backends
+- **Strict keyword-only constructors**: `vector_map_as_tensor` enforces keyword-only arguments across all backends, matching pure Python `def __init__(self, *, ...)` signature
+- **Free-threaded Python 3.14 verified**: Full functionality verified on free-threaded Python 3.14t, GIL correctly released in compute-heavy paths
+- **Dual version support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
+- **Zero external dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
+- **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends, no recursion guaranteed
+- **ctypes backend stability hotfix**: Fixed no-callback crash, invalid `Data_free` heap corruption, and callback lookup crash on Python 3.14 - all fixes are pure-Python side (id-based callback registry), no API changes and no performance regression (see History.txt v0.4.0)
+- **Upper-layer (non-core) stability fixes**: `brain_layer.logic`/`brain_layer.map` constructor and attribute fixes (NameError, `__eq__` typo, `arg_names`), `sense_layer.Receptor.point` accepts scalar and tuple indices, `TensorReceptor` passive comparison works again, `DatabaseMemory.refer` default hook fixed, `interface` ctypes `argtypes` / rollback / `Process` shadowing fixed, `data.tensor` tuple `start` mapping fixed
+- **Verified**: full unittest suite (core + upper layers) green on the installed wheel
 
 ---
 
-## Seven-Layer Cognitive Architecture
+## 🧬 Seven-Layer Cognitive Architecture
 
 This project follows a biologically inspired seven-layer cognitive architecture, mimicking the structure of the mammalian brain. Currently only the core brainstem/cerebellum layer is production-ready; all other layers are in early evolutionary stage with skeleton implementations, and will be gradually improved in future versions:
 
-|Layer|Directory|Corresponding Brain Structure|Maturity|Core Function|
-|-|-|-|-|-|
-|1|`core`|Brainstem / Cerebellum|✅ Production|Low-level local comparison calculation, three-backend acceleration, free-thread support, stride-based indexing|
-|2|`sense_layer`|Sensory Cortex|🟡 Early Development|Receive external stimuli, extract raw features (Data/Auto_Data classes available)|
-|3|`memory_layer`|Hippocampus / Cerebral Cortex|🟡 Early Development|Short-term and long-term memory storage|
-|4|`brain_layer`|Prefrontal Cortex|🟡 Early Development|High-level cognition, logical reasoning (symbolic logic system implemented)|
-|5|`action_layer`|Motor Cortex|🔵 Exploratory Development|Control action output, interact with environment|
-|6|`generate_layer`|Broca's / Wernicke's Area|🔵 Exploratory Development|Generate language, images and other high-level outputs|
-|7|`extension_layer`|Association Cortex|🔴 Skeleton|Extended functions and special capabilities|
+| # | Layer | Directory | Corresponding Brain Structure | Maturity | Core Function |
+|---|-------|-----------|-------------------------------|----------|---------------|
+| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Low-level local comparison calculation, three-backend acceleration, free-thread support, stride-based indexing |
+| 2 | Sense | `sense_layer` | Sensory Cortex | 🟡 Early Development | Receive external stimuli, extract raw features (Data/Auto_Data classes available) |
+| 3 | Memory | `memory_layer` | Hippocampus / Cerebral Cortex | 🟡 Early Development | Short-term and long-term memory storage |
+| 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟡 Early Development | High-level cognition, logical reasoning (symbolic logic system implemented) |
+| 5 | Action | `action_layer` | Motor Cortex | 🔵 Exploratory Development | Control action output, interact with environment |
+| 6 | Generate | `generate_layer` | Broca's / Wernicke's Area | 🔵 Exploratory Development | Generate language, images and other high-level outputs |
+| 7 | Extension | `extension_layer` | Association Cortex | 🔴 Skeleton | Extended functions and special capabilities |
 
 > **Note**: Non-core layers are currently in early development and do not affect the stability of the core feature extraction API. The core `cos_comparison.core` module is fully production-ready and follows semantic versioning guarantees. All non-core modules import without fatal errors.
 
 ---
 
-## Module Architecture (v0.4.0)
+## 🏗️ Module Architecture (v0.4.0)
 
-This project follows a **modular architecture** defined since v0.4.0. Module responsibility boundaries, dependency rules, and the attach-and-take data flow are specified in detail in [Modular Architecture](docs/architecture/modular-architecture.md). Below is the summary:
+This project follows a **modular architecture** defined since v0.4.0. Module responsibility boundaries, dependency rules, and the attach-and-take data flow are specified in detail in the modular architecture documentation. Below is the summary:
+
+### Three-flow logical decoupling: data flow, operation flow, control flow
+
+The architecture logically decouples three orthogonal flows. Each flow has a clear owner, so that changing one flow never leaks into the others:
+
+| Flow | Responsibility | Owner | Concrete manifestation |
+|------|----------------|-------|------------------------|
+| 🧬 **Data flow** | What data is carried and how it travels through the model | `core` (data format) + `data` (carrying abstraction) | Caller constructs data using core-exposed formats / `data` wrappers; layers **attach-and-take** it at entry points (`Receptor(data)`, `Generator(data)`, `Memory.process(caller, ...)`) and never own or transform it |
+| ⚙️ **Operation flow** | What the model does — algorithms and capability operations | `core` (algorithm family) + each functional layer (its capability) | Operations consume the attached data only through core-exposed algorithms; no format conversion, no duplicate logic inside layers |
+| 🎛️ **Control flow** | When and how the model coordinates — concurrency, timing, processes, IO | `interface` | `EventLoop`, `run_in_thread`, integrated locks, process / shared-memory primitives; layers never use raw `asyncio` / `threading` — `reflex.Monitor` stays pure logic, with all mechanisms delegated to `interface` |
+
+Benefits of the decoupling:
+
+- Data flow can be extended independently — any data expressible in core-exposed formats participates without touching operations or control;
+- Operation flow can evolve independently — layers are interchangeable as long as they obey attach-and-take;
+- Control flow can be swapped independently — e.g. replacing a thread-based mechanism with a process-based one requires no change in data or operation flows.
 
 ### Absolute-independent foundation
 
@@ -110,26 +127,26 @@ This project follows a **modular architecture** defined since v0.4.0. Module res
 
 ---
 
-## Performance Benchmarks
+## ⚡ Performance Benchmarks
 
 cos-comparison is designed for maximum performance while maintaining portability and zero dependencies. Performance varies by backend and operation type:
 
 ### Backend Performance Comparison (relative to pure Python)
 
-|Backend|Element-wise Arithmetic|Mean/Variance|Core Comparison|Memory Overhead|
-|-|-|-|-|-|
-|Pure Python|1.0x (baseline)|1.0x (baseline)|1.0x (baseline)|Lowest|
-|ctypes (pure C)|5-10x|8-15x|10-20x|Low|
-|C Extension|10-20x|15-30x|20-40x|Medium|
+| Backend | Element-wise Arithmetic | Mean/Variance | Core Comparison | Memory Overhead |
+|---------|------------------------|---------------|-----------------|-----------------|
+| Pure Python | 1.0x (baseline) | 1.0x (baseline) | 1.0x (baseline) | Lowest |
+| ctypes (pure C) | 5-10x | 8-15x | 10-20x | Low |
+| C Extension | 10-20x | 15-30x | 20-40x | Medium |
 
 ### Key Performance Features
 
-* **Zero-copy PyBuffer support**: Direct memory access for array.array, memoryview, numpy arrays, etc.
-* **SIMD auto-vectorization**: Cross-compiler hints enable automatic SIMD instruction generation (SSE/AVX on x86, NEON on ARM)
-* **View-based slicing**: All slice operations create views with zero data copying, even for non-contiguous steps
-* **Stride-based indexing**: Efficient multi-dimensional access with precomputed strides
-* **Carry-mechanism iteration**: 100% recursion-free iteration, no stack overflow even for high-dimensional tensors
-* **Free-threaded support**: Compute-heavy functions release GIL for true multi-threaded parallelism on Python 3.13+
+- **Zero-copy PyBuffer support**: Direct memory access for array.array, memoryview, numpy arrays, etc.
+- **SIMD auto-vectorization**: Cross-compiler hints enable automatic SIMD instruction generation (SSE/AVX on x86, NEON on ARM)
+- **View-based slicing**: All slice operations create views with zero data copying, even for non-contiguous steps
+- **Stride-based indexing**: Efficient multi-dimensional access with precomputed strides
+- **Carry-mechanism iteration**: 100% recursion-free iteration, no stack overflow even for high-dimensional tensors
+- **Free-threaded support**: Compute-heavy functions release GIL for true multi-threaded parallelism on Python 3.13+
 
 > **Note**: Performance numbers are approximate and depend on hardware, compiler, data size, and specific operation. All backends produce bit-identical results.
 
@@ -138,17 +155,17 @@ cos-comparison is designed for maximum performance while maintaining portability
 Benchmark results for all three backends using a **322×424×3 RGB test image** with 3×3 window.  
 Test environment: Windows 11 x64, 18-thread CPU, Python 3.14.6, JIT enabled, MSVC -O2 optimization.
 
-|Backend|Execution Time|Speedup vs Pure Python|Peak Memory|Status|Free-thread Support|
-|-|-|-|-|-|-|
-|Python C Extension|0.004s|~130×|~5–8 MB|✅ Stable|✅ Full (no GIL)|
-|ctypes C Backend|0.007s|~70×|~8–12 MB|✅ Stable|✅ Full|
-|Pure Python|0.52s|1×|~22 MB|✅ Stable|✅ Full|
+| Backend | Execution Time | Speedup vs Pure Python | Peak Memory | Status | Free-thread Support |
+|---------|---------------|------------------------|-------------|--------|---------------------|
+| Python C Extension | 0.004s | ~130× | ~5–8 MB | ✅ Stable | ✅ Full (no GIL) |
+| ctypes C Backend | 0.007s | ~70× | ~8–12 MB | ✅ Stable | ✅ Full |
+| Pure Python | 0.52s | 1× | ~22 MB | ✅ Stable | ✅ Full |
 
 > All three backends produce numerically identical output values within floating-point precision. C backends automatically fall back to pure Python if compilation or loading fails.
 
 ---
 
-## Installation
+## 📦 Installation
 
 ```bash
 pip install cos-comparison
@@ -175,7 +192,7 @@ This will automatically build both the Python C extension and the ctypes shared 
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### 2D edge detection (passive mode)
 
@@ -209,29 +226,31 @@ assert v[1][1] == 123.0
 print(core.get_mode())
 
 # Force pure Python mode for debugging
-# Note : suggest to add the character "." to show as a relative import
+# Note: suggest to add the character "." to show as a relative import
 core.set_mode(".cos_comparison")
 ```
 
 ---
 
-## Author
+## 👤 Author
 
 I was born on May 31, 2008, and I feel fortunate to grow up in an era of rapid progress in artificial intelligence.
 
 I have run extensive tests and observed many surprising emergent properties in the outputs. Earlier versions of this project contained numerous issues, as examination-oriented education left me limited time for thorough testing. I now have the opportunity to properly test, refine, and polish this work.
 
-There remains a long road ahead to achieve true general artificial intelligence. I may be forced to set aside this research due to personal circumstances, but I do not want these ideas to fade away unnoticed. The purpose of open-sourcing this project is to share my thoughts, in the hope that others may build upon them and continue this line of inquiry. 
+There remains a long road ahead to achieve true general artificial intelligence. I may be forced to set aside this research due to personal circumstances, but I do not want these ideas to fade away unnoticed. The purpose of open-sourcing this project is to share my thoughts, in the hope that others may build upon them and continue this line of inquiry.
+
+Thanks to the assistance of artificial intelligence, I was able to quickly check and fix the errors in the project code. I have realized the importance of using tools.
 
 ---
 
-## Contact & Feedback
+## 📫 Contact & Feedback
 
-* **Bug Reports & Issues**: Please submit issues on [GitHub Issues](https://github.com/LiJinxin-gx/cos-comparison/issues)
-* **Email Contact**: lijinxin_gx@sina.cn
+- **Bug Reports & Issues**: Please submit issues on [GitHub Issues](https://github.com/LiJinxin-gx/cos-comparison/issues)
+- **Email Contact**: lijinxin_gx@sina.cn
 
 ---
 
-## License
+## 📄 License
 
 MIT © 2026 Li Jinxin. See [LICENSE](LICENSE.txt) for details.
