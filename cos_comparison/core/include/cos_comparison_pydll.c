@@ -162,6 +162,11 @@ Helper: Data → vector_map_as_tensor (zero-copy)
 ------------------------------------------------------------------ */
 static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     if (!type) type = &VectorizeType;
+    if (!data || data->dimension < 1) {
+        Data_free(data);
+        PyErr_SetString(PyExc_ValueError, "cannot create vector from empty or scalar data");
+        return NULL;
+    }
     Vector *vec = (Vector*)type->tp_alloc(type, 0);
     if (!vec) { Data_free(data); return NULL; }
     vec->data = data;
@@ -170,7 +175,6 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->shape = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
-    // Allocate and compute strides
     vec->strides = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
     vec->strides[data->dimension - 1] = 1;
@@ -181,14 +185,18 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->offset = 0;
     vec->start_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     vec->step_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
+    if (!vec->start_offset || !vec->step_offset) {
+        free(vec->start_offset); free(vec->step_offset);
+        free(vec->strides); free(vec->shape);
+        Py_DECREF(vec); Data_free(data);
+        return NULL;
+    }
     for (int i = 0; i < data->dimension; ++i) {
         vec->start_offset[i] = 0;
         vec->step_offset[i] = 1;
     }
     vec->buf = NULL;
     vec->flags = VECTOR_FLAG_OWNED;
-    // tp_alloc already tracks GC objects in Python 3.14, no need to call again
-    // PyObject_GC_Track(vec);
     return (PyObject*)vec;
 }
 
@@ -310,13 +318,17 @@ static PyObject* py_create_void_list(PyObject *self, PyObject *args, PyObject *k
 
 /* Helper: create independent Vector from Data (deep copy) */
 static PyObject* _data_to_independent_vector(Data *data, int start) {
+    if (!data || data->dimension < 1) {
+        Data_free(data);
+        PyErr_SetString(PyExc_ValueError, "cannot create vector from empty or scalar data");
+        return NULL;
+    }
     Vector *vec = (Vector*)VectorizeType.tp_alloc(&VectorizeType, 0);
     if (!vec) { Data_free(data); return NULL; }
     vec->dimension = data->dimension;
     vec->shape = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
-    // Allocate and compute strides
     vec->strides = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
     vec->strides[data->dimension - 1] = 1;
@@ -332,6 +344,12 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     vec->offset = 0;
     vec->start_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     vec->step_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
+    if (!vec->start_offset || !vec->step_offset) {
+        free(vec->start_offset); free(vec->step_offset);
+        Data_free(vec->data); free(vec->strides); free(vec->shape);
+        Py_DECREF(vec); Data_free(data);
+        return NULL;
+    }
     for (int i = 0; i < data->dimension; ++i) {
         vec->start_offset[i] = 0;
         vec->step_offset[i] = 1;
@@ -339,8 +357,6 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     vec->buf = NULL;
     Data_free(data);
     vec->flags = VECTOR_FLAG_OWNED;
-    // tp_alloc already tracks GC objects in Python 3.14
-    // PyObject_GC_Track(vec);
     return (PyObject*)vec;
 }
 
@@ -684,20 +700,322 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     return _data_to_independent_vector(result_data, 0);
 }
 
-static PyObject* _get_item_recursive(PyObject *obj, PyObject *index, int depth) {
-    PyObject *current = obj;
-    Py_INCREF(current);
-    Py_ssize_t n = PyTuple_Size(index);
-    for (int i = depth; i < n; ++i) {
-        PyObject *idx = PyTuple_GetItem(index, i);
-        if (!idx) { Py_DECREF(current); return NULL; }
-        if (!PySequence_Check(current)) { Py_DECREF(current); return NULL; }
-        PyObject *next = PySequence_GetItem(current, PyLong_AsSsize_t(idx));
-        Py_DECREF(current);
-        if (!next) return NULL;
-        current = next;
+/* ------------------------------------------------------------------
+load_data: copy a sub-region from source to target with independent
+start/step for each side.  Tries PyBuffer fast path first, falls back
+to get_item/set_item on any failure.  Returns the number of elements
+actually copied.  Iterative, no recursion.
+------------------------------------------------------------------ */
+static PyObject* py_get_item(PyObject *self, PyObject *args);
+static PyObject* py_set_item(PyObject *self, PyObject *args);
+
+static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) {
+    PyObject *source, *target;
+    PyObject *source_start_obj = Py_None;
+    PyObject *source_step_obj  = Py_None;
+    PyObject *shape_obj        = Py_None;
+    PyObject *target_start_obj = Py_None;
+    PyObject *target_step_obj  = Py_None;
+
+    static char *kwlist[] = {"source", "target", "source_start", "source_step",
+                             "shape", "target_start", "target_step", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
+            &source, &target, &source_start_obj, &source_step_obj,
+            &shape_obj, &target_start_obj, &target_step_obj))
+        return NULL;
+
+    /* ---- infer shapes (with BufferError fallback inside _infer_shape) ---- */
+    int *src_shape = NULL, *tgt_shape = NULL;
+    int src_dim = 0, tgt_dim = 0;
+    if (_infer_shape(source, &src_shape, &src_dim) < 0) return NULL;
+    if (_infer_shape(target, &tgt_shape, &tgt_dim) < 0) {
+        free(src_shape);
+        return NULL;
     }
-    return current;
+    if (src_dim != tgt_dim) {
+        free(src_shape); free(tgt_shape);
+        PyErr_Format(PyExc_ValueError,
+            "source and target must have the same number of dimensions (got %d and %d)",
+            src_dim, tgt_dim);
+        return NULL;
+    }
+    int dim = src_dim;
+    if (dim == 0) {
+        free(src_shape); free(tgt_shape);
+        return PyLong_FromLong(0);
+    }
+
+    /* ---- parse integer-sequence parameters (temp-pointer pattern to
+           avoid leaking the pre-allocated arrays; _parse_int_seq mallocs) ---- */
+    int *src_step = NULL, *tgt_step = NULL;
+    int *copy_shape = NULL, *src_start = NULL, *tgt_start = NULL;
+    int *tmp = NULL;
+    int cnt = 0;
+
+    /* source_step: default all 1 */
+    if (source_step_obj == Py_None) {
+        src_step = (int*)malloc((size_t)dim * sizeof(int));
+        if (!src_step) goto oom;
+        for (int i = 0; i < dim; ++i) src_step[i] = 1;
+    } else {
+        if (_parse_int_seq(source_step_obj, &src_step, &cnt) < 0 || cnt != dim) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError, "source_step must have %d elements", dim);
+            goto fail;
+        }
+    }
+    /* target_step: default all 1 */
+    if (target_step_obj == Py_None) {
+        tgt_step = (int*)malloc((size_t)dim * sizeof(int));
+        if (!tgt_step) goto oom;
+        for (int i = 0; i < dim; ++i) tgt_step[i] = 1;
+    } else {
+        if (_parse_int_seq(target_step_obj, &tgt_step, &cnt) < 0 || cnt != dim) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError, "target_step must have %d elements", dim);
+            goto fail;
+        }
+    }
+    for (int i = 0; i < dim; ++i) {
+        if (src_step[i] < 1 || tgt_step[i] < 1) {
+            PyErr_SetString(PyExc_ValueError, "step values must be positive integers");
+            goto fail;
+        }
+    }
+
+    /* shape: default full source extent with source_step */
+    if (shape_obj == Py_None) {
+        copy_shape = (int*)malloc((size_t)dim * sizeof(int));
+        if (!copy_shape) goto oom;
+        for (int i = 0; i < dim; ++i)
+            copy_shape[i] = (src_shape[i] + src_step[i] - 1) / src_step[i];
+    } else {
+        if (_parse_int_seq(shape_obj, &copy_shape, &cnt) < 0 || cnt != dim) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError, "shape must have %d elements", dim);
+            goto fail;
+        }
+    }
+    for (int i = 0; i < dim; ++i) {
+        if (copy_shape[i] < 0) {
+            PyErr_SetString(PyExc_ValueError, "shape values must be non-negative");
+            goto fail;
+        }
+    }
+
+    /* source_start: default all 0 */
+    if (source_start_obj == Py_None) {
+        src_start = (int*)malloc((size_t)dim * sizeof(int));
+        if (!src_start) goto oom;
+        for (int i = 0; i < dim; ++i) src_start[i] = 0;
+    } else {
+        if (_parse_int_seq(source_start_obj, &src_start, &cnt) < 0 || cnt != dim) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError, "source_start must have %d elements", dim);
+            goto fail;
+        }
+    }
+    /* target_start: default all 0 */
+    if (target_start_obj == Py_None) {
+        tgt_start = (int*)malloc((size_t)dim * sizeof(int));
+        if (!tgt_start) goto oom;
+        for (int i = 0; i < dim; ++i) tgt_start[i] = 0;
+    } else {
+        if (_parse_int_seq(target_start_obj, &tgt_start, &cnt) < 0 || cnt != dim) {
+            if (!PyErr_Occurred())
+                PyErr_Format(PyExc_ValueError, "target_start must have %d elements", dim);
+            goto fail;
+        }
+    }
+    for (int i = 0; i < dim; ++i) {
+        if (src_start[i] < 0 || tgt_start[i] < 0) {
+            PyErr_SetString(PyExc_ValueError, "start values must be non-negative");
+            goto fail;
+        }
+    }
+
+    /* ---- compute effective shape (clamp to available extents) ---- */
+    long long total = 1;
+    for (int i = 0; i < dim; ++i) {
+        int avail_src = (src_shape[i] - src_start[i] + src_step[i] - 1) / src_step[i];
+        int avail_tgt = (tgt_shape[i] - tgt_start[i] + tgt_step[i] - 1) / tgt_step[i];
+        if (avail_src < 0) avail_src = 0;
+        if (avail_tgt < 0) avail_tgt = 0;
+        int eff = copy_shape[i];
+        if (eff > avail_src) eff = avail_src;
+        if (eff > avail_tgt) eff = avail_tgt;
+        copy_shape[i] = eff;
+        total *= (long long)eff;
+    }
+
+    free(src_shape); src_shape = NULL;
+    free(tgt_shape); tgt_shape = NULL;
+
+    if (total == 0) {
+        free(src_step); free(tgt_step); free(copy_shape);
+        free(src_start); free(tgt_start);
+        return PyLong_FromLong(0);
+    }
+
+    /* ---- build index tuples (reused across iterations) ---- */
+    PyObject *src_idx = PyTuple_New((Py_ssize_t)dim);
+    PyObject *tgt_idx = PyTuple_New((Py_ssize_t)dim);
+    if (!src_idx || !tgt_idx) {
+        Py_XDECREF(src_idx); Py_XDECREF(tgt_idx);
+        free(src_step); free(tgt_step); free(copy_shape);
+        free(src_start); free(tgt_start);
+        return NULL;
+    }
+    /* initialise with start positions (also used for the probe below) */
+    for (int i = 0; i < dim; ++i) {
+        PyTuple_SET_ITEM(src_idx, i, PyLong_FromLong((long)src_start[i]));
+        PyTuple_SET_ITEM(tgt_idx, i, PyLong_FromLong((long)tgt_start[i]));
+    }
+
+    /* ---- attempt buffer fast path via memoryview objects ---- */
+    PyObject *src_mv = NULL, *tgt_mv = NULL;
+    int use_buffer = 0;
+
+    src_mv = PyMemoryView_FromObject(source);
+    if (!src_mv) {
+        PyErr_Clear();
+    } else if (PyMemoryView_GET_BUFFER(src_mv)->ndim != dim) {
+        Py_DECREF(src_mv); src_mv = NULL;
+    } else {
+        tgt_mv = PyMemoryView_FromObject(target);
+        if (!tgt_mv) {
+            PyErr_Clear();
+        } else if (PyMemoryView_GET_BUFFER(tgt_mv)->ndim != dim ||
+                   PyMemoryView_GET_BUFFER(tgt_mv)->readonly) {
+            Py_DECREF(tgt_mv); tgt_mv = NULL;
+        } else {
+            /* probe: read from source[start], write to target[start], then
+               re-export target buffer and read back to verify the write is
+               persistent (some objects return a fresh snapshot each export) */
+            PyObject *probe_val = PyObject_GetItem(source, src_idx);
+            if (probe_val) {
+                if (PyObject_SetItem(tgt_mv, tgt_idx, probe_val) == 0) {
+                    PyObject *verify_mv = PyMemoryView_FromObject(target);
+                    if (verify_mv) {
+                        PyObject *read_back = PyObject_GetItem(verify_mv, tgt_idx);
+                        if (read_back) {
+                            int eq = PyObject_RichCompareBool(read_back, probe_val, Py_EQ);
+                            Py_DECREF(read_back);
+                            if (eq == 1) use_buffer = 1;
+                            else if (eq < 0) PyErr_Clear();
+                        } else {
+                            PyErr_Clear();
+                        }
+                        Py_DECREF(verify_mv);
+                    } else {
+                        PyErr_Clear();
+                    }
+                } else {
+                    PyErr_Clear();
+                }
+                Py_DECREF(probe_val);
+            } else {
+                PyErr_Clear();
+            }
+            if (!use_buffer) {
+                Py_DECREF(tgt_mv); tgt_mv = NULL;
+            }
+        }
+        if (!use_buffer) {
+            Py_DECREF(src_mv); src_mv = NULL;
+        }
+    }
+
+    /* ---- copy loop (iterative carry, no recursion) ---- */
+    int *num = (int*)calloc((size_t)dim, sizeof(int));
+    if (!num) {
+        Py_XDECREF(src_mv); Py_XDECREF(tgt_mv);
+        free(src_step); free(tgt_step); free(copy_shape);
+        free(src_start); free(tgt_start);
+        Py_DECREF(src_idx); Py_DECREF(tgt_idx);
+        return PyErr_NoMemory();
+    }
+
+    long long copied = 0;
+    int buffer_failed = 0;
+
+    for (long long count = 0; count < total; ++count) {
+        /* compute source / target indices */
+        for (int i = 0; i < dim; ++i) {
+            int si = src_start[i] + num[i] * src_step[i];
+            int ti = tgt_start[i] + num[i] * tgt_step[i];
+            Py_DECREF(PyTuple_GET_ITEM(src_idx, i));
+            PyTuple_SET_ITEM(src_idx, i, PyLong_FromLong((long)si));
+            Py_DECREF(PyTuple_GET_ITEM(tgt_idx, i));
+            PyTuple_SET_ITEM(tgt_idx, i, PyLong_FromLong((long)ti));
+        }
+
+        PyObject *val = NULL;
+
+        if (use_buffer && !buffer_failed) {
+            val = PyObject_GetItem(src_mv, src_idx);
+            if (!val) { buffer_failed = 1; PyErr_Clear(); }
+        }
+        if (!use_buffer || buffer_failed) {
+            val = PyObject_GetItem(source, src_idx);
+            if (!val) {
+                PyErr_Clear();
+                PyObject *get_args = PyTuple_Pack(2, source, src_idx);
+                if (!get_args) { copied = -1; break; }
+                val = py_get_item(self, get_args);
+                Py_DECREF(get_args);
+                if (!val) { copied = -1; break; }
+            }
+        }
+
+        if (use_buffer && !buffer_failed) {
+            if (PyObject_SetItem(tgt_mv, tgt_idx, val) < 0) {
+                buffer_failed = 1; PyErr_Clear();
+            }
+        }
+        if (!use_buffer || buffer_failed) {
+            if (PyObject_SetItem(target, tgt_idx, val) < 0) {
+                PyErr_Clear();
+                PyObject *set_args = PyTuple_Pack(3, target, tgt_idx, val);
+                Py_DECREF(val); val = NULL;
+                if (!set_args) { copied = -1; break; }
+                PyObject *r = py_set_item(self, set_args);
+                Py_DECREF(set_args);
+                if (!r) { copied = -1; break; }
+                Py_DECREF(r);
+            }
+        }
+
+        Py_XDECREF(val);
+        copied++;
+
+        for (int i = dim - 1; i >= 0; --i) {
+            num[i]++;
+            if (num[i] < copy_shape[i]) break;
+            num[i] = 0;
+        }
+    }
+
+    Py_XDECREF(src_mv);
+    Py_XDECREF(tgt_mv);
+    free(num);
+    free(src_step); free(tgt_step); free(copy_shape);
+    free(src_start); free(tgt_start);
+    Py_DECREF(src_idx); Py_DECREF(tgt_idx);
+
+    if (copied < 0) return NULL;
+    return PyLong_FromLongLong(copied);
+
+oom:
+    free(src_shape); free(tgt_shape);
+    free(src_step); free(tgt_step); free(copy_shape);
+    free(src_start); free(tgt_start);
+    return PyErr_NoMemory();
+fail:
+    free(src_shape); free(tgt_shape);
+    free(src_step); free(tgt_step); free(copy_shape);
+    free(src_start); free(tgt_start);
+    return NULL;
 }
 
 static PyObject* py_get_item(PyObject *self, PyObject *args) {
@@ -705,8 +1023,14 @@ static PyObject* py_get_item(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, "OO", &obj, &index)) return NULL;
     PyObject *get_item_method = PyObject_GetAttrString(obj, "__get_item__");
     if (get_item_method != NULL) {
-        PyObject *index_args = PyTuple_Check(index) ? index : PyTuple_Pack(1, index);
-        Py_INCREF(index_args);
+        PyObject *index_args;
+        if (PyTuple_Check(index)) {
+            index_args = index;
+            Py_INCREF(index_args);
+        } else {
+            index_args = PyTuple_Pack(1, index);
+            if (!index_args) { Py_DECREF(get_item_method); return NULL; }
+        }
         PyObject *result = PyObject_CallObject(get_item_method, index_args);
         Py_DECREF(index_args);
         Py_DECREF(get_item_method);
@@ -718,7 +1042,10 @@ static PyObject* py_get_item(PyObject *self, PyObject *args) {
         Py_ssize_t n = PyTuple_Size(index);
         for (Py_ssize_t i = 0; i < n; ++i) {
             PyObject *idx_obj = PyTuple_GetItem(index, i);
-            Py_ssize_t idx = PyLong_AsSsize_t(idx_obj);
+            PyObject *idx_num = PyNumber_Index(idx_obj);
+            if (!idx_num) { Py_DECREF(temp); return NULL; }
+            Py_ssize_t idx = PyLong_AsSsize_t(idx_num);
+            Py_DECREF(idx_num);
             if (idx == -1 && PyErr_Occurred()) { Py_DECREF(temp); return NULL; }
             PyObject *next = PySequence_GetItem(temp, idx);
             Py_DECREF(temp);
@@ -727,7 +1054,10 @@ static PyObject* py_get_item(PyObject *self, PyObject *args) {
         }
         return temp;
     } else {
-        Py_ssize_t idx = PyLong_AsSsize_t(index);
+        PyObject *idx_num = PyNumber_Index(index);
+        if (!idx_num) return NULL;
+        Py_ssize_t idx = PyLong_AsSsize_t(idx_num);
+        Py_DECREF(idx_num);
         if (idx == -1 && PyErr_Occurred()) return NULL;
         return PySequence_GetItem(obj, idx);
     }
@@ -752,23 +1082,32 @@ static PyObject* py_set_item(PyObject *self, PyObject *args) {
         Py_ssize_t n = PyTuple_Size(index);
         for (Py_ssize_t i = 0; i < n - 1; ++i) {
             PyObject *idx_obj = PyTuple_GetItem(index, i);
-            Py_ssize_t idx = PyLong_AsSsize_t(idx_obj);
+            PyObject *idx_num = PyNumber_Index(idx_obj);
+            if (!idx_num) { Py_DECREF(temp); return NULL; }
+            Py_ssize_t idx = PyLong_AsSsize_t(idx_num);
+            Py_DECREF(idx_num);
             if (idx == -1 && PyErr_Occurred()) { Py_DECREF(temp); return NULL; }
             PyObject *next = PySequence_GetItem(temp, idx);
             Py_DECREF(temp);
             if (!next) return NULL;
             temp = next;
         }
-        // Last index: set item
+        /* Last index: set item */
         PyObject *last_idx = PyTuple_GetItem(index, n - 1);
-        Py_ssize_t idx = PyLong_AsSsize_t(last_idx);
+        PyObject *last_num = PyNumber_Index(last_idx);
+        if (!last_num) { Py_DECREF(temp); return NULL; }
+        Py_ssize_t idx = PyLong_AsSsize_t(last_num);
+        Py_DECREF(last_num);
         if (idx == -1 && PyErr_Occurred()) { Py_DECREF(temp); return NULL; }
         int result = PySequence_SetItem(temp, idx, value);
         Py_DECREF(temp);
         if (result < 0) return NULL;
         Py_RETURN_NONE;
     } else {
-        Py_ssize_t idx = PyLong_AsSsize_t(index);
+        PyObject *idx_num = PyNumber_Index(index);
+        if (!idx_num) return NULL;
+        Py_ssize_t idx = PyLong_AsSsize_t(idx_num);
+        Py_DECREF(idx_num);
         if (idx == -1 && PyErr_Occurred()) return NULL;
         int result = PySequence_SetItem(obj, idx, value);
         if (result < 0) return NULL;
@@ -3061,6 +3400,8 @@ static PyMethodDef methods[] = {
         "Create a multi-dimensional nested list filled with default value."},
     {"load_as_default_data", (PyCFunction)py_load_as_default_data, METH_VARARGS | METH_KEYWORDS,
         "Load data as a default data type."},
+    {"load_data", (PyCFunction)py_load_data, METH_VARARGS | METH_KEYWORDS,
+        "Copy a sub-region from source to target with independent start/step."},
     {"infer_shape", (PyCFunction)py_infer_shape, METH_VARARGS,
         "Infer the shape of multi-dimensional data."},
     {"get_item", py_get_item, METH_VARARGS,
@@ -3070,7 +3411,7 @@ static PyMethodDef methods[] = {
     {"_cos", py_cos, METH_VARARGS, "inner cos algorithm."},
     {"_mod", py_mod, METH_VARARGS, "inner mod algorithm."},
     {"_cosmod", py_cosmod, METH_VARARGS, "inner cosmod algorithm."},
-    {"no_done", py_no_done, METH_VARARGS | METH_KEYWORDS, "Placeholder callback that does nothing."},
+    {"no_done", (PyCFunction)py_no_done, METH_VARARGS | METH_KEYWORDS, "Placeholder callback that does nothing."},
     {"sqrt", py_sqrt, METH_VARARGS, "Square root function (C math.h implementation)."},
     {"cos_comparison_passive", (PyCFunction)py_passive, METH_VARARGS | METH_KEYWORDS,
         "Passive mode: sliding window local comparison."},
@@ -3176,14 +3517,14 @@ static int module_exec(PyObject *module) {
     }
 
     // Add __all__ (public API list, matches pure Python backend)
-    PyObject *__all__ = Py_BuildValue("[sssssssssssssssssssssssssssssssssssssssssss]",
+    PyObject *__all__ = Py_BuildValue("[ssssssssssssssssssssssssssssssssssssssssssss]",
         "NaN", "sqrt",
         "cos_comparison_passive", "cos_comparison_passive_1d", "cos_comparison_passive_2d", "cos_comparison_passive_3d", "cos_comparison_passive_4d",
         "cos_comparison_active", "cos_comparison_active_1d", "cos_comparison_active_2d", "cos_comparison_active_3d", "cos_comparison_active_4d",
         "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
         "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
         "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
-        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod",
+        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod",
         "vector_chain_compute",
         "vector_map_as_tensor", "func_name_space", "default_contain",
         "private_dict"

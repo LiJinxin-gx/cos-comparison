@@ -641,13 +641,14 @@ static int _parse_shape_tuple(PyObject *obj, int **out_shape, int *out_dim) {
     if (!*out_shape) return -1;
     for (int i = 0; i < *out_dim; ++i) {
         PyObject *item = PySequence_GetItem(obj, i);
-        if (!item || !PyLong_Check(item)) {
-            Py_XDECREF(item);
-            free(*out_shape);
-            return -1;
-        }
-        (*out_shape)[i] = (int)PyLong_AsLong(item);
+        if (!item) { free(*out_shape); *out_shape = NULL; return -1; }
+        /* Accept any integer-like object via __index__ (duck typing) */
+        PyObject *idx = PyNumber_Index(item);
         Py_DECREF(item);
+        if (!idx) { free(*out_shape); *out_shape = NULL; return -1; }
+        (*out_shape)[i] = (int)PyLong_AsLong(idx);
+        Py_DECREF(idx);
+        if (PyErr_Occurred()) { free(*out_shape); *out_shape = NULL; return -1; }
     }
     return 0;
 }
@@ -664,13 +665,13 @@ static int _parse_int_sequence(PyObject *obj, int **out_arr, int *out_len) {
     if (!*out_arr) return -1;
     for (int i = 0; i < *out_len; ++i) {
         PyObject *item = PySequence_GetItem(obj, i);
-        if (!item || !PyLong_Check(item)) {
-            Py_XDECREF(item);
-            free(*out_arr);
-            return -1;
-        }
-        (*out_arr)[i] = (int)PyLong_AsLong(item);
+        if (!item) { free(*out_arr); *out_arr = NULL; return -1; }
+        PyObject *idx = PyNumber_Index(item);
         Py_DECREF(item);
+        if (!idx) { free(*out_arr); *out_arr = NULL; return -1; }
+        (*out_arr)[i] = (int)PyLong_AsLong(idx);
+        Py_DECREF(idx);
+        if (PyErr_Occurred()) { free(*out_arr); *out_arr = NULL; return -1; }
     }
     return 0;
 }
@@ -691,13 +692,16 @@ static int _override_int_array(PyObject *obj, int *dest, int dest_len, const cha
     }
     for (int i = 0; i < (int)n; ++i) {
         PyObject *item = PySequence_GetItem(obj, i);
-        if (!item || !PyLong_Check(item)) {
-            Py_XDECREF(item);
+        if (!item) return -1;
+        PyObject *idx = PyNumber_Index(item);
+        Py_DECREF(item);
+        if (!idx) {
             PyErr_Format(PyExc_TypeError, "%s must be sequence of integers", name);
             return -1;
         }
-        dest[i] = (int)PyLong_AsLong(item);
-        Py_DECREF(item);
+        dest[i] = (int)PyLong_AsLong(idx);
+        Py_DECREF(idx);
+        if (PyErr_Occurred()) return -1;
     }
     return 0;
 }
@@ -826,9 +830,12 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
             data = (Data*)calloc((size_t)(1), sizeof(Data));
             if (!data) { free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
             data->dimension = dim;
-            data->shape = shape;
+            /* Data owns its own shape copy so Data_free can safely release it */
+            data->shape = (int*)malloc((size_t)(dim) * sizeof(int));
+            if (!data->shape) { free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            memcpy(data->shape, shape, (size_t)(dim) * sizeof(int));
             data->strides = (int*)malloc((size_t)(dim) * sizeof(int));
-            if (!data->strides) { free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
+            if (!data->strides) { free(data->shape); free(data); free(shape); PyBuffer_Release(&view); PyErr_NoMemory(); return -1; }
             int stride = 1;
             for (int i = dim - 1; i >= 0; --i) {
                 data->strides[i] = stride;
@@ -846,7 +853,7 @@ static int Vector_init(Vector *self, PyObject *args, PyObject *kwargs) {
             self->data = data;
             self->owner = vector;
             Py_INCREF(self->owner);
-            self->flags |= VECTOR_FLAG_VIEW | VECTOR_FLAG_BUFFER;
+            self->flags |= VECTOR_FLAG_BUFFER;
         } else {
             /* Convert path: copy and convert to owned double array */
             data = Data_create(dim, shape);
