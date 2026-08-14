@@ -41,8 +41,8 @@ Most parameters (`data`, `window_size`, `w1`/`w2`, `b1`/`b2`, `start`/`end`/`ste
 - **Controls**: Direction and distance of comparison
 - **Constraints**: Length must match data dimension
 - **Example**:
-  - `(1, 0)` → Compare with right neighbor (vertical edges in 2D)
-  - `(0, 1)` → Compare with bottom neighbor (horizontal edges in 2D)
+  - `(1, 0)` → Compare with bottom neighbor (horizontal edges in 2D)
+  - `(0, 1)` → Compare with right neighbor (vertical edges in 2D)
   - `(1, 1)` → Compare with diagonal neighbor
 
 ## Returns

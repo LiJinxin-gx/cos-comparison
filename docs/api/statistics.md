@@ -24,46 +24,18 @@ mean_local(data,
 
 ### Parameters
 
-#### `data`
-- **Type**: Nested list (or compatible tensor type)
-- **Required**: Yes
-- **Description**: Input data to compute local mean on
-- **Dimensions**: 1D, 2D, 3D, 4D, or arbitrary N-dimensional
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data` | nested list / tensor | required | Input data; 1D–ND |
+| `local_size` | tuple / int / `default_contain` | `default_contain(1)` | Window size — tuple for per-dimension sizes (e.g. `(3, 3)`), int for all dimensions |
+| `step` | tuple / int / `default_contain` | `default_contain(1)` | Sliding-window step |
+| `weight` | nested list / `None` | `None` | Optional custom kernel replacing the uniform ones-kernel (should match `local_size`) |
+| `output` | tensor / container | `None` | Pre-allocated output container |
+| `output_start` | tuple of ints | all zeros | Start position in the output container |
+| `output_step` | tuple of ints | all ones | Step size for writing to the output |
+| `**kwarg` | — | — | Extra arguments forwarded to `cos_comparison_active` (e.g. `start`, `end`, callbacks) |
 
-#### `local_size`
-- **Type**: Tuple of ints, int, or `default_contain`
-- **Default**: `default_contain(1)`
-- **Description**: Size of the local window — tuple for per-dimension sizes (e.g. `(3, 3)` for 2D), int for the same size in all dimensions
-- **Note**: Window is filled with ones (uniform kernel) unless `weight` is given
-
-#### `step`
-- **Type**: Tuple of ints, int, or `default_contain`
-- **Default**: `default_contain(1)`
-- **Description**: Step size for sliding window — tuple for per-dimension steps, int for the same step in all dimensions
-
-#### `weight`
-- **Type**: Nested list or `None`
-- **Default**: `None`
-- **Description**: Optional custom kernel replacing the uniform ones-kernel
-- **Note**: When provided, `N` is still derived from `local_size`, so `weight` should be the same size as `local_size`
-
-#### `output`
-- **Type**: Tensor or compatible container
-- **Default**: `None` (creates new output)
-- **Description**: Pre-allocated output container
-
-#### `output_start`
-- **Type**: Tuple of ints
-- **Default**: All zeros
-- **Description**: Start position in output container
-
-#### `output_step`
-- **Type**: Tuple of ints
-- **Default**: All ones
-- **Description**: Step size for writing to output
-
-#### `**kwarg`
-- Additional keyword arguments passed to `cos_comparison_active` (e.g. `start`, `end`, `start_callback`, `end_callback`)
+> The window is filled with ones (uniform kernel) unless `weight` is given.
 
 ### Returns
 
@@ -125,17 +97,9 @@ pooled = cc.mean_local_2d(
 #   [3.5, 5.5],   # (1+2+5+6)/4=3.5, (3+4+7+8)/4=5.5
 #   [11.5, 13.5]  # (9+10+13+14)/4=11.5, (11+12+15+16)/4=13.5
 # ]
-```
 
-#### With Stride
-
-```python
-# Stride larger than 1 (downsampling)
-result = cc.mean_local_2d(
-    image,
-    local_size=(3, 3),
-    step=(2, 2)
-)
+# Larger step → downsampling: 3x3 windows with step 2
+downsampled = cc.mean_local_2d(image, local_size=(3, 3), step=(2, 2))
 ```
 
 ---
@@ -198,52 +162,25 @@ result = cc.local_variance_1d(
 # Windows [2,3,4] and [3,4,5] give the same result (uniform data → constant local variance)
 ```
 
-#### 2D Texture Analysis
+#### 2D Texture Analysis and Edge Detection
 
 ```python
-# High variance = textured region
-# Low variance = uniform region
-variance_map = cc.local_variance_2d(
-    image,
-    local_size=(5, 5),
-    step=(1, 1)
-)
-```
+# High variance = textured region; low variance = uniform region
+variance_map = cc.local_variance_2d(image, local_size=(5, 5), step=(1, 1))
 
-#### Edge Detection via Variance
-
-```python
-# Edges have high local variance
-edges_via_variance = cc.local_variance_2d(
-    image,
-    local_size=(3, 3),
-    step=(1, 1)
-)
+# Edges also have high local variance
+edges_via_variance = cc.local_variance_2d(image, local_size=(3, 3), step=(1, 1))
 ```
 
 ---
 
 ## Dimension Aliases
 
-Both `mean_local` and `local_variance` have dimension-specific aliases:
+Both `mean_local` and `local_variance` have dimension-specific aliases — all forwarding to the same generic N-dimensional functions:
 
-### mean_local
 ```python
-mean_local_1d(data, ...)  # 1D
-mean_local_2d(data, ...)  # 2D
-mean_local_3d(data, ...)  # 3D
-mean_local_4d(data, ...)  # 4D
+mean_local_1d/2d/3d/4d(data, ...)        local_variance_1d/2d/3d/4d(data, ...)
 ```
-
-### local_variance
-```python
-local_variance_1d(data, ...)  # 1D
-local_variance_2d(data, ...)  # 2D
-local_variance_3d(data, ...)  # 3D
-local_variance_4d(data, ...)  # 4D
-```
-
-These are all aliases for the same generic N-dimensional functions.
 
 ---
 
@@ -318,9 +255,7 @@ Alternatively, pass a custom kernel through the `weight` parameter of `mean_loca
 
 ### Numerical Considerations
 
-- Variance computation uses the `E[X²] - E[X]²` formula
-- Can suffer from catastrophic cancellation for small variances
-- For most practical purposes, this is acceptable
+- The `E[X²] - E[X]²` formula can suffer from catastrophic cancellation for small variances (acceptable for most purposes)
 - The tensor-level `variance()` method uses Welford's online algorithm, which is numerically stable for large tensors
 
 ---

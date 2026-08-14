@@ -1,8 +1,8 @@
-# Modular Architecture (v0.4.0+)
+# Modular Architecture (v0.4.2)
 
 This section documents the **overall module architecture** of cos-comparison: module responsibility boundaries, dependency rules, and data-flow conventions.
 
-Frozen as of **v0.4.0** — all internal algorithms and data formats are exposed by `core`; all interaction between the model and the outside world is abstracted by `interface`; every other module operates on top of these two foundations and manipulates data exclusively through the **attach-and-take** pattern, without depending on each other.
+Frozen as of **v0.4.1** (maintained through v0.4.2) — all internal algorithms and data formats are exposed by `core`; all interaction between the model and the outside world is abstracted by `interface`; every other module operates on top of these two foundations and manipulates data exclusively through the **attach-and-take** pattern, without depending on each other.
 
 ---
 
@@ -47,7 +47,7 @@ Frozen as of **v0.4.0** — all internal algorithms and data formats are exposed
        Every layer (sense / memory / brain / action / generate) ─
                       depends ONLY on core + interface + data
                                          │
-                   Layers 【must never】 depend on one another
+                   Layers [must never] depend on one another
 ```
 
 ### Rules
@@ -81,7 +81,7 @@ Layered modules **do not own data and do not convert data formats**. Data is con
 
 ## 5. Architecture Conformance Checklist
 
-| Check | Status (v0.4.0) |
+| Check | Status (v0.4.2) |
 |-------|:----------------:|
 | `core` depends on stdlib only | Pass |
 | `interface` depends on stdlib only | Pass |
@@ -91,9 +91,9 @@ Layered modules **do not own data and do not convert data formats**. Data is con
 
 ---
 
-## 6. Legacy Items and Evolution (flagged for v0.4.0)
+## 6. Legacy Items and Evolution (flagged for v0.4.1)
 
-Before this architecture was finalized (v0.4.0), code retained design remnants from unclear boundaries. The following legacy items are being cleaned up progressively:
+Before this architecture was finalized (v0.4.1), code retained design remnants from unclear boundaries. The following legacy items are being cleaned up progressively:
 
 | ID | Location | Legacy | Status |
 |----|----------|--------|--------|

@@ -4,7 +4,7 @@
 
 The `cos_comparison.core` module provides the core functionality of the cos-comparison library. All functions are accessible through this module, regardless of which backend is loaded.
 
-Current version: **0.4.0**
+Current version: **0.4.2**
 
 ## Import
 
@@ -202,22 +202,11 @@ These parameters appear across multiple functions.
 
 ### Callback Parameters
 
-- **`start_callback`**: Called before computation starts
-  - Signature: `def callback(name_space): ...`
-
-- **`end_callback`**: Called after computation finishes
-  - Signature: `def callback(name_space): ...`
-
-- **`global_error_callback`**: Called on outer-loop errors
-  - Signature: `def callback(error, name_space): ...`
-
-- **`local_error_callback`**: Called on inner-loop errors
-  - Signature: `def callback(error, name_space): ...`
-  - Note: May impact performance significantly
-
-- **`return_callback`**: Called to wrap return value
-  - Signature: `def callback(output, name_space): return wrapped_output`
-  - Default: returns output directly
+- **`start_callback`**: Called before computation starts — `def callback(name_space): ...`
+- **`end_callback`**: Called after computation finishes — `def callback(name_space): ...`
+- **`global_error_callback`**: Called on outer-loop errors — `def callback(error, name_space): ...`
+- **`local_error_callback`**: Called on inner-loop errors — `def callback(error, name_space): ...`; note: may impact performance significantly
+- **`return_callback`**: Called to wrap the return value — `def callback(output, name_space): return wrapped_output`; default returns output directly
 
 ## Data Types
 
@@ -236,19 +225,38 @@ flat_idx = start + offset + Σ strides[k] * (start_offset[k] + i_k * step_offset
 - NumPy-like fancy indexing: arbitrary int/slice mixes, negative indices, arbitrary step sizes, automatic dimension collapse on integer indexing
 - Iterative carry-based traversal — no recursion, safe for high-dimensional tensors
 - `__shape__` protocol for zero-overhead shape inference
-- Arithmetic: `+`, `-`, `*`, `/`, `**`, in-place variants, unary `+`/`-`, `abs` (Frobenius norm)
+- Arithmetic: `+`, `-`, `*`, `/`, `**`, in-place variants, unary `+`/`-`, `abs` (Frobenius norm).  In-place variants accept scalars on every backend (including the C extension).  All arithmetic is computed in double precision: results are always float-valued tensors — integer-type promotion is intentionally NOT implemented to keep the C hot paths single-typed and SIMD-vectorizable
 - Statistics: `mean()` and `variance()` using Welford's online algorithm (numerically stable)
 - Buffer-protocol assignment in `__setitem__` (array.array, memoryview, bytes, ...)
+- Buffer-protocol export (`memoryview(tensor)`): read-only, C-order, format `d`/`B`; the C extension exports zero-copy views (including strided sub-views), the Python backends export a materialized contiguous snapshot — all backends are read-only and reject writes with TypeError (matching numpy's `frombuffer` on immutable input)
+- Buffer-backed construction write-through: tensors built from a writable buffer (`array.array`, `bytearray`, `memoryview`) share storage on every backend — writing to the tensor is visible in the original buffer and vice versa (zero-copy on the C extension)
 - Subclass-friendly: operations and slicing return the actual instance type
+
+**Constructor**:
+```python
+vector_map_as_tensor(*, vector=(1,), shape=(1,), start=0, strides=None,
+                     offset=0, start_offset=None, step_offset=None)
+```
+- `vector=None` (or omitted) with `shape=` **auto-creates the default zero-filled flat vector** sized to the shape (a list of zeros on the Python backends, the native zero-filled array on the C backends).  Omitted `vector` (not passed) keeps the historical default `(1,)` with value `1.0`.
+- `vector` may be a sequence, a number, a `vector_map_as_tensor` (creates a view), or a buffer object (`array.array`, `bytearray`, `memoryview`, numpy arrays).
 
 **Usage**:
 ```python
 vec = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-tensor = cc.vector_map_as_tensor(vec, (2, 3))
+tensor = cc.vector_map_as_tensor(vector=vec, shape=(2, 3))
 # tensor[0]       → first row view (shape (3,))
 # tensor[0, 1]    → 2.0
 # tensor[:, ::-1] → reversed-columns view, still zero-copy
 # tensor[1, 2]    → 6.0
+
+# auto-created zero tensor
+zeros = cc.vector_map_as_tensor(vector=None, shape=(2, 3))   # all 0.0
+
+# buffer-backed write-through
+import array
+buf = array.array('d', [1.0, 2.0, 3.0, 4.0])
+t = cc.vector_map_as_tensor(vector=buf, shape=(4,))
+t[0] = 99.0      # buf[0] becomes 99.0 too (shared storage)
 ```
 
 **Properties**: `vector`, `shape`, `strides`, `start`, `offset`, `start_offset`, `step_offset`, plus `__shape__`, `dimension`, `tensor_size` (backward-compatible alias of `shape`).
@@ -277,7 +285,7 @@ container[5]  # returns 2.0
 ```python
 import cos_comparison
 cos_comparison.__version__
-# "0.4.0"
+# "0.4.2"
 ```
 
 > Note: `cos_comparison.core` itself does not define `__version__`; read the version from the top-level package instead.

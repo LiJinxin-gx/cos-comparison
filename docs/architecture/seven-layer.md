@@ -53,7 +53,7 @@ The passive/active dual-mode philosophy extends vertically through all layers â€
 
 ### Layer 1: Core
 
-**Status**: âœ… Production (v0.4.0)
+**Status**: âœ… Production (v0.4.2)
 
 **Responsibilities**:
 - Fundamental local comparison computation (passive self-similarity, active template matching) and statistics (mean, variance)
@@ -131,7 +131,7 @@ The passive/active dual-mode philosophy extends vertically through all layers â€
 
 Full class-level details: [Cognitive Layer APIs](../api/cognitive-layers.md)
 
-## Current State Assessment (v0.4.0)
+## Current State Assessment (v0.4.2)
 
 ### Strengths
 - Clear architectural vision with strong neuroscience inspiration
@@ -140,7 +140,7 @@ Full class-level details: [Cognitive Layer APIs](../api/cognitive-layers.md)
 - Dual-mode philosophy provides conceptual coherence
 - Memory layer has functional backends (map/table/database) with transaction support
 - Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system (Monitor delegated to `interface` mechanisms)
-- Three backends fully API-aligned with zero-warning C code
+- Three backends fully API-aligned with zero-warning C code; v0.4.2 adds empty-input hardening, exhaustive malloc checks, and ARM/piwheels C99 compatibility
 
 ### Gaps
 - Action and generation layers only have minimal primitives

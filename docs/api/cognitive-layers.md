@@ -6,7 +6,7 @@ This document covers the API surface of the non-core layers: `sense_layer`, `mem
 
 ## Sense Layer
 
-Receives external stimuli and exposes them to the core computation. The package imports cleanly.
+Receives external stimuli and exposes them to the core computation.
 
 ### Receptor
 
@@ -28,7 +28,7 @@ Wraps data as a `memoryview` when possible (falls back to the raw object on fail
 
 ## Memory Layer
 
-Provides memory backends (map / table / database) and unified wrappers with hierarchical tagging. The package imports cleanly and the memory backends work.
+Provides memory backends (map / table / database) and unified wrappers with hierarchical tagging. The memory backends work.
 
 ### Status
 
@@ -175,7 +175,7 @@ Intended to provide generation tools:
 - `Generator(data)`: `fix(call, args=(), kwargs=None)` applies a callable to the wrapped data
 - `TensorGenerator(data)`: memoryview-based generator; `set_point(index, data)` writes a point
 
-> **Note**: `cos_comparison.generate_layer` imports cleanly in a fresh interpreter. It is still the most stub-like layer (generation primitives only).
+> **Note**: Still the most stub-like layer (generation primitives only).
 
 ## Interface (`cos_comparison.interface`)
 
@@ -189,7 +189,7 @@ Abstraction of the external interface. The following modules exist:
 
 - **tools/context_tool**: `VoidContext()` (no-op context manager), `IntegrateContext(*contexts)` (composes context managers, exits in reverse order), `AsyncIntegrateContext(*a_context)` (async variant)
 
-> **Note**: `cos_comparison.interface` (including `interface.api` and `interface.tools`) imports cleanly in a fresh interpreter — `EventLoop`, `run_in_thread` and the integrated locks are exercised by `tests/test_async_api.py` / `tests/test_parallel_api.py`.
+> **Note**: `cos_comparison.interface` (including `interface.api` and `interface.tools`) imports cleanly in a fresh interpreter — `EventLoop`, `run_in_thread` and the integrated locks are exercised by `tests/test_layers.py` (`TestInterfaceApi`, `TestInterfaceTools`).
 
 ## Data (`cos_comparison.data`)
 
@@ -197,7 +197,7 @@ Unified data carrier interfaces.
 
 - `DataWrap(data_body=None)`: intended to be a unified data carrier with `process(caller, ...)`, `call(name, ...)`, `getattr`/`setattr`, plus `__getitem__`/`__setitem__` and the `__get_item__`/`__set_item__` protocol
 
-> **Note**: `cos_comparison.data` imports cleanly in a fresh interpreter — the `DataWrap` carrier and the tensor containers are exercised by `tests/test_tensor_comprehensive.py`.
+> **Note**: `cos_comparison.data` imports cleanly in a fresh interpreter — the `DataWrap` carrier and the tensor containers are exercised by `tests/test_layers.py` (`TestDataLayer`).
 
 ### Tensor Containers (`data.tensor`)
 

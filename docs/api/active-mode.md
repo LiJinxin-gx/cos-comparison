@@ -57,13 +57,13 @@ Most parameters (`data`, `w1`/`w2`, `b1`/`b2`, `start`/`end`/`step`, `algorithm`
 ## Dimension Aliases
 
 ```python
-cos_comparison_active_1d(data, kernel, ...)  # 1D
-cos_comparison_active_2d(data, kernel, ...)  # 2D
-cos_comparison_active_3d(data, kernel, ...)  # 3D
-cos_comparison_active_4d(data, kernel, ...)  # 4D
+cos_comparison_active_1d(data, kernel=..., ...)  # 1D
+cos_comparison_active_2d(data, kernel=..., ...)  # 2D
+cos_comparison_active_3d(data, kernel=..., ...)  # 3D
+cos_comparison_active_4d(data, kernel=..., ...)  # 4D
 ```
 
-All are aliases for the same generic function. Use whichever makes your code clearer.
+All are aliases for the same generic function. `kernel` must be passed as a keyword argument. Use whichever alias makes your code clearer.
 
 ## Examples
 
