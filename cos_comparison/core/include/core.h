@@ -42,52 +42,6 @@ static inline Data* _compute_output_shape(int dim, const int num[],
     return out;
 }
 
-/* Helper: get item from arbitrary Python object, supporting __get_item__ overload */
-static inline double _py_get_item(PyObject *obj, const int idx[], int dim) {
-    PyObject *get_item_method = PyObject_GetAttrString(obj, "__get_item__");
-    if (get_item_method != NULL) {
-        PyObject *args = PyTuple_New(dim);
-        if (!args) {
-            Py_DECREF(get_item_method);
-            return NAN;
-        }
-        for (int i = 0; i < dim; ++i) {
-            PyObject *idx_obj = PyLong_FromLong(idx[i]);
-            if (!idx_obj) {
-                /* Cleanup already inserted items */
-                for (int j = 0; j < i; ++j) {
-                    Py_DECREF(PyTuple_GET_ITEM(args, j));
-                }
-                Py_DECREF(args);
-                Py_DECREF(get_item_method);
-                return NAN;
-            }
-            PyTuple_SET_ITEM(args, i, idx_obj);
-        }
-        PyObject *res = PyObject_CallObject(get_item_method, args);
-        Py_DECREF(args);
-        Py_DECREF(get_item_method);
-        if (res == NULL) return NAN;
-        double val = PyFloat_AsDouble(res);
-        Py_DECREF(res);
-        return val;
-    }
-    PyErr_Clear();
-    PyObject *current = obj;
-    for (int i = 0; i < dim; ++i) {
-        PyObject *next = PySequence_GetItem(current, idx[i]);
-        if (i > 0) Py_DECREF(current);
-        if (next == NULL) {
-            Py_XDECREF(current);
-            return NAN;
-        }
-        current = next;
-    }
-    double val = PyFloat_AsDouble(current);
-    Py_DECREF(current);
-    return val;
-}
-
 /* Helper: write value to arbitrary nested Python object (iterative, no stack overflow, uses generic object protocol with __set_item__ fast path) */
 static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int depth, double value) {
     if (dim == 0) return;
@@ -177,7 +131,7 @@ static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int dep
     free(stack);
 }
 
-/* Core algorithms – same as ctypes version but with CallbackContext and output_obj */
+/* Core algorithms - same as ctypes version but with CallbackContext and output_obj */
 Data* cos_comparison_passive(const Data *data,
                              const int window_size[],
                              double w1, double w2, double b1, double b2,

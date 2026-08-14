@@ -8,8 +8,8 @@
 #include <math.h>
 #ifndef PY_SSIZE_T_CLEAN
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #endif
+#include <Python.h>
 #include "type.h"
 #include "core.h"
 #include "type_vector.h"
@@ -38,6 +38,12 @@ static PyObject* _get_nested_item(PyObject *obj, int *indices, int dim) {
 Helper: flatten nested list to flat array (iterative, no recursion)
 ------------------------------------------------------------------ */
 static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const int *shape) {
+    /* Degenerate shape (any dimension is 0): nothing to flatten. */
+    int total = 1;
+    for (int i = 0; i < dim; ++i) {
+        if (shape[i] <= 0) { *idx = 0; return 0; }
+        total *= shape[i];
+    }
     if (dim == 0) {
         PyObject *num = PyNumber_Float(obj);
         if (!num) return -1;
@@ -82,7 +88,7 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
 }
 
 /* ------------------------------------------------------------------
-Helper: nested list / Vector → Data
+Helper: nested list / Vector -> Data
 ------------------------------------------------------------------ */
 static Data* _pyobj_to_data(PyObject *obj) {
     if (PyObject_IsInstance(obj, (PyObject*)&VectorizeType)) {
@@ -158,7 +164,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
 }
 
 /* ------------------------------------------------------------------
-Helper: Data → vector_map_as_tensor (zero-copy)
+Helper: Data -> vector_map_as_tensor (zero-copy)
 ------------------------------------------------------------------ */
 static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     if (!type) type = &VectorizeType;
@@ -209,6 +215,12 @@ static int _parse_int_seq(PyObject *obj, int **out, int *count) {
         return -1;
     }
     Py_ssize_t n = PySequence_Size(obj);
+    if (n < 0) return -1;
+    if (n > INT_MAX) {
+        PyErr_SetString(PyExc_OverflowError,
+            "sequence length does not fit an int");
+        return -1;
+    }
     int *arr = (int*)malloc((size_t)(n) * sizeof(int));
     if (!arr) { PyErr_NoMemory(); return -1; }
     for (Py_ssize_t i = 0; i < n; ++i) {
@@ -372,7 +384,13 @@ static PyObject* py_infer_shape(PyObject *self, PyObject *args) {
         PyErr_Clear();
         Py_RETURN_NONE;
     }
-    
+
+    /* Match pure Python: return None when no dimensions found (scalar/None) */
+    if (dim == 0) {
+        free(shape);
+        Py_RETURN_NONE;
+    }
+
     PyObject *tup = PyTuple_New(dim);
     if (!tup) { free(shape); return NULL; }
     for (int i = 0; i < dim; ++i) {
@@ -442,8 +460,15 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
         
         /* Create a new contiguous vector by copying all elements */
         int total = _multiple_chain(res_vec->shape, res_vec->dimension);
+        /* Match pure Python: _iter_flat yields one index even for a zero-size
+           tensor, then accessing the empty flat vector raises IndexError. */
+        if (total == 0) {
+            Py_DECREF(result);
+            PyErr_SetString(PyExc_IndexError, "list index out of range");
+            return NULL;
+        }
         int *flat_indices = (int*)malloc((size_t)(total) * sizeof(int));
-        if (!flat_indices) { Py_DECREF(result); return PyErr_NoMemory(); }
+        if (!flat_indices) { Py_DECREF(result); PyErr_NoMemory(); return NULL; }
         _vector_get_flat_indices(res_vec, flat_indices, total);
         
         /* Build flat list of values */
@@ -651,6 +676,23 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     int total = 1;
     for (int i = 0; i < dimension; ++i) total *= shape[i];
 
+    /* Match pure Python: when the result shape has zero elements, the
+       carry loop still attempts one access into the source, which raises
+       IndexError on an empty container. */
+    if (total == 0) {
+        int has_zero_dim = 0;
+        for (int i = 0; i < dimension; ++i) {
+            if (full_shape[i] == 0) { has_zero_dim = 1; break; }
+        }
+        if (has_zero_dim) {
+            free(full_strides);
+            Data_free(result_data); Data_free(full_data);
+            free(start); free(shape); free(step); free(full_shape);
+            PyErr_SetString(PyExc_IndexError, "list index out of range");
+            return NULL;
+        }
+    }
+
     int *num_list = (int*)malloc(((size_t)(dimension) + 1) * sizeof(int));
     if (!num_list) {
         free(full_strides);
@@ -749,7 +791,6 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
            avoid leaking the pre-allocated arrays; _parse_int_seq mallocs) ---- */
     int *src_step = NULL, *tgt_step = NULL;
     int *copy_shape = NULL, *src_start = NULL, *tgt_start = NULL;
-    int *tmp = NULL;
     int cnt = 0;
 
     /* source_step: default all 1 */
@@ -933,7 +974,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         free(src_step); free(tgt_step); free(copy_shape);
         free(src_start); free(tgt_start);
         Py_DECREF(src_idx); Py_DECREF(tgt_idx);
-        return PyErr_NoMemory();
+        PyErr_NoMemory(); return NULL;
     }
 
     long long copied = 0;
@@ -1010,7 +1051,7 @@ oom:
     free(src_shape); free(tgt_shape);
     free(src_step); free(tgt_step); free(copy_shape);
     free(src_start); free(tgt_start);
-    return PyErr_NoMemory();
+    PyErr_NoMemory(); return NULL;
 fail:
     free(src_shape); free(tgt_shape);
     free(src_step); free(tgt_step); free(copy_shape);
@@ -1214,6 +1255,7 @@ Data* cos_comparison_passive(const Data *data,
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i] - d[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1229,6 +1271,11 @@ Data* cos_comparison_passive(const Data *data,
     int *main_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *other_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !main_place || !other_place || !out_idx) {
+        free(num); if (!output_is_data) Data_free(output);
+        free(num_list); free(inner_list); free(main_place); free(other_place); free(out_idx);
+        PyErr_NoMemory(); return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
     double main_sum, other_sum, mu_sum;
@@ -1287,7 +1334,7 @@ Data* cos_comparison_passive(const Data *data,
     }
     free(num); free(num_list); free(inner_list);
     free(main_place); free(other_place); free(out_idx);
-    return output_is_data ? output : output;
+    return output;
 }
 
 /* Active mode */
@@ -1320,6 +1367,7 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1335,6 +1383,11 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     int *data_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *kern_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !data_place || !kern_place || !out_idx) {
+        free(num); if (!output_is_data) Data_free(output);
+        free(num_list); free(inner_list); free(data_place); free(kern_place); free(out_idx);
+        PyErr_NoMemory(); return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
     double main_sum, other_sum, mu_sum;
@@ -1393,23 +1446,40 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     }
     free(num); free(num_list); free(inner_list);
     free(data_place); free(kern_place); free(out_idx);
-    return output_is_data ? output : output;
+    return output;
 }
 
 /* Full tensor similarity */
 double cos_full(const Data *a, const Data *b, algo_fn algorithm, CallbackContext *ctx) {
     if (!Data_shape_equal(a, b)) {
-        return NAN; /* Shape mismatch, return NaN intentionally */
+        return COS_NAN; /* Shape mismatch, return NaN intentionally */
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;
-    COS_SIMD_LOOP
-    for (int i = 0; i < total; ++i) {
-        double va = Data_get_flat(a, i);
-        double vb = Data_get_flat(b, i);
-        sum_a += va * va;
-        sum_b += vb * vb;
-        sum_ab += va * vb;
+    if (a->dtype == 0 && b->dtype == 0) {
+        /* Fast path: both tensors are double arrays (owned data is
+           malloc-aligned; zero-copy buffers are alignment-checked at
+           construction).  Plain ISO C pointer arithmetic; no `restrict`
+           because a and b may alias the same buffer (cos_full(t, t)). */
+        const double *pa = (const double*)a->data;
+        const double *pb = (const double*)b->data;
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double va = pa[i];
+            double vb = pb[i];
+            sum_a += va * va;
+            sum_b += vb * vb;
+            sum_ab += va * vb;
+        }
+    } else {
+        COS_SIMD_LOOP
+        for (int i = 0; i < total; ++i) {
+            double va = Data_get_flat(a, i);
+            double vb = Data_get_flat(b, i);
+            sum_a += va * va;
+            sum_b += vb * vb;
+            sum_ab += va * vb;
+        }
     }
     return algorithm ? algorithm(sum_a, sum_b, sum_ab, ctx)
                      : _cosmod_(sum_a, sum_b, sum_ab, ctx);
@@ -1442,6 +1512,7 @@ Data* cos_local_mean(const Data *data,
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1526,10 +1597,9 @@ Data* cos_local_mean(const Data *data,
     }
     free(num); free(num_list); free(inner_list);
     free(data_place); free(out_idx); free(wstrides);
-    return output_is_data ? output : output;
+    return output;
 }
 
-/* Local variance */
 /* Local variance */
 Data* cos_local_variance(const Data *data,
                          const int window_size[],
@@ -1557,6 +1627,7 @@ Data* cos_local_variance(const Data *data,
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1573,6 +1644,11 @@ Data* cos_local_variance(const Data *data,
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *data_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !data_place || !out_idx) {
+        free(num); if (!output_is_data) Data_free(output);
+        free(num_list); free(inner_list); free(data_place); free(out_idx);
+        PyErr_NoMemory(); return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
     double sum_x, sum_x2;
@@ -1628,7 +1704,7 @@ Data* cos_local_variance(const Data *data,
     }
     free(num); free(num_list); free(inner_list);
     free(data_place); free(out_idx);
-    return output_is_data ? output : output;
+    return output;
 }
 
 /* ------------------------------------------------------------------
@@ -1868,6 +1944,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -1953,7 +2030,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         "global_error_callback", "local_error_callback",
         "return_callback", "release_gil", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|ddddOOOOOOOOOOOOp", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOp", kwlist,
                                      &data_obj, &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
@@ -1963,6 +2040,15 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &global_error_callback, &local_error_callback,
                                      &return_callback, &release_gil))
         return NULL;
+
+    /* Match pure Python signature cos_comparison_active(data, *arg, kernel=None):
+       extra positional args are absorbed by *arg and ignored; kernel must be
+       passed as a keyword. If a second positional was given but "kernel" was
+       not explicitly in kwargs, treat it as *arg (kernel stays NULL). */
+    if (kernel_obj && (!kwargs || !PyDict_GetItemString(kwargs, "kernel"))
+        && PyTuple_GET_SIZE(args) >= 2) {
+        kernel_obj = NULL;
+    }
 
     if (!kernel_obj) { PyErr_SetString(PyExc_ValueError, "kernel must be provided for active mode"); return NULL; }
 
@@ -2153,6 +2239,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2278,18 +2365,17 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     Data *data = _pyobj_to_data(data_obj);
     if (!data) return NULL;
     int dim = data->dimension;
-    Data *output_data = NULL;
-    if (output_obj && PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
-        Vector *v = (Vector*)output_obj;
-        output_data = v->data;
-    }
 
     int *local_size = NULL; int ls_dim = 0;
     /* Accept a single int as a 1-D window (consistent with pure Python) */
-    if (local_size_obj && PyLong_Check(local_size_obj)) {
+    if (local_size_obj && PyIndex_Check(local_size_obj)) {
         local_size = (int*)malloc(sizeof(int));
-        if (!local_size) { Data_free(data); return PyErr_NoMemory(); }
-        local_size[0] = (int)PyLong_AsLong(local_size_obj);
+        if (!local_size) { Data_free(data); PyErr_NoMemory(); return NULL; }
+        PyObject *ls_py = PyNumber_Index(local_size_obj);
+        if (!ls_py) { free(local_size); Data_free(data); return NULL; }
+        local_size[0] = (int)PyLong_AsLong(ls_py);
+        Py_DECREF(ls_py);
+        if (PyErr_Occurred()) { free(local_size); Data_free(data); return NULL; }
         ls_dim = 1;
     } else if (local_size_obj) {
         if (_parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
@@ -2322,7 +2408,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
             wtot *= local_size[i];
         }
         weights = (double*)malloc((size_t)(wtot) * sizeof(double));
-        if (!weights) { Data_free(wdata); free(local_size); Data_free(data); return PyErr_NoMemory(); }
+        if (!weights) { Data_free(wdata); free(local_size); Data_free(data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < wtot; ++i) weights[i] = Data_get_flat(wdata, i);
         Data_free(wdata);
     } else {
@@ -2330,7 +2416,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         int wtot = 1;
         for (int i = 0; i < dim; ++i) wtot *= local_size[i];
         weights = (double*)malloc((size_t)(wtot) * sizeof(double));
-        if (!weights) { free(local_size); Data_free(data); return PyErr_NoMemory(); }
+        if (!weights) { free(local_size); Data_free(data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < wtot; ++i) weights[i] = 1.0;
     }
 
@@ -2410,6 +2496,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2481,10 +2568,14 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     int dim = data->dimension;
 
     int *local_size = NULL; int ls_dim = 0;
-    if (local_size_obj && PyLong_Check(local_size_obj)) {
+    if (local_size_obj && PyIndex_Check(local_size_obj)) {
         local_size = (int*)malloc(sizeof(int));
-        if (!local_size) { Data_free(data); return PyErr_NoMemory(); }
-        local_size[0] = (int)PyLong_AsLong(local_size_obj);
+        if (!local_size) { Data_free(data); PyErr_NoMemory(); return NULL; }
+        PyObject *ls_py = PyNumber_Index(local_size_obj);
+        if (!ls_py) { free(local_size); Data_free(data); return NULL; }
+        local_size[0] = (int)PyLong_AsLong(ls_py);
+        Py_DECREF(ls_py);
+        if (PyErr_Occurred()) { free(local_size); Data_free(data); return NULL; }
         ls_dim = 1;
     } else if (local_size_obj) {
         if (_parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
@@ -2574,6 +2665,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2676,7 +2768,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     int total = 1;
     for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
     int *indices = (int*)malloc((size_t)(total) * sizeof(int));
-    if (!indices) { Data_free(contig_data); return PyErr_NoMemory(); }
+    if (!indices) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
     /* Iterate all indices with carry method */
     {
         int *idx = (int*)malloc((size_t)(vec->dimension) * sizeof(int));
@@ -2896,6 +2988,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -3010,7 +3103,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     int total = 1;
     for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
     int *indices = (int*)malloc((size_t)(total) * sizeof(int));
-    if (!indices) { Data_free(contig_data); return PyErr_NoMemory(); }
+    if (!indices) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
     /* Iterate all indices with carry method */
     {
         int *idx = (int*)malloc((size_t)(vec->dimension) * sizeof(int));
@@ -3201,6 +3294,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -3367,7 +3461,6 @@ static PyMethodDef vcc_fix_def = {"fix", (PyCFunction)VectorChainCompute_fix, ME
 static PyMethodDef vcc_get_def = {"get", (PyCFunction)VectorChainCompute_get, METH_NOARGS, NULL};
 
 static PyObject* py_vector_chain_compute(PyObject *self, PyObject *A) {
-    if (PyType_Ready(&VectorChainComputeType) < 0) return NULL;
     VectorChainComputeObject *obj = PyObject_New(VectorChainComputeObject, &VectorChainComputeType);
     if (!obj) return NULL;
     obj->a = A;
@@ -3477,7 +3570,7 @@ static int module_exec(PyObject *module) {
     }
 
     // Add NaN constant
-    if (PyModule_AddObject(module, "NaN", PyFloat_FromDouble(NAN)) < 0) {
+    if (PyModule_AddObject(module, "NaN", PyFloat_FromDouble(COS_NAN)) < 0) {
         return -1;
     }
 

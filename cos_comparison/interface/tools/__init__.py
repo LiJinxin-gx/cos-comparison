@@ -3,4 +3,6 @@ It provide some tools.
 """
 
 from .context_tool import *
-from .func_tools import *
+# NOTE: no_done is intentionally not exposed here - it must be consumed
+# from the core module directly (single source of truth), never via
+# interface.

@@ -29,7 +29,10 @@ class Variable:
         self.name = name
         self.value = value
     def __eq__(self,other):
-        return self.value==other.value
+        if type(self) == type(other):
+            return self.value==other.value
+        else:
+            return False
     def __hash__(self):
         return hash(self.value)
 

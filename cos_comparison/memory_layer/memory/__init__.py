@@ -31,9 +31,13 @@ class MemoryWrap:
     def call(self,name,args=(),kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         return getattr(self.memory_body,name)(*args,**kwargs)
-    def get(self,name):
+    def get(self,key):
+        return self.memory_body[key]
+    def set(self,key,value):
+        self.memory_body[key] = value
+    def get_body_attr(self,name):
         return getattr(self.memory_body,name)
-    def set(self,name,value):
+    def set_body_attr(self,name,value):
         return setattr(self.memory_body,name,value)
 
 class MemoryWrapPool:

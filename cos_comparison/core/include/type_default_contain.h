@@ -54,15 +54,15 @@ static PyObject* DefaultContain_getitem(DefaultContain *self, PyObject *item) {
 	return self->default_value;
 }
 
+/* Designated initializers (C99 6.7.8): sq_contains must land in its own
+   slot - a positional initializer would put it into sq_slice. */
 static PySequenceMethods DefaultContain_as_sequence = {
-	(lenfunc)DefaultContain_len, 0, 0, 0,
-	(objobjproc)DefaultContain_contains,
+	.sq_length   = (lenfunc)DefaultContain_len,
+	.sq_contains = (objobjproc)DefaultContain_contains,
 };
 
 static PyMappingMethods DefaultContain_as_mapping = {
-	0,
-	(binaryfunc)DefaultContain_getitem,
-	0,
+	.mp_subscript = (binaryfunc)DefaultContain_getitem,
 };
 
 static PyObject* DefaultContain_repr(DefaultContain *self) {

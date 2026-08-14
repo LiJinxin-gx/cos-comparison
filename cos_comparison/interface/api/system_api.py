@@ -15,6 +15,17 @@ def command(commands, input=None, timeout=None):
     try:
         out,err = obj.communicate(input=input, timeout=timeout)
         return out,err,obj.returncode
+    except subprocess.TimeoutExpired:
+        # The timed-out child keeps running and its pipes stay open; kill it
+        # and reap it (drain the pipes, set the return code) before raising,
+        # so callers do not leak a live process.  The defensive OSError guard
+        # covers the race where the child exits exactly at the timeout.
+        try:
+            obj.kill()
+        except OSError:
+            pass
+        obj.communicate()
+        raise
     finally:
         if obj.stdin is not None and not obj.stdin.closed:
             obj.stdin.close()

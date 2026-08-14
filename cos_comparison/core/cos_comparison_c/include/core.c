@@ -3,18 +3,14 @@
 #include <math.h>
 #include <stdlib.h>
 
-#ifdef _WIN32
-#define COS_API __declspec(dllexport)
-#else
-#define COS_API
-#endif
-
 /* -----------------------------------------------------------------------------
  * Optional SIMD auto-vectorization hints - safe no-op fallback for all compilers
  * --------------------------------------------------------------------------- */
 #if defined(_MSC_VER)
   #define COS_SIMD_LOOP __pragma(loop(ivdep))
-#elif defined(__GNUC__) || defined(__clang__)
+#elif defined(__clang__) || \
+      (defined(__GNUC__) && !defined(__TINYC__) && \
+       (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 9)))
   #define COS_SIMD_LOOP _Pragma("GCC ivdep")
 #else
   #define COS_SIMD_LOOP
@@ -24,19 +20,34 @@
 COS_API Data* Data_create(int dimension, const int shape[]) {
     Data *self = (Data*)calloc((size_t)(1), sizeof(Data));
     if (!self) return NULL;
+    /* Guard against degenerate dimensions: allocate at least 1 element
+       so malloc/calloc never returns NULL due to a zero size. */
+    int dim = dimension > 0 ? dimension : 1;
     self->dimension = dimension;
-    self->shape = (int*)malloc((size_t)(dimension) * sizeof(int));
+    self->shape = (int*)calloc((size_t)(dim), sizeof(int));
     if (!self->shape) { free(self); return NULL; }
-    memcpy(self->shape, shape, dimension * sizeof(int));
-    self->strides = (int*)malloc((size_t)(dimension) * sizeof(int));
+    if (dimension > 0) memcpy(self->shape, shape, (size_t)(dimension) * sizeof(int));
+    self->strides = (int*)calloc((size_t)(dim), sizeof(int));
     if (!self->strides) { free(self->shape); free(self); return NULL; }
-    int stride = 1;
+    long long stride = 1;
     for (int i = dimension - 1; i >= 0; --i) {
-        self->strides[i] = stride;
-        stride *= shape[i];
+        self->strides[i] = (int)stride;
+        long long next = stride * (long long)shape[i];
+        /* Signed int overflow is undefined behaviour (C99 6.5p5); reject
+           shapes whose strides/total would not fit an int. Degenerate
+           (zero/negative) shapes are preserved for backend parity. */
+        if (next > INT_MAX || next < INT_MIN) {
+            free(self->strides);
+            free(self->shape);
+            free(self);
+            return NULL;
+        }
+        stride = next;
     }
-    int total = stride;
-    self->data = (double*)calloc((size_t)(total), sizeof(double));
+    int total = (int)stride;
+    /* Allocate at least 1 element to avoid zero-size allocation. */
+    size_t alloc_count = total > 0 ? (size_t)total : 1;
+    self->data = (double*)calloc(alloc_count, sizeof(double));
     if (!self->data) { free(self->strides); free(self->shape); free(self); return NULL; }
     self->owns_data = 1;
     self->dtype = 0; /* default double */
@@ -336,10 +347,6 @@ static inline double _cosmod_(double a, double b, double ab) {
     return (a == b) ? 1.0 : 0.0;
 }
 
-static void no_done(void *unused) { (void)unused; }
-static void no_error(void *e, void *name) { (void)e; (void)name; }
-static void* no_return(void *output, void *name) { (void)name; return output; }
-
 static control create_default_control(int dimension) {
     int *start = (int*)malloc(sizeof(*start) * (size_t)dimension);
     int *end   = (int*)malloc(sizeof(*end) * (size_t)dimension);
@@ -412,6 +419,13 @@ COS_API Data* cos_comparison_passive(const Data *data,
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
     int *d     = c->d     ? c->d     : (int*)calloc((size_t)(dim), sizeof(int));
+    if (!start || !end || !step || !d) {
+        if (!c->start) free(start);
+        if (!c->end) free(end);
+        if (!c->step) free(step);
+        if (!c->d) free(d);
+        return NULL;
+    }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
     if (!c->d)     { d[0] = 1; for (int i=1; i<dim; ++i) d[i] = 0; }
@@ -426,6 +440,11 @@ COS_API Data* cos_comparison_passive(const Data *data,
 
     int *os = (int*)malloc((size_t)(dim) * sizeof(int));
     int *ost = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!os || !ost) {
+        free(num); free(os); free(ost);
+        if (!ctrl) { free(start); free(end); free(step); free(d); }
+        return NULL;
+    }
     for (int i = 0; i < dim; ++i) {
         os[i] = output_start ? output_start[i] : 0;
         ost[i] = output_step ? output_step[i] : 1;
@@ -449,6 +468,11 @@ COS_API Data* cos_comparison_passive(const Data *data,
     int *main_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *other_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !main_place || !other_place || !out_idx) {
+        free(num); free(os); free(ost);
+        free(num_list); free(inner_list); free(main_place); free(other_place); free(out_idx);
+        return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
 
     int flag = dim;
@@ -562,6 +586,13 @@ COS_API Data* cos_comparison_active(const Data *data,
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
     int *d_dummy = (int*)calloc((size_t)(dim), sizeof(int));
+    if (!start || !end || !step || !d_dummy) {
+        if (!c->start) free(start);
+        if (!c->end) free(end);
+        if (!c->step) free(step);
+        free(d_dummy);
+        return NULL;
+    }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
     linear lin = c->li;
@@ -576,6 +607,11 @@ COS_API Data* cos_comparison_active(const Data *data,
 
     int *os = (int*)malloc((size_t)(dim) * sizeof(int));
     int *ost = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!os || !ost) {
+        free(num); free(os); free(ost);
+        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        return NULL;
+    }
     for (int i = 0; i < dim; ++i) {
         os[i] = output_start ? output_start[i] : 0;
         ost[i] = output_step ? output_step[i] : 1;
@@ -599,6 +635,12 @@ COS_API Data* cos_comparison_active(const Data *data,
     int *data_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *kern_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !data_place || !kern_place || !out_idx) {
+        free(num); free(os); free(ost); free(d_dummy);
+        free(num_list); free(inner_list); free(data_place); free(kern_place); free(out_idx);
+        if (!ctrl) { free(start); free(end); free(step); }
+        return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
 
     int flag = dim;
@@ -688,7 +730,7 @@ COS_API Data* cos_comparison_active(const Data *data,
 COS_API double cos_full(const Data *a, const Data *b,
                         double (*sim_func)(double,double,double)) {
     if (!Data_shape_equal(a, b)) {
-        return NAN; /* Shape mismatch, return NaN intentionally */
+        return COS_NAN; /* Shape mismatch, return NaN intentionally */
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;
@@ -741,6 +783,13 @@ COS_API Data* cos_local_mean(const Data *data,
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
     int *d_dummy = (int*)calloc((size_t)(dim), sizeof(int));
+    if (!start || !end || !step || !d_dummy) {
+        if (!c->start) free(start);
+        if (!c->end) free(end);
+        if (!c->step) free(step);
+        free(d_dummy);
+        return NULL;
+    }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
 
@@ -754,6 +803,11 @@ COS_API Data* cos_local_mean(const Data *data,
 
     int *os = (int*)malloc((size_t)(dim) * sizeof(int));
     int *ost = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!os || !ost) {
+        free(num); free(os); free(ost);
+        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        return NULL;
+    }
     for (int i = 0; i < dim; ++i) {
         os[i] = output_start ? output_start[i] : 0;
         ost[i] = output_step ? output_step[i] : 1;
@@ -779,6 +833,12 @@ COS_API Data* cos_local_mean(const Data *data,
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *data_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !data_place || !out_idx) {
+        free(num); free(os); free(ost); free(d_dummy);
+        free(num_list); free(inner_list); free(data_place); free(out_idx);
+        if (!ctrl) { free(start); free(end); free(step); }
+        return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
 
     int flag = dim;
@@ -875,6 +935,13 @@ COS_API Data* cos_local_variance(const Data *data,
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
     int *d_dummy = (int*)calloc((size_t)(dim), sizeof(int));
+    if (!start || !end || !step || !d_dummy) {
+        if (!c->start) free(start);
+        if (!c->end) free(end);
+        if (!c->step) free(step);
+        free(d_dummy);
+        return NULL;
+    }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
 
@@ -888,6 +955,11 @@ COS_API Data* cos_local_variance(const Data *data,
 
     int *os = (int*)malloc((size_t)(dim) * sizeof(int));
     int *ost = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!os || !ost) {
+        free(num); free(os); free(ost);
+        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        return NULL;
+    }
     for (int i = 0; i < dim; ++i) {
         os[i] = output_start ? output_start[i] : 0;
         ost[i] = output_step ? output_step[i] : 1;
@@ -913,6 +985,12 @@ COS_API Data* cos_local_variance(const Data *data,
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *data_place = (int*)malloc((size_t)(dim) * sizeof(int));
     int *out_idx = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!num_list || !inner_list || !data_place || !out_idx) {
+        free(num); free(os); free(ost); free(d_dummy);
+        free(num_list); free(inner_list); free(data_place); free(out_idx);
+        if (!ctrl) { free(start); free(end); free(step); }
+        return NULL;
+    }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
 
     int flag = dim;

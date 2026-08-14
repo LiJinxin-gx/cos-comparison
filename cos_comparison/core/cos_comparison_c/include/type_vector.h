@@ -25,7 +25,7 @@ COS_API double VectorMap_mean(const VectorMap *self);
 COS_API double VectorMap_variance(const VectorMap *self);
 COS_API VectorMap* VectorMap_subview(const VectorMap *self, int index);
 
-/* New slice operations (top‑level dimension only) */
+/* New slice operations (top-level dimension only) */
 COS_API VectorMap* VectorMap_slice(const VectorMap *self, int start, int stop);
 COS_API void VectorMap_slice_set(VectorMap *self, int start, int stop, const VectorMap *value);
 COS_API void VectorMap_slice_set_scalar(VectorMap *self, int start, int stop, double value);

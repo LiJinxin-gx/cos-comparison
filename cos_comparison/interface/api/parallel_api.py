@@ -106,20 +106,51 @@ def share_array(dtype, length):
     return multiprocessing.Array(dtype, length)
 
 
-def load_array(dtypes, sequence, length=None):
+def load_array(dtypes, sequence, length=None, start=0):
     """
-    Fill a fresh shared array from a sequence (fast path: slice copy).
+    Fill a fresh shared array from a sequence, optionally starting at an
+    offset (on-demand import into a sub-region).
 
-    Returns the shared array. The sequence must be indexable/iterable of the
-    given length; when length is None it is inferred from the sequence.
+    dtypes   : a typecode accepted by multiprocessing.Array (e.g. 'd').
+    sequence : indexable/iterable of values to import.
+    length   : number of elements to allocate.  When None, it is inferred
+               as ``start + len(sequence)`` so the sequence always fits at
+               the requested offset (iterables without ``__len__`` are
+               materialized once to size the container; pass length= to
+               skip this for large streams).
+    start    : integer offset (>= 0) where the first sequence element is
+               placed.  Default 0 keeps the historical behaviour.
+
+    When the sequence does not fit entirely inside the container
+    (``start + len(sequence) > length``) the tail is truncated and the
+    remainder of the container stays zero-filled - the same lenient rule
+    the generator path always used.  Fast path (whole-sequence slice copy)
+    is kept whenever the sequence fits exactly.
     """
-    length = len(sequence) if length is None else length
+    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+        raise TypeError("start must be a non-negative integer, got %r" % (start,))
+    if length is not None and (isinstance(length, bool) or
+                               not isinstance(length, int) or length < 0):
+        raise TypeError("length must be a non-negative integer, got %r"
+                        % (length,))
+    seq_len = len(sequence) if hasattr(sequence, "__len__") else None
+    if length is None:
+        if seq_len is None:
+            # iterables without __len__ (e.g. generators) are materialized
+            # once so the container can be sized to fit the sequence at the
+            # requested offset; pass length= to skip this for big streams
+            sequence = list(sequence)
+            seq_len = len(sequence)
+        length = start + seq_len
     container = share_array(dtypes, length)
-    if hasattr(sequence, "__len__"):
-        container[:] = sequence
-    else:
+    if seq_len is None or seq_len == 0 or start + seq_len > length:
+        # no-len sequence, empty sequence, or overflow: element-wise copy
+        # clamped to the container bounds (truncation + zero tail)
         for i, value in enumerate(sequence):
-            if i >= length:
+            idx = start + i
+            if idx >= length:
                 break
-            container[i] = value
+            container[idx] = value
+    else:
+        container[start:start + seq_len] = sequence
     return container

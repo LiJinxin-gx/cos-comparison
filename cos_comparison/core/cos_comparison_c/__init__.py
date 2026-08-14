@@ -60,6 +60,7 @@ class Data(Structure):
         ("strides", POINTER(c_int)),
         ("data", POINTER(c_double)),
         ("owns_data", c_int),
+        ("dtype", c_int),
     ]
 
 class Linear(Structure):
@@ -189,8 +190,6 @@ def _create_data_from_list(lst):
         else:
             flat.append(float(node))
     total = len(flat)
-    if total == 0:
-        raise ValueError("empty tensor not supported")
 
     data = Data()
     data.dimension = dim
@@ -201,7 +200,12 @@ def _create_data_from_list(lst):
         strides[i] = strides[i+1] * shape[i+1]
     stride_arr = (c_int * dim)(*strides)
     data.strides = stride_arr
-    data_arr = (c_double * total)(*flat)
+    # Allocate at least 1 element to avoid zero-length ctypes arrays
+    alloc_count = total if total > 0 else 1
+    if total > 0:
+        data_arr = (c_double * alloc_count)(*flat)
+    else:
+        data_arr = (c_double * alloc_count)()
     data.data = data_arr
     data.owns_data = 1
     # Keep references to avoid GC freeing the arrays.
@@ -642,7 +646,7 @@ def cos_comparison_passive(data, *arg, window_size=None, w1=1.0, w2=1.0, b1=0.0,
             ctx
         )
         if not result_c:
-            raise ValueError("passive mode failed (invalid parameters)")
+            raise ValueError("effectless args.")
 
         if use_pointer_opt:
             result = output
@@ -795,7 +799,7 @@ def cos_comparison_active(data, *arg, kernel=None, w1=1.0, w2=1.0, b1=0.0, b2=0.
             ctx
         )
         if not result_c:
-            raise ValueError("active mode failed")
+            raise ValueError("effectless args.")
 
         if use_pointer_opt:
             result = output
@@ -1421,10 +1425,30 @@ class func_name_space:
     __slots__ = ("output", "output_start", "output_step", "window_size", "kernel",
                  "linear", "start", "end", "d", "step", "algorithm", "num",
                  "start_callback", "end_callback", "iter_a_callback", "iter_b_callback",
-                 "global_error_callback", "local_error_callback", "return_callback")
+                 "global_error_callback", "local_error_callback", "return_callback",
+                 "_extra")
     def __init__(self, *arg, **kwarg):
+        self._extra = {}
         for key, value in kwarg.items():
             setattr(self, key, value)
+    # The compiled pydll backend stores arbitrary attributes in a dict
+    # (tp_getattro/tp_setattro); replicate that protocol here: the fixed
+    # callback fields stay in __slots__, any other name goes to _extra.
+    def __setattr__(self, name, value):
+        if name in self.__class__.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            self._extra[name] = value
+    def __getattr__(self, name):
+        try:
+            return self._extra[name]
+        except KeyError:
+            raise AttributeError(name) from None
+    def __delattr__(self, name):
+        if name in self._extra:
+            del self._extra[name]
+        else:
+            object.__delattr__(self, name)
 
 class default_contain:
     __slots__ = ("default", "deep", "default_dict", "leng")
@@ -1434,16 +1458,31 @@ class default_contain:
         return 1
     def __getitem__(self, index):
         return self.default_dict.get(index, self.default)
+    def __contains__(self, index):
+        # every key is "contained" because lookup always returns a value
+        # (same contract as the compiled backend's sq_contains)
+        return True
+    def __repr__(self):
+        return "<default_contain: default=%r>" % (self.default,)
 
 class vector_map_as_tensor:
     __slots__ = ("vector", "shape", "strides", "start", "offset", "start_offset", "step_offset")
     def __init__(self, *, vector=(1,), shape=(1,), start=0, strides=None, offset=0, start_offset=None, step_offset=None):
+        self.shape = tuple(shape)
+        ndim = len(self.shape)
+
+        # Auto-create the default (zero-filled) flat vector when none is
+        # provided: vector=None + shape= yields a list of zeros sized to the
+        # shape, matching create_void_list semantics (the C backends use
+        # their native zero-filled array instead).
+        if vector is None:
+            total = 1
+            for s in self.shape:
+                total *= s
+            vector = [0.0] * total
         self.vector = vector
         self.start = start
         self.offset = offset
-        
-        self.shape = tuple(shape)
-        ndim = len(self.shape)
         
         # Precompute strides if not provided (C-order contiguous)
         if strides is None:
@@ -1483,8 +1522,12 @@ class vector_map_as_tensor:
 
     def __buffer__(self, flags):
         """PEP 688 buffer export: memoryview(self) exposes the tensor as a
-        contiguous C-order double array. Non-contiguous views are materialized
-        into a fresh copy, keeping the export semantics simple and portable.
+        READ-ONLY contiguous C-order double snapshot.  Non-contiguous views
+        are materialized into a fresh copy, keeping the export semantics
+        simple and portable.  The Python backends are list-backed and cannot
+        offer a stable writable C buffer, so the snapshot is exported
+        read-only - same contract as numpy's frombuffer of immutable input
+        (writes raise TypeError instead of being silently lost).
         """
         total = 1
         for s in self.shape:
@@ -1497,7 +1540,7 @@ class vector_map_as_tensor:
             pos += 1
         try:
             if self.shape:
-                return memoryview(data).cast('d', self.shape)
+                return memoryview(data).cast('d', self.shape).toreadonly()
         except (TypeError, ValueError):
             pass
         return memoryview(data).cast('d', (total,))
