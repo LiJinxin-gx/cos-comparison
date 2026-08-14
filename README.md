@@ -19,19 +19,48 @@ $$
 \text{cosmod} = \frac{2(A \cdot B)}{|A|^2 + |B|^2}
 $$
 
-- **A step toward biologically plausible AGI**
-- **No training, no labels, no backpropagation**
+Three similarity measures are provided, selected via the `algorithm` parameter:
+
+| Measure | Formula | Use Case |
+|---------|---------|----------|
+| **cos** | `(A·B) / (|A|·|B|)` | Directional similarity, edge orientation |
+| **mod** | `2|A|·|B| / (|A|²+|B|²)` | Magnitude similarity, blob/region detection |
+| **cosmod** | `2(A·B) / (|A|²+|B|²)` | Combined (default), edge/keypoint detection |
+
+Key features:
+
+- **No training, no labels, no backpropagation** — a step toward biologically plausible AGI
 - Works on **1D, 2D, 3D, 4D** data (audio, images, video, volumetric data)
-- Supports **passive** (reflexive boundary detection) and **active** (template matching) modes
+- **Passive** (reflexive boundary detection) and **active** (template matching) modes
 - Three high-performance backends with automatic fallback: Python C extension, ctypes pure C, pure Python
-- Cross-platform support for Windows, Linux, and macOS
-- **Zero external dependencies** for core functionality
+- Cross-platform (Windows, Linux, macOS) and **zero external dependencies**
+- **Callback system**: `start_callback`, `iter_a_callback`, `iter_b_callback`, `end_callback`, `return_callback`, `local_error_callback`, `global_error_callback` for progress tracking and custom I/O
+- **Flexible output**: write results into pre-allocated tensors with `output`, `output_start`, `output_step`
+- **Duck-typed indices**: index parameters accept any `__index__`-capable object, not just `int` subclasses
 
 ---
 
-## 🚀 What's New in Version 0.4.0
+## 🚀 What's New in Version 0.4.2
 
-Version 0.4.0 is a major architecture upgrade release, modernizing the indexing system and adding powerful new features:
+Version 0.4.2 is a **portability & robustness release**. No API change but with less API append.
+
+- **ARM / piwheels support**: fixed C99 label-after-declaration errors and non-static inline declarations that blocked compilation on ARM Linux (Raspberry Pi)
+- **Empty-input robustness**: all backends now raise consistent `IndexError`/`ValueError` for empty tensors instead of crashing (the C extension previously segfaulted on `vector_map_as_tensor(vector=[])`)
+- **Memory safety**: exhaustive `malloc` NULL checks on every allocation path; fixed a missing-brace bug that caused unconditional `return NULL`; fixed 12 reference/memory leaks in arithmetic and statistics paths
+- **Duck typing**: index parameters now accept any `__index__`-capable object (PyNumber_Index), not just `int` subclasses
+- **Free-threaded Python**: verified on Python 3.14t; GIL released on compute-heavy paths
+- **`vector_map_as_tensor(vector=None, shape=)` auto-creation**: `vector=None` now auto-creates the default zero-filled vector (list on Python backends, native array on C backends); the C extension previously crashed on `vector=None`, and an omitted `vector` keeps the historical `(1,)` → `1.0` default
+- **Buffer protocol**: `memoryview(tensor)` is read-only and write-rejecting on all backends (numpy `frombuffer` contract); buffer-backed tensors (`array.array`, `bytearray`, `memoryview`) share storage and write through on every backend — the C extension now exports memoryview inputs zero-copy (PyBUF_ND/STRIDES instead of the copy-producing SIMPLE request)
+- **C extension in-place scalar operators**: `t += scalar` / `t -= scalar` now work on pydll, matching the ctypes/pure backends
+- **Type-promotion decision**: integer-typed arithmetic results were evaluated and deliberately not implemented — double remains the single universal element type to keep C hot loops SIMD-vectorizable
+
+See [History.txt](History.txt) for the full changelog.
+
+---
+
+## 🚀 What's New in Version 0.4.1
+
+Version 0.4.1 is a major architecture upgrade release, modernizing the indexing system and adding powerful new features:
 
 - **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from `vector_map_as_tensor`, final migration to stride+offset architecture
 - **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
@@ -43,7 +72,7 @@ Version 0.4.0 is a major architecture upgrade release, modernizing the indexing 
 - **Enhanced PyBuffer protocol**: Improved zero-copy support for `array.array`, `memoryview`, `bytes`, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char)
 - **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, portable optimization macros (unroll, alignment, branch prediction)
 - **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
-- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
+- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.1 features with 100% behavioral parity
 - **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
 - **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
 - **Updated core module loader**: `infer_shape` and `load_data` added to hot API list for zero-overhead access
@@ -53,7 +82,7 @@ Version 0.4.0 is a major architecture upgrade release, modernizing the indexing 
 - **Dual version support**: Precompiled binaries for both standard GIL and free-threaded (no-GIL) Python 3.14, zero compiler warnings
 - **Zero external dependencies**: Core package remains 100% dependency-free, no numpy or other third-party requirements
 - **Comprehensively tested**: All functionality tested in clean virtual environment, 100% behavioral parity across all three backends, no recursion guaranteed
-- **ctypes backend stability hotfix**: Fixed no-callback crash, invalid `Data_free` heap corruption, and callback lookup crash on Python 3.14 - all fixes are pure-Python side (id-based callback registry), no API changes and no performance regression (see History.txt v0.4.0)
+- **ctypes backend stability hotfix**: Fixed no-callback crash, invalid `Data_free` heap corruption, and callback lookup crash on Python 3.14 - all fixes are pure-Python side (id-based callback registry), no API changes and no performance regression (see History.txt v0.4.1)
 - **Upper-layer (non-core) stability fixes**: `brain_layer.logic`/`brain_layer.map` constructor and attribute fixes (NameError, `__eq__` typo, `arg_names`), `sense_layer.Receptor.point` accepts scalar and tuple indices, `TensorReceptor` passive comparison works again, `DatabaseMemory.refer` default hook fixed, `interface` ctypes `argtypes` / rollback / `Process` shadowing fixed, `data.tensor` tuple `start` mapping fixed
 - **Verified**: full unittest suite (core + upper layers) green on the installed wheel
 
@@ -77,9 +106,9 @@ This project follows a biologically inspired seven-layer cognitive architecture,
 
 ---
 
-## 🏗️ Module Architecture (v0.4.0)
+## 🏗️ Module Architecture (v0.4.1)
 
-This project follows a **modular architecture** defined since v0.4.0. Module responsibility boundaries, dependency rules, and the attach-and-take data flow are specified in detail in the modular architecture documentation. Below is the summary:
+This project follows a **modular architecture** defined since v0.4.1. Module responsibility boundaries, dependency rules, and the attach-and-take data flow are specified in detail in the modular architecture documentation. Below is the summary:
 
 ### Three-flow logical decoupling: data flow, operation flow, control flow
 
@@ -106,14 +135,11 @@ Benefits of the decoupling:
 
 ### Built on top of the foundation
 
+The five functional layers (`sense_layer`, `memory_layer`, `brain_layer`, `action_layer`, `generate_layer`) are detailed in the Seven-Layer table above; each attaches to incoming data, consumes core algorithms, and delegates all mechanisms to `interface`. Two additional cross-cutting modules sit on the foundation:
+
 | Module | Responsibility |
 |--------|----------------|
 | `data` | Dedicated **data carrying and generic abstraction**: `DataWrap`, `Tensor` / `SafeTensor` / `ParallelTensor`, shape/stride/type normalization |
-| `sense_layer` | Sensory layer — attaches to incoming data and invokes core algorithms |
-| `memory_layer` | Memory layer — hierarchical memory carriers, transactions, rollback |
-| `brain_layer` | Cognition layer — symbolic logic, probabilistic logic, reflex monitoring |
-| `action_layer` | Action layer — execution scheduling |
-| `generate_layer` | Generation layer — attaches an external callee to produce output data |
 | `test_tool` / `app` | Testing utilities / future business aggregation entry |
 
 ### Dependency rules (red lines)
@@ -129,7 +155,7 @@ Benefits of the decoupling:
 
 ## ⚡ Performance Benchmarks
 
-cos-comparison is designed for maximum performance while maintaining portability and zero dependencies. Performance varies by backend and operation type:
+Performance varies by backend and operation type:
 
 ### Backend Performance Comparison (relative to pure Python)
 
@@ -148,8 +174,6 @@ cos-comparison is designed for maximum performance while maintaining portability
 - **Carry-mechanism iteration**: 100% recursion-free iteration, no stack overflow even for high-dimensional tensors
 - **Free-threaded support**: Compute-heavy functions release GIL for true multi-threaded parallelism on Python 3.13+
 
-> **Note**: Performance numbers are approximate and depend on hardware, compiler, data size, and specific operation. All backends produce bit-identical results.
-
 ### Real-World Benchmark (322×424×3 RGB Test Image)
 
 Benchmark results for all three backends using a **322×424×3 RGB test image** with 3×3 window.  
@@ -161,7 +185,18 @@ Test environment: Windows 11 x64, 18-thread CPU, Python 3.14.6, JIT enabled, MSV
 | ctypes C Backend | 0.007s | ~70× | ~8–12 MB | ✅ Stable | ✅ Full |
 | Pure Python | 0.52s | 1× | ~22 MB | ✅ Stable | ✅ Full |
 
-> All three backends produce numerically identical output values within floating-point precision. C backends automatically fall back to pure Python if compilation or loading fails.
+### Synthetic Benchmark (1000×1000, Intel N150)
+
+A 1000×1000 float64 array, `cos_comparison_passive` with `window_size=(3,3)`, measured on an Intel N150 (4 cores, 1.3 GHz):
+
+| Backend | Time | Relative |
+|---------|------|----------|
+| Pure Python 3.14.6 | 126 s | 1× (baseline) |
+| ctypes + DLL | 21 s | **6× faster** |
+| C extension (3.14) | 14 s | **9× faster** |
+| C extension (3.14t, 4 threads) | 4.6 s | **27× faster** |
+
+> **Note**: Performance numbers are approximate and depend on hardware, compiler, data size, and specific operation. All three backends produce numerically identical output values within floating-point precision, and C backends automatically fall back to pure Python if compilation or loading fails.
 
 ---
 
@@ -190,24 +225,39 @@ python setup.py build_ext --inplace
 
 This will automatically build both the Python C extension and the ctypes shared library.
 
+### Requirements
+
+- Python **3.8+** (3.13+ for free-threaded builds)
+- C compiler (optional, for acceleration backends)
+- No runtime dependencies
+
 ---
 
 ## 🚀 Quick Start
 
-### 2D edge detection (passive mode)
+### 2D edge detection (passive & active modes)
 
 ```python
 from cos_comparison import core
 
-# Create test data of default type
-data = core.create_void_list((5,5))
-for i in range(5):
-    for j in range(5):
-        data[i,j] = 1.0 if i < 2 and j < 2 else 0.0
+# 64x64 checkerboard test data
+data = core.create_void_list((64, 64))
+for i in range(64):
+    for j in range(64):
+        data[i, j] = 1.0 if (i + j) % 2 == 0 else 0.0
 
-# Detect vertical edges
-edges = core.cos_comparison_passive(data, window_size=3, d=(0,1))
-print(edges[1,1])
+# Passive mode: sliding-window self-similarity (cosmod, default)
+edges = core.cos_comparison_passive(data, window_size=(3, 3))
+print(edges.shape)  # (61, 62)
+
+# The displacement parameter d shifts the second window (edge orientation)
+edges2 = core.cos_comparison_passive(data, window_size=(3, 3), d=(0, 1))
+print(edges2.shape)  # (62, 61)
+
+# Active mode: template matching with an external kernel
+kernel = core.create_void_list((3, 3), default=1.0)
+matches = core.cos_comparison_active(data, kernel=kernel)
+print(matches.shape)  # (62, 62)
 ```
 
 ### Multi-index assignment
@@ -232,6 +282,19 @@ core.set_mode(".cos_comparison")
 
 ---
 
+## 🧪 Testing
+
+```bash
+# From the project root, using the venv_test environment:
+python -m unittest tests.test_core_algorithms tests.test_core_tensor
+python tests/test_empty_edge.py          # subprocess-isolated edge cases
+python tests/test_normal_consistency.py  # three-backend parity
+```
+
+The test suite covers core algorithms, tensor operations, backend parity, empty/edge cases, upper layers, and import hygiene. See `tests/README.md` for details.
+
+---
+
 ## 👤 Author
 
 I was born on May 31, 2008, and I feel fortunate to grow up in an era of rapid progress in artificial intelligence.
@@ -244,10 +307,22 @@ Thanks to the assistance of artificial intelligence, I was able to quickly check
 
 ---
 
+## 📚 Documentation
+
+- [Documentation Hub](docs/README.md) — navigation index for all docs
+- [Getting Started](docs/getting-started.md) — 5-minute tutorial
+- [API Reference](docs/api/README.md) — core, passive/active modes, statistics, upper layers
+- [Architecture](docs/architecture/README.md) — seven-layer design, modular architecture, backends
+- [Principles](docs/principles/README.md) — first principle, similarity measures, dual modes
+
+---
+
 ## 📫 Contact & Feedback
 
 - **Bug Reports & Issues**: Please submit issues on [GitHub Issues](https://github.com/LiJinxin-gx/cos-comparison/issues)
 - **Email Contact**: lijinxin_gx@sina.cn
+- **GitHub**: [LiJinxin-gx/cos-comparison](https://github.com/LiJinxin-gx/cos-comparison)
+- **PyPI**: [cos-comparison](https://pypi.org/project/cos-comparison/)
 
 ---
 
