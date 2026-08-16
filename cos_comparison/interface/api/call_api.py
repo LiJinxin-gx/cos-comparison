@@ -11,7 +11,7 @@ class BaseCallContainer(ABC):
         self.container = obj
     def call(self,name,args=(),kwargs=None,init_func=None):
         # It does not use "__getattr__",because it will cause bugs while get inner attribute such as "container".
-        kwargs= kwargs if kwargs else {}
+        kwargs= kwargs if kwargs is not None else {}
         return self.get_call(name,init_func=init_func)(*args,**kwargs)
     def get_call(self,name,init_func=None):
         if init_func:
@@ -50,12 +50,12 @@ class WinDLL_CallContainer(C_CallContainer):
 class CallDict:
     __slots__ = ("dict",)
     def __init__(self,init_dict=None):
-        self.dict = init_dict if init_dict else {}
+        self.dict = init_dict if init_dict is not None else {}
     def add(self,tag,func):
         self.dict[tag] = func
     def call(self,tag,args=(),kwargs=None):
         #it support hot path acceleration.
         #eg.
         #CallDict.call(4)
-        kwargs = kwargs if kwargs else {}
+        kwargs = kwargs if kwargs is not None else {}
         return self.dict[tag](*args,**kwargs)

@@ -5,7 +5,7 @@ class ExecuterDriver:
     def __init__(self,caller_list=()):
         self.call_list = caller_list
     def call(self,index,args=(),kwargs=None):
-        kwargs = kwargs if kwargs else {}
+        kwargs = kwargs if kwargs is not None else {}
         return self.call_list[index](*args,**kwargs)
         
 

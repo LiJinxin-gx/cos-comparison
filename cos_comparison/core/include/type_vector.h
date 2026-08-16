@@ -887,7 +887,6 @@ fallback_sequence:
     Data *data = Data_create(dim, shape);   /* creates owned double array */
     if (!data) { free(shape); PyErr_NoMemory(); return -1; }
 
-    int idx = 0;
     if (explicit_shape) {
         /* Explicit shape provided: vector is 1D flat data, copy directly.
            Match pure Python's lenient construction: do not validate that
@@ -942,7 +941,7 @@ fallback_sequence:
     self->dimension = dim;
     // Allocate and compute strides
     self->strides = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (!self->strides) { Data_free(data); free(shape); PyErr_NoMemory(); return -1; }
+    if (!self->strides) { PyErr_NoMemory(); return -1; }
     if (dim > 0) {
         self->strides[dim - 1] = 1;
         for (int i = dim - 2; i >= 0; --i) {
@@ -952,7 +951,7 @@ fallback_sequence:
     // Allocate and init offsets
     self->start_offset = (int*)malloc((size_t)(dim) * sizeof(int));
     self->step_offset = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (!self->start_offset || !self->step_offset) { Data_free(data); PyErr_NoMemory(); return -1; }
+    if (!self->start_offset || !self->step_offset) { PyErr_NoMemory(); return -1; }
     for (int i = 0; i < dim; ++i) {
         self->start_offset[i] = 0;
         self->step_offset[i] = 1;

@@ -44,6 +44,7 @@ static inline Data* _compute_output_shape(int dim, const int num[],
 
 /* Helper: write value to arbitrary nested Python object (iterative, no stack overflow, uses generic object protocol with __set_item__ fast path) */
 static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int depth, double value) {
+    (void)depth;
     if (dim == 0) return;
     /* Fast path: check for __set_item__ method (takes index tuple and value) */
     PyObject *set_item_method = PyObject_GetAttrString(obj, "__set_item__");

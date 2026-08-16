@@ -78,8 +78,12 @@ class Process(BaseProcess):
         kwarg["text"] = False          # force bytes mode
         super().__init__(args, **kwarg)
 
-        # Start background reader threads
-        threading.Thread(target=self._run, daemon=True).start()
+        # Start background reader threads synchronously so that stop() can
+        # never observe unassigned thread handles (no data race).
+        self._stdout_thread = threading.Thread(target=self._read_stdout_loop, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
 
     def execute(self, command):
         """Write a command to the subprocess's stdin."""
@@ -105,14 +109,6 @@ class Process(BaseProcess):
             with self.stderr_lock:
                 self.stderr_line.extend(line)  # FIX: extend
 
-    def _run(self):
-        """Launch background threads that continuously read stdout/stderr until stopped."""
-        # Create reader threads
-        self._stdout_thread = threading.Thread(target=self._read_stdout_loop, daemon=True)
-        self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
-        self._stdout_thread.start()
-        self._stderr_thread.start()
-
     def _read_stdout_loop(self):
         """Continuously read lines from stdout until pipe closes or stop event is set."""
         while not self._stop_event.is_set():
@@ -131,12 +127,26 @@ class Process(BaseProcess):
             with self.stderr_lock:
                 self.stderr_line.extend(line)
 
-    def stop(self, timeout=0.5):
-        """Signal the reader threads to stop and wait for them."""
+    def stop(self, timeout=0.5, terminate=True):
+        """
+        Signal the reader threads to stop, close stdin, and (by default)
+        terminate and reap the child process so no zombie process or leaked
+        reader thread remains. Pass terminate=False to keep the child alive
+        (old behaviour: only stdin is closed).
+        """
         self._stop_event.set()
         # Optionally close stdin to trigger child exit (if it reads from stdin)
         if self.stdin and not self.stdin.closed:
             self.stdin.close()
+        if terminate and self.poll() is None:
+            try:
+                self.terminate()
+            except OSError:
+                pass
+            try:
+                self.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
         if self._stdout_thread and self._stdout_thread.is_alive():
             self._stdout_thread.join(timeout=timeout)
         if self._stderr_thread and self._stderr_thread.is_alive():

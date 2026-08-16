@@ -1,4 +1,4 @@
-# API Reference
+﻿# API Reference
 
 This section provides detailed API documentation for cos-comparison.
 
@@ -8,4 +8,4 @@ This section provides detailed API documentation for cos-comparison.
 - [Passive Mode](passive-mode.md) — `cos_comparison_passive` detailed reference
 - [Active Mode](active-mode.md) — `cos_comparison_active` detailed reference
 - [Statistics Functions](statistics.md) — `mean_local`, `local_variance`, and more
-- [Cognitive Layer APIs](cognitive-layers.md) — sense, memory, logic, reflex, interface, data, test tools
+- [Cognitive Layer APIs](cognitive-layers.md) — sense, memory, mapper, logic, reflex, generate, interface, data, test tools

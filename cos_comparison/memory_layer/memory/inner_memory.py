@@ -31,7 +31,7 @@ class MapMemory(Memory):
             return self.memory[key]
     def save(self,key,value,nesting=False,create=True):
         self.cache.append( Transaction(key,value,nesting=nesting,create=create) )
-    def real_save(self,key,value,nesting=False,create=True):
+    def real_save(self,key,value,nesting=False,create=True,create_hook=None):
         """
         the save function to save data in cache to support atomic event,you should commit it.
         """
@@ -43,7 +43,10 @@ class MapMemory(Memory):
                     obj = obj[k]
                 except:
                     if create:
-                        obj[k] = create_map(type(self.memory))
+                        if create_hook is not None:
+                            obj[k] = create_hook(type(obj))
+                        else:
+                            obj[k] = create_map(type(obj))
                         obj = obj[k]
                     else:
                         raise
@@ -51,10 +54,15 @@ class MapMemory(Memory):
         else:
             self.memory[key] = value
     def commit(self):
-        for k in self.cache:
-            # key , value , nesting , create = k
-            self.real_save(*k)
-        self.cache = []
+        applied = 0
+        try:
+            while applied < len(self.cache):
+                self.real_save(*self.cache[applied])
+                applied += 1
+        finally:
+            # always drop the applied entries so a retry never re-applies
+            # them; the failing entry (and everything after it) stays queued.
+            self.cache = self.cache[applied:]
     def rollback(self):
         self.cache = []
     def close(self):

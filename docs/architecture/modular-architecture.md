@@ -1,8 +1,8 @@
-# Modular Architecture (v0.4.2)
+﻿# Modular Architecture (v0.4.3)
 
 This section documents the **overall module architecture** of cos-comparison: module responsibility boundaries, dependency rules, and data-flow conventions.
 
-Frozen as of **v0.4.1** (maintained through v0.4.2) — all internal algorithms and data formats are exposed by `core`; all interaction between the model and the outside world is abstracted by `interface`; every other module operates on top of these two foundations and manipulates data exclusively through the **attach-and-take** pattern, without depending on each other.
+Frozen as of **v0.4.1** (maintained through v0.4.3) — all internal algorithms and data formats are exposed by `core`; all interaction between the model and the outside world is abstracted by `interface`; every other module operates on top of these two foundations and manipulates data exclusively through the **attach-and-take** pattern, without depending on each other.
 
 ---
 
@@ -81,7 +81,7 @@ Layered modules **do not own data and do not convert data formats**. Data is con
 
 ## 5. Architecture Conformance Checklist
 
-| Check | Status (v0.4.2) |
+| Check | Status (v0.4.3) |
 |-------|:----------------:|
 | `core` depends on stdlib only | Pass |
 | `interface` depends on stdlib only | Pass |
@@ -98,7 +98,7 @@ Before this architecture was finalized (v0.4.1), code retained design remnants f
 | ID | Location | Legacy | Status |
 |----|----------|--------|--------|
 | R1 | `memory_layer/memory/database_memory.py` | Connected to external sqlite3 directly, bypassing `interface` | ✅ Resolved — `interface/api/database_api.py` now owns the driver; `memory_layer` only consumes `DatabaseToolWrap` / `DATABASE_DRIVER` |
-| R2 | `sense_layer/receptor.py`, `generate_layer/generator.py` | Wrap data with `memoryview(data)` inside the layer (format conversion in the layer) | Pending — switch to conversion entry points exposed by `data` / `core` |
+| R2 | `sense_layer/receptor.py`, `generate_layer/generator.py` | Wrap data with `memoryview(data)` inside the layer (format conversion in the layer) | **Resolved (v0.4.3)** — neither layer wraps data in `memoryview`; receptor reads via `core.get_item`, generator writes via `core.set_item` / `core.load_data` |
 | R3 | `cos_comparison/__init__.py` | `VERSION` read depended on the current working directory | ✅ Resolved — `VERSION.txt` is located via `__file__` with `import os.path as _osp`; the earlier `del os.path` variant (which removed the `path` attribute from the global `os` module) was replaced |
 | R4 | `brain_layer/map`, `reflex/feedback`, `interface/tools/math_tool`, `extension_layer`, `app` | Empty placeholder directories | Keep as evolution placeholders or remove in later versions |
 | R6 | `memory_layer/memory/basememory.py`, `interface/api/communicate_api.py` | `no_done` redefined in three places (core / basememory / communicate_api) | ✅ Resolved — single source in `interface/tools/func_tools.py`; layers import the same object (core keeps its own for dependency independence) |

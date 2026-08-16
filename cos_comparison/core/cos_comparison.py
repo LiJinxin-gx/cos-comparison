@@ -1526,6 +1526,213 @@ local_variance_2d = local_variance
 local_variance_3d = local_variance
 local_variance_4d = local_variance
 
+
+# ---------------------------------------------------------------------------
+# element-wise filter / mapping over a sampled region (callback-based)
+# ---------------------------------------------------------------------------
+
+def _region_spec(data, start, shape, step):
+    """Resolve (effective_shape, start, step) for a read region, with the
+    same clipping semantics as load_data's source side. Iterative only."""
+    data_shape = infer_shape(data)
+    if data_shape is None:
+        raise ValueError("cannot infer shape of data")
+    dimension = len(data_shape)
+    if start is None:
+        start = (0,) * dimension
+    else:
+        start = tuple(start)
+        if len(start) != dimension:
+            raise ValueError("start length does not match data dimension")
+        for v in start:
+            if v < 0:
+                raise ValueError("start entries must be non-negative")
+    if step is None:
+        step = (1,) * dimension
+    else:
+        step = tuple(step)
+        if len(step) != dimension:
+            raise ValueError("step length does not match data dimension")
+        for v in step:
+            if v <= 0:
+                raise ValueError("step entries must be positive")
+    if shape is None:
+        shape = tuple((data_shape[i] + step[i] - 1) // step[i]
+                      for i in range(dimension))
+    else:
+        shape = tuple(shape)
+        if len(shape) != dimension:
+            raise ValueError("shape length does not match data dimension")
+        for v in shape:
+            if v < 0:
+                raise ValueError("shape entries cannot be negative")
+    effective = []
+    for i in range(dimension):
+        if start[i] < data_shape[i]:
+            avail = (data_shape[i] - start[i] + step[i] - 1) // step[i]
+        else:
+            avail = 0
+        effective.append(min(shape[i], avail))
+    return tuple(effective), start, step
+
+
+def _region_walk(effective):
+    """Yield local coordinates in row-major order (iterative odometer)."""
+    total = 1
+    for n in effective:
+        total *= n
+    dimension = len(effective)
+    idx = [0] * dimension
+    for _ in range(total):
+        yield tuple(idx)
+        for i in range(dimension - 1, -1, -1):
+            idx[i] += 1
+            if idx[i] < effective[i]:
+                break
+            idx[i] = 0
+
+
+def data_filter(data, callback, *, start=None, shape=None, step=None,
+                origin=None, basis=None):
+    """
+    Yield the position (multi-dimensional index) of every element whose
+    callback(value) is truthy, over a sampled read region.
+
+    Read region: start / shape / step (same semantics as load_data's source
+    side; out-of-bounds silently clipped). Reported position:
+    origin + basis * local, where local is the row-major in-region
+    coordinate (defaults origin=start, basis=step, i.e. the global read
+    position). Callback errors are silently skipped. Iterative, never
+    recursive; the callback is stateless (value only).
+    """
+    effective, r_start, r_step = _region_spec(data, start, shape, step)
+    dimension = len(effective)
+    if origin is None:
+        origin = r_start
+    else:
+        origin = tuple(origin)
+        if len(origin) != dimension:
+            raise ValueError("origin length does not match data dimension")
+    if basis is None:
+        basis = r_step
+    else:
+        basis = tuple(basis)
+        if len(basis) != dimension:
+            raise ValueError("basis length does not match data dimension")
+    for local in _region_walk(effective):
+        read = tuple(r_start[i] + local[i] * r_step[i] for i in range(dimension))
+        value = get_item(data, read)
+        try:
+            hit = callback(value)
+        except Exception:
+            continue
+        if hit:
+            yield tuple(origin[i] + basis[i] * local[i] for i in range(dimension))
+
+
+def data_mapping(data, callback, *, start=None, shape=None, step=None,
+                 out=None, out_start=None, out_step=None):
+    """
+    Map every element of the sampled read region through callback(value) and
+    write the result to the output at the corresponding position; callback
+    errors are silently skipped (the position stays untouched).
+
+    Output: pre-allocated via `out` (default: a fresh tensor shaped like the
+    read region); write position = out_start + out_step * local
+    (out-of-bounds silently clipped, same semantics as load_data's target
+    side). Returns the output tensor.
+    """
+    effective, r_start, r_step = _region_spec(data, start, shape, step)
+    dimension = len(effective)
+    if out is None:
+        out = create_void_list(effective)
+    out_shape = infer_shape(out)
+    if out_shape is None:
+        raise ValueError("cannot infer shape of output")
+    if len(out_shape) != dimension:
+        raise ValueError("output dimension does not match data dimension")
+    if out_start is None:
+        out_start = (0,) * dimension
+    else:
+        out_start = tuple(out_start)
+        if len(out_start) != dimension:
+            raise ValueError("out_start length does not match data dimension")
+        for v in out_start:
+            if v < 0:
+                raise ValueError("out_start entries must be non-negative")
+    if out_step is None:
+        out_step = (1,) * dimension
+    else:
+        out_step = tuple(out_step)
+        if len(out_step) != dimension:
+            raise ValueError("out_step length does not match data dimension")
+        for v in out_step:
+            if v <= 0:
+                raise ValueError("out_step entries must be positive")
+    for local in _region_walk(effective):
+        read = tuple(r_start[i] + local[i] * r_step[i] for i in range(dimension))
+        value = get_item(data, read)
+        try:
+            mapped = callback(value)
+        except Exception:
+            continue
+        write = tuple(out_start[i] + local[i] * out_step[i]
+                      for i in range(dimension))
+        if all(write[i] < out_shape[i] for i in range(dimension)):
+            set_item(out, write, mapped)
+    return out
+
+
+def _make_threshold_predicate(low, high, inclusive):
+    """Stateless predicate for the interval [low, high] (bounds optional);
+    inclusive=(lo_in, hi_in) controls endpoint membership."""
+    lo_in, hi_in = inclusive
+    if low is None and high is None:
+        raise ValueError("threshold requires at least one bound")
+    if low is not None and high is not None and low > high:
+        raise ValueError("low must not exceed high")
+    if low is not None and high is None:
+        return (lambda v: v >= low) if lo_in else (lambda v: v > low)
+    if low is None and high is not None:
+        return (lambda v: v <= high) if hi_in else (lambda v: v < high)
+    if lo_in and hi_in:
+        return lambda v: low <= v <= high
+    if not lo_in and hi_in:
+        return lambda v: low < v <= high
+    if lo_in and not hi_in:
+        return lambda v: low <= v < high
+    return lambda v: low < v < high
+
+
+class _Skip(Exception):
+    """Internal sentinel: skip this position (mapped to silent skip)."""
+
+
+def threshold_filter(data, low=None, high=None, *, inclusive=(True, True),
+                     **region):
+    """data_filter over the interval [low, high]: yields the positions whose
+    value lies in the threshold range (endpoints per inclusive)."""
+    predicate = _make_threshold_predicate(low, high, inclusive)
+    return data_filter(data, predicate, **region)
+
+
+def threshold_map(data, low=None, high=None, *, inclusive=(True, True),
+                  map_func=None, **region):
+    """data_mapping restricted to the interval [low, high]: map_func(value)
+    is applied only where the value is in range; positions outside the
+    interval (and callback errors) are silently skipped."""
+    if map_func is None:
+        raise ValueError("threshold_map requires map_func")
+    predicate = _make_threshold_predicate(low, high, inclusive)
+
+    def masked(value):
+        if predicate(value):
+            return map_func(value)
+        raise _Skip()
+
+    return data_mapping(data, masked, **region)
+
+
 # ---------- public API export list (matches other backends) ----------
 __all__ = [
     'NaN', 'sqrt',
@@ -1535,6 +1742,7 @@ __all__ = [
     'mean_local', 'mean_local_1d', 'mean_local_2d', 'mean_local_3d', 'mean_local_4d',
     'local_variance', 'local_variance_1d', 'local_variance_2d', 'local_variance_3d', 'local_variance_4d',
     'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'load_data', 'infer_shape', 'get_item', 'set_item', '_cos', '_mod', '_cosmod',
+    'data_filter', 'data_mapping', 'threshold_filter', 'threshold_map',
     'vector_chain_compute',
     'vector_map_as_tensor', 'func_name_space', 'default_contain',
     'private_dict'

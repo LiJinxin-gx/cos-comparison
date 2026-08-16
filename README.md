@@ -23,9 +23,9 @@ Three similarity measures are provided, selected via the `algorithm` parameter:
 
 | Measure | Formula | Use Case |
 |---------|---------|----------|
-| **cos** | `(A·B) / (|A|·|B|)` | Directional similarity, edge orientation |
-| **mod** | `2|A|·|B| / (|A|²+|B|²)` | Magnitude similarity, blob/region detection |
-| **cosmod** | `2(A·B) / (|A|²+|B|²)` | Combined (default), edge/keypoint detection |
+| **cos** | `(A·B) / (\|A\|·\|B\|)` | Directional similarity, edge orientation |
+| **mod** | `2\|A\|·\|B\| / (\|A\|²+\|B\|²)` | Magnitude similarity, blob/region detection |
+| **cosmod** | `2(A·B) / (\|A\|²+\|B\|²)` | Combined (default), edge/keypoint detection |
 
 Key features:
 
@@ -42,7 +42,7 @@ Key features:
 
 ## 🚀 What's New in Version 0.4.2
 
-Version 0.4.2 is a **portability & robustness release**. No API change but with less API append.
+Version 0.4.2 is a **portability & robustness release** — no API changes, only internal hardening:
 
 - **ARM / piwheels support**: fixed C99 label-after-declaration errors and non-static inline declarations that blocked compilation on ARM Linux (Raspberry Pi)
 - **Empty-input robustness**: all backends now raise consistent `IndexError`/`ValueError` for empty tensors instead of crashing (the C extension previously segfaulted on `vector_map_as_tensor(vector=[])`)
@@ -276,7 +276,7 @@ assert v[1][1] == 123.0
 print(core.get_mode())
 
 # Force pure Python mode for debugging
-# Note: suggest to add the character "." to show as a relative import
+# Note: prefix with "." to use a relative import
 core.set_mode(".cos_comparison")
 ```
 

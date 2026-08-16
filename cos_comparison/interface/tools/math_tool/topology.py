@@ -6,6 +6,42 @@ from collections import deque
 
 from ..context_tool import VoidContext as default_lock
 
+
+def _bfs(neighbors, src, dst):
+    """
+    BFS over a neighbors callable (duck protocol; unknown vertices may raise
+    KeyError). Returns [src, ..., dst] or None.
+    """
+    if src == dst:
+        return [src]
+    prev = {src: None}
+    queue = deque([src])
+    while queue:
+        v = queue.popleft()
+        try:
+            nbrs = neighbors(v)
+        except KeyError:
+            continue
+        for w in nbrs:
+            if w not in prev:
+                prev[w] = v
+                if w == dst:
+                    path = [w]
+                    while path[-1] != src:
+                        path.append(prev[path[-1]])
+                    path.reverse()
+                    return path
+                queue.append(w)
+    return None
+
+
+def shortest_path_between(graph, src, dst):
+    """
+    BFS shortest path over any object exposing neighbors(v) (duck protocol;
+    unknown vertices may raise KeyError). Returns [src, ..., dst] or None.
+    """
+    return _bfs(graph.neighbors, src, dst)
+
 def Euler_characteristic_compute_by_cell(cell_list):
     factor = 1
     Euler_characteristic = 0
@@ -119,9 +155,9 @@ class Graph:
 
     def __repr__(self):
         with self._lock:
-            return (f"<Graph: V={len(self._vertices)}, E={self._edges}, "
-                    f"C={self._components}, χ={self.euler_characteristic()}, "
-                    f"r={self.cycle_rank()}>")
+            v, e, c = len(self._vertices), self._edges, self._components
+            return (f"<Graph: V={v}, E={e}, C={c}, "
+                    f"χ={v - e + c}, r={e - v + c}>")
 
 
 class DirectedGraph:
@@ -335,6 +371,17 @@ class DirectedGraph:
                         seen.add(w)
                         queue.append(w)
             return False
+
+    def shortest_path(self, src, dst):
+        """
+        Return the shortest directed path [src, ..., dst] as a list, or None
+        if dst is not reachable from src. Iterative BFS, recursion-free.
+        """
+        with self._lock:
+            # Direct adjacency access inside the lock: calling the public
+            # neighbors() here would re-acquire the lock and deadlock on
+            # non-reentrant locks.
+            return _bfs(lambda v: self._adj.get(v, {}), src, dst)
 
     def _non_isolated_weakly_connected(self):
         """Return True if all vertices with non-zero degree share one weak component."""

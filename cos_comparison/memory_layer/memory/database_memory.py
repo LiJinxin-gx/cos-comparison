@@ -34,17 +34,14 @@ class DatabaseMemory(Memory):
             self.cursor.close()
         self.memory.close()
     def execute(self,command,arg=()):
-        try:
-            self.cursor.execute(command,arg)
-        except:
+        if self.cursor is None:
+            # no usable cursor (initialize failed): fall back to the connection
             self.memory.execute(command,arg)
+            return
+        self.cursor.execute(command,arg)
     def executemany(self,command,args=()):
-        try:
-            self.cursor.executemany(command,args)
-            return 0
-        except:
-            try:
-                self.memory.executemany(command,args)
-                return 1
-            except:
-                return 2
+        if self.cursor is None:
+            self.memory.executemany(command,args)
+            return 1
+        self.cursor.executemany(command,args)
+        return 0

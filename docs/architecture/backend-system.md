@@ -1,4 +1,4 @@
-# Backend Management System
+﻿# Backend Management System
 
 Cos-comparison features a **multi-backend management system** that allows transparent switching between implementation backends while maintaining a unified API.
 
@@ -153,7 +153,7 @@ All backends must define an `__all__` list (or expose public names) covering:
 
 - **Core Functions**: `cos_comparison_passive`, `cos_comparison_active`, `cos` (`cos_1d`...`cos_4d`), `mean_local`, `local_variance`
 - **Dimension Aliases**: `*_1d`, `*_2d`, `*_3d`, `*_4d` for each core function
-- **Utility Functions**: `multiple_chain`, `add_chain`, `create_void_list`, `load_as_default_data`, `load_data` (per-side start/step, silent clipping, returns copied count; natively implemented on all three backends as of v0.4.2), `infer_shape`, `get_item` / `set_item`, `vector_chain_compute`, `no_done`
+- **Utility Functions**: `multiple_chain`, `add_chain`, `create_void_list`, `load_as_default_data`, `load_data` (per-side start/step, silent clipping, returns copied count; natively implemented on all three backends as of v0.4.3), `infer_shape`, `get_item` / `set_item`, `vector_chain_compute`, `no_done`
 - **Similarity Functions**: `_cos`, `_mod`, `_cosmod`, `_default_algorithm` (= `_cosmod`), `private_dict` (name → algorithm mapping)
 - **Types/Classes**: `vector_map_as_tensor`, `func_name_space`, `default_contain`
 - **Constants**: `NaN` (= `float("nan")`), `sqrt` (= `math.sqrt`)

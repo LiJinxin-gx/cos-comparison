@@ -1,4 +1,4 @@
-# Seven-Layer Cognitive Architecture
+﻿# Seven-Layer Cognitive Architecture
 
 Cos-comparison adopts a **seven-layer brain-inspired cognitive architecture**, where each layer corresponds to different levels of biological cognitive processing. This layered design enables modular development and clear separation of concerns.
 
@@ -53,7 +53,7 @@ The passive/active dual-mode philosophy extends vertically through all layers �
 
 ### Layer 1: Core
 
-**Status**: ✅ Production (v0.4.2)
+**Status**: ✅ Production (v0.4.3)
 
 **Responsibilities**:
 - Fundamental local comparison computation (passive self-similarity, active template matching) and statistics (mean, variance)
@@ -70,7 +70,7 @@ The passive/active dual-mode philosophy extends vertically through all layers �
 
 **Responsibilities**: Input normalization and preprocessing, basic feature extraction pipelines, sensory adaptation.
 
-**Current implementation**: `Receptor` (wraps any data, `point(index)` element access) and `TensorReceptor` (memoryview-based, `comparison_passive()`/`comparison_active()` shortcuts to core modes). **Details**: [Cognitive Layer APIs — sense layer](../api/cognitive-layers.md#sense-layer)
+**Current implementation**: `Receptor` (wraps any data, `point(index)` element access) and `TensorReceptor` (`point(index)` via `core.get_item`, `comparison_passive()`/`comparison_active()` shortcuts to core modes). **Details**: [Cognitive Layer APIs — sense layer](../api/cognitive-layers.md#sense-layer)
 
 **Design ideas**: standardized input interfaces for different data types, automatic dimension detection, sensory attention mechanisms (spatial/temporal), adaptation to input statistics.
 
@@ -110,7 +110,7 @@ The passive/active dual-mode philosophy extends vertically through all layers �
 
 **Responsibilities**: Language/image/signal generation, output formatting, expression of internal states.
 
-**Current implementation**: `Generator` (applies a callable to wrapped data), `TensorGenerator` (memoryview-based point writing). *Most stub-like layer — generation primitives only.* **Details**: [Cognitive Layer APIs — generate layer](../api/cognitive-layers.md)
+**Current implementation**: `Generator` (applies a callable to wrapped data), `TensorGenerator` (uniform `generate(func, ...)` delegation entry + `set_point` via the core `set_item` protocol; module-level `copy_region` region fill) **Details**: [Cognitive Layer APIs — generate layer](../api/cognitive-layers.md)
 
 **Design ideas**: template-based generation, compositional generation, style control, multi-modal output generation.
 
@@ -131,7 +131,7 @@ The passive/active dual-mode philosophy extends vertically through all layers �
 
 Full class-level details: [Cognitive Layer APIs](../api/cognitive-layers.md)
 
-## Current State Assessment (v0.4.2)
+## Current State Assessment (v0.4.3)
 
 ### Strengths
 - Clear architectural vision with strong neuroscience inspiration
@@ -140,7 +140,7 @@ Full class-level details: [Cognitive Layer APIs](../api/cognitive-layers.md)
 - Dual-mode philosophy provides conceptual coherence
 - Memory layer has functional backends (map/table/database) with transaction support
 - Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system (Monitor delegated to `interface` mechanisms)
-- Three backends fully API-aligned with zero-warning C code; v0.4.2 adds empty-input hardening, exhaustive malloc checks, and ARM/piwheels C99 compatibility
+- Three backends fully API-aligned with zero-warning C code; v0.4.2 adds empty-input hardening, exhaustive malloc checks, and ARM/piwheels C99 compatibility; v0.4.3 adds 18 C-level fixes (memory safety, single-fire callbacks, step=0 protection) with no API change, protocol-style logic layers (relative-probability axioms, cached-graph engines) and default dict-protocol implementations (mapper / generate)
 
 ### Gaps
 - Action and generation layers only have minimal primitives

@@ -273,12 +273,21 @@ class AsyncRunner:
             if res is not None:
                 value, exc = res
                 if exc is not None:
-                    raise exc
+                    raise self._as_public_error(handle, exc)
                 return value
             fut = self._futures.get(handle)
         if fut is None:
             raise KeyError(handle)
-        return fut.result(timeout)
+        try:
+            return fut.result(timeout)
+        except asyncio.CancelledError as e:
+            raise RuntimeError("event was cancelled: %s" % (handle,)) from e
+
+    def _as_public_error(self, handle, exc):
+        """Map internal control-flow exceptions to public, catchable ones."""
+        if isinstance(exc, asyncio.CancelledError):
+            return RuntimeError("event was cancelled: %s" % (handle,))
+        return exc
 
     def exceptions(self):
         with self._lock:

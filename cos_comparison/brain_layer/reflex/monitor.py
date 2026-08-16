@@ -28,7 +28,11 @@ def _make_worker(state, record):
     probe, callback = state["probe"], state["callback"]
 
     async def worker():
-        handle = state["handle"]
+        # Read the handle under the same lock the scheduler holds while
+        # binding it, so a worker that starts right after schedule() can
+        # never observe the unbound (None) handle.
+        with parallel_lock:
+            handle = state["handle"]
         hit = False
         try:
             hit = bool(probe())
@@ -81,8 +85,12 @@ def default_scheduler(poller, operation, record, *args, **kwargs):
             "callback": callback,
             "times": times,
         }
-        handle = poller.schedule(_make_worker(state, record), interval)
-        state["handle"] = handle
+        # Bind the handle while holding parallel_lock: the worker reads it
+        # under the same lock, so a worker already scheduled on a running
+        # loop can never observe the unbound (None) handle.
+        with parallel_lock:
+            handle = poller.schedule(_make_worker(state, record), interval)
+            state["handle"] = handle
         with parallel_lock:
             record.setdefault("hits", {})[handle] = 0
             record.setdefault("errors", {})[handle] = []

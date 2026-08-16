@@ -1,10 +1,10 @@
-# Core Module
+﻿# Core Module
 
 ## Overview
 
 The `cos_comparison.core` module provides the core functionality of the cos-comparison library. All functions are accessible through this module, regardless of which backend is loaded.
 
-Current version: **0.4.2**
+Current version: **0.4.3**
 
 ## Import
 
@@ -101,6 +101,10 @@ All algorithms share the signature `func(a, b, ab, name)`, where `a`/`b` are the
 | `infer_shape(data)` | Infer the shape of multi-dimensional data |
 | `get_item(object, index)` | Multi-dimensional indexing |
 | `set_item(object, index, value)` | Multi-dimensional assignment |
+| `data_filter(data, callback, *, start=None, shape=None, step=None, origin=None, basis=None)` | Yield the positions whose `callback(value)` is truthy, over a sampled read region |
+| `data_mapping(data, callback, *, start=None, shape=None, step=None, out=None, out_start=None, out_step=None)` | Map every sampled element through `callback(value)` into the output; returns the output |
+| `threshold_filter(data, low=None, high=None, *, inclusive=(True, True), **region)` | `data_filter` over the interval `[low, high]` |
+| `threshold_map(data, low=None, high=None, *, inclusive=(True, True), map_func=None, **region)` | `data_mapping` restricted to the interval `[low, high]` |
 | `vector_chain_compute(A)` | Chained dot-product computation → `(compute, fix, get)` |
 | `no_done(*arg, **kwarg)` | No-op placeholder |
 
@@ -112,6 +116,9 @@ All algorithms share the signature `func(a, b, ab, name)`, where `a`/`b` are the
 - `infer_shape` resolves shape with priority: PyBuffer protocol → `__shape__` attribute → recursive `len()` detection. Returns `None` if it cannot be inferred.
 - `vector_chain_compute(A)` returns three closures: `compute(vector)` returns a tuple of dot products against the rows of `A`; `fix(new)` replaces `A`; `get()` returns the current `A`.
 - `get_item` / `set_item` honor the `__get_item__` / `__set_item__` protocol when present, otherwise fall back to normal indexing — this allows custom tensors to hook into the core loops.
+- `data_filter` walks a sampled read region (`start` / `shape` / `step`, same clipping semantics as `load_data`'s source side) and yields the multi-dimensional position of every element whose `callback(value)` is truthy (truthy, not necessarily boolean `True`). The reported position is `origin + basis * local` (defaults: `origin=start`, `basis=step`, i.e. the global read position). Callbacks are stateless (value only); callback errors are silently skipped. Iterative odometer walk, never recursive.
+- `data_mapping` applies `callback(value)` to every sampled element and writes the result to the output at `out_start + out_step * local` (out-of-bounds silently clipped). `out` is pre-allocated or default-allocated (a fresh tensor shaped like the read region); returns the output. Callback errors are silently skipped (position untouched).
+- `threshold_filter` / `threshold_map` instantiate the two above with the interval predicate `[low, high]` (bounds optional; `inclusive=(lo_in, hi_in)` controls endpoint membership); `threshold_map` requires `map_func` and leaves positions outside the interval untouched (they keep the output's initial value).
 
 ### 7. Backend Management
 
@@ -285,7 +292,7 @@ container[5]  # returns 2.0
 ```python
 import cos_comparison
 cos_comparison.__version__
-# "0.4.2"
+# "0.4.3"
 ```
 
 > Note: `cos_comparison.core` itself does not define `__version__`; read the version from the top-level package instead.

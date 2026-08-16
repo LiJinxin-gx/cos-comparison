@@ -9,7 +9,7 @@ try:
     _file_path = _osp.join(_script_dir, "VERSION.txt")
 
     with open(_file_path, "r") as _file:
-        __version__ = _file.read()
+        __version__ = _file.read().strip()
 
     del _file
     del _file_path

@@ -113,11 +113,13 @@ static Data* _pyobj_to_data(PyObject *obj) {
         if (!data->data) { free(data->strides); free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
         data->owns_data = 1;
         /* Iterate all elements with carry method */
-        int *indices = (int*)malloc((size_t)(total) * sizeof(int));
-        if (!indices) { Data_free(data); return NULL; }
-        int *idx = (int*)malloc((size_t)(ndim) * sizeof(int));
+        int *indices = (int*)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
+        if (!indices) { Data_free(data); PyErr_NoMemory(); return NULL; }
+        int *idx = (int*)malloc((size_t)(ndim > 0 ? ndim : 1) * sizeof(int));
+        if (!idx) { free(indices); Data_free(data); return NULL; }
         memset(idx, 0, ndim * sizeof(int));
         int pos = 0;
+        if (total > 0) {
         while (1) {
             int flat = v->start + v->offset;
             for (int i = 0; i < ndim; ++i) {
@@ -132,6 +134,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
                 dim--;
             }
             if (dim < 0) break;
+        }
         }
         free(idx);
         double *dptr = (double*)data->data;
@@ -179,10 +182,10 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->owner = NULL;
     vec->dimension = data->dimension;
     vec->shape = (int*)malloc((size_t)(data->dimension) * sizeof(int));
-    if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->shape) { Py_DECREF(vec); PyErr_NoMemory(); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
     vec->strides = (int*)malloc((size_t)(data->dimension) * sizeof(int));
-    if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->strides) { Py_DECREF(vec); PyErr_NoMemory(); return NULL; }
     vec->strides[data->dimension - 1] = 1;
     for (int i = data->dimension - 2; i >= 0; --i) {
         vec->strides[i] = vec->strides[i+1] * vec->shape[i+1];
@@ -192,9 +195,8 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->start_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     vec->step_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->start_offset || !vec->step_offset) {
-        free(vec->start_offset); free(vec->step_offset);
-        free(vec->strides); free(vec->shape);
-        Py_DECREF(vec); Data_free(data);
+        Py_DECREF(vec);
+        PyErr_NoMemory();
         return NULL;
     }
     for (int i = 0; i < data->dimension; ++i) {
@@ -229,12 +231,40 @@ static int _parse_int_seq(PyObject *obj, int **out, int *count) {
         PyObject *num = PyNumber_Index(item);
         Py_DECREF(item);
         if (!num) { free(arr); return -1; }
-        arr[i] = (int)PyLong_AsLong(num);
+        int overflow = 0;
+        long v = PyLong_AsLongAndOverflow(num, &overflow);
         Py_DECREF(num);
-        if (PyErr_Occurred()) { free(arr); return -1; }
+        if (overflow || v > INT_MAX || v < INT_MIN) {
+            free(arr);
+            PyErr_SetString(PyExc_OverflowError, "value out of range");
+            return -1;
+        }
+        if (v == -1 && PyErr_Occurred()) { free(arr); return -1; }
+        arr[i] = (int)v;
     }
     *out = arr;
     *count = (int)n;
+    return 0;
+}
+
+/* Parse an optional integer sequence into *arr with exactly dim elements.
+   obj == NULL fills every element with dflt; shorter sequences are padded
+   with dflt, longer ones truncated (safe against out-of-bounds reads).
+   Returns 0 on success, or -1 with *arr set to NULL and an exception set. */
+static int _parse_opt_int_seq(PyObject *obj, int **arr, int dim, int dflt) {
+    if (obj == NULL) {
+        *arr = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+        if (!*arr) { PyErr_NoMemory(); return -1; }
+        for (int i = 0; i < dim; ++i) (*arr)[i] = dflt;
+        return 0;
+    }
+    int cnt = 0;
+    int *tmp = NULL;
+    if (_parse_int_seq(obj, &tmp, &cnt) < 0) { *arr = NULL; return -1; }
+    *arr = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+    if (!*arr) { free(tmp); *arr = NULL; PyErr_NoMemory(); return -1; }
+    for (int i = 0; i < dim; ++i) (*arr)[i] = (i < cnt) ? tmp[i] : dflt;
+    free(tmp);
     return 0;
 }
 
@@ -339,17 +369,17 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     if (!vec) { Data_free(data); return NULL; }
     vec->dimension = data->dimension;
     vec->shape = (int*)malloc((size_t)(data->dimension) * sizeof(int));
-    if (!vec->shape) { Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->shape) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
     memcpy(vec->shape, data->shape, data->dimension * sizeof(int));
     vec->strides = (int*)malloc((size_t)(data->dimension) * sizeof(int));
-    if (!vec->strides) { free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->strides) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
     vec->strides[data->dimension - 1] = 1;
     for (int i = data->dimension - 2; i >= 0; --i) {
         vec->strides[i] = vec->strides[i+1] * vec->shape[i+1];
     }
     int total = Data_total(data);
     vec->data = Data_create(data->dimension, data->shape);
-    if (!vec->data) { free(vec->strides); free(vec->shape); Py_DECREF(vec); Data_free(data); return NULL; }
+    if (!vec->data) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
     memcpy(vec->data->data, data->data, total * sizeof(double));
     vec->owner = NULL;
     vec->start = start;
@@ -357,9 +387,8 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     vec->start_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     vec->step_offset = (int*)malloc((size_t)(data->dimension) * sizeof(int));
     if (!vec->start_offset || !vec->step_offset) {
-        free(vec->start_offset); free(vec->step_offset);
-        Data_free(vec->data); free(vec->strides); free(vec->shape);
         Py_DECREF(vec); Data_free(data);
+        PyErr_NoMemory();
         return NULL;
     }
     for (int i = 0; i < data->dimension; ++i) {
@@ -424,19 +453,24 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             
             if (start_obj != Py_None && PySequence_Check(start_obj)) {
                 s = PySequence_GetItem(start_obj, i);
+                if (!s) { Py_DECREF(slices); return NULL; }
             }
             if (start_obj != Py_None && shape_obj != Py_None && 
                 PySequence_Check(start_obj) && PySequence_Check(shape_obj)) {
                 PyObject *s_item = PySequence_GetItem(start_obj, i);
+                if (!s_item) { Py_DECREF(slices); return NULL; }
                 PyObject *sh_item = PySequence_GetItem(shape_obj, i);
-                if (s_item && sh_item) {
-                    e = PyNumber_Add(s_item, sh_item);
+                if (!sh_item) {
+                    Py_DECREF(s_item); Py_DECREF(slices); return NULL;
                 }
-                Py_XDECREF(s_item);
-                Py_XDECREF(sh_item);
+                e = PyNumber_Add(s_item, sh_item);
+                Py_DECREF(s_item);
+                Py_DECREF(sh_item);
+                if (!e) { Py_DECREF(slices); return NULL; }
             }
             if (step_obj != Py_None && PySequence_Check(step_obj)) {
                 st = PySequence_GetItem(step_obj, i);
+                if (!st) { Py_DECREF(slices); return NULL; }
             }
             
             PyObject *sl = PySlice_New(s, e, st);
@@ -459,17 +493,28 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
         Vector *res_vec = (Vector*)result;
         
         /* Create a new contiguous vector by copying all elements */
-        int total = _multiple_chain(res_vec->shape, res_vec->dimension);
+        long long total_ll = 1;
+        for (int i = 0; i < res_vec->dimension; ++i) total_ll *= res_vec->shape[i];
         /* Match pure Python: _iter_flat yields one index even for a zero-size
            tensor, then accessing the empty flat vector raises IndexError. */
-        if (total == 0) {
+        if (total_ll == 0) {
             Py_DECREF(result);
             PyErr_SetString(PyExc_IndexError, "list index out of range");
             return NULL;
         }
+        if (total_ll > (long long)INT_MAX) {
+            Py_DECREF(result);
+            PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+            return NULL;
+        }
+        int total = (int)total_ll;
         int *flat_indices = (int*)malloc((size_t)(total) * sizeof(int));
         if (!flat_indices) { Py_DECREF(result); PyErr_NoMemory(); return NULL; }
-        _vector_get_flat_indices(res_vec, flat_indices, total);
+        if (_vector_get_flat_indices(res_vec, flat_indices, total) < 0) {
+            free(flat_indices); Py_DECREF(result);
+            if (!PyErr_Occurred()) PyErr_NoMemory();
+            return NULL;
+        }
         
         /* Build flat list of values */
         PyObject *new_list = PyList_New(total);
@@ -479,14 +524,14 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             PyList_SET_ITEM(new_list, i, PyFloat_FromDouble(val));
         }
         free(flat_indices);
-        Py_DECREF(result);
-        
-        /* Build shape tuple */
+
+        /* Build shape tuple (before releasing res_vec) */
         PyObject *shape_tuple = PyTuple_New(res_vec->dimension);
-        if (!shape_tuple) { Py_DECREF(new_list); return NULL; }
+        if (!shape_tuple) { Py_DECREF(result); Py_DECREF(new_list); return NULL; }
         for (int i = 0; i < res_vec->dimension; ++i) {
             PyTuple_SET_ITEM(shape_tuple, i, PyLong_FromLong(res_vec->shape[i]));
         }
+        Py_DECREF(result);
         
         /* Create new vector with keyword arguments */
         PyObject *vec_args = PyTuple_New(0);
@@ -545,10 +590,19 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             if (!item) { free(step); free(full_shape); return NULL; }
             PyObject *num = PyNumber_Index(item); Py_DECREF(item);
             if (!num) { free(step); free(full_shape); return NULL; }
-            step[i] = (int)PyLong_AsLong(num); Py_DECREF(num);
-            if (step[i] <= 0) {
+            int overflow = 0;
+            long sv = PyLong_AsLongAndOverflow(num, &overflow); Py_DECREF(num);
+            if (overflow || sv > INT_MAX || sv < INT_MIN) {
                 free(step); free(full_shape);
-                PyErr_Format(PyExc_ValueError, "step[%d] = %d must be positive", i, step[i]);
+                PyErr_Format(PyExc_OverflowError, "step[%d] value out of range", i);
+                return NULL;
+            }
+            if (sv == -1 && PyErr_Occurred()) { free(step); free(full_shape); return NULL; }
+            step[i] = (int)sv;
+            if (step[i] <= 0) {
+                int step_val = step[i];
+                free(step); free(full_shape);
+                PyErr_Format(PyExc_ValueError, "step[%d] = %d must be positive", i, step_val);
                 return NULL;
             }
         }
@@ -589,7 +643,15 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             if (!item) { free(shape); free(step); free(full_shape); return NULL; }
             PyObject *num = PyNumber_Index(item); Py_DECREF(item);
             if (!num) { free(shape); free(step); free(full_shape); return NULL; }
-            shape[i] = (int)PyLong_AsLong(num); Py_DECREF(num);
+            int overflow = 0;
+            long sv = PyLong_AsLongAndOverflow(num, &overflow); Py_DECREF(num);
+            if (overflow || sv > INT_MAX || sv < INT_MIN) {
+                free(shape); free(step); free(full_shape);
+                PyErr_Format(PyExc_OverflowError, "shape[%d] value out of range", i);
+                return NULL;
+            }
+            if (sv == -1 && PyErr_Occurred()) { free(shape); free(step); free(full_shape); return NULL; }
+            shape[i] = (int)sv;
             if (shape[i] < 0) {
                 free(shape); free(step); free(full_shape);
                 PyErr_Format(PyExc_ValueError, "shape[%d] cannot be negative", i);
@@ -625,7 +687,15 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             if (!item) { free(start); free(shape); free(step); free(full_shape); return NULL; }
             PyObject *num = PyNumber_Index(item); Py_DECREF(item);
             if (!num) { free(start); free(shape); free(step); free(full_shape); return NULL; }
-            start[i] = (int)PyLong_AsLong(num); Py_DECREF(num);
+            int overflow = 0;
+            long sv = PyLong_AsLongAndOverflow(num, &overflow); Py_DECREF(num);
+            if (overflow || sv > INT_MAX || sv < INT_MIN) {
+                free(start); free(shape); free(step); free(full_shape);
+                PyErr_Format(PyExc_OverflowError, "start[%d] value out of range", i);
+                return NULL;
+            }
+            if (sv == -1 && PyErr_Occurred()) { free(start); free(shape); free(step); free(full_shape); return NULL; }
+            start[i] = (int)sv;
             if (start[i] < 0) {
                 free(start); free(shape); free(step); free(full_shape);
                 PyErr_Format(PyExc_ValueError, "start[%d] cannot be negative", i);
@@ -633,10 +703,14 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
             }
             /* Bounds check with step */
             if (shape[i] > 0 && start[i] + (shape[i] - 1) * step[i] >= full_shape[i]) {
+                int start_val = start[i];
+                int shape_val = shape[i];
+                int step_val = step[i];
+                int bound_val = full_shape[i];
                 free(start); free(shape); free(step); free(full_shape);
                 PyErr_Format(PyExc_ValueError,
                              "start[%d] + (shape[%d]-1)*step[%d] = %d out of bounds for dimension size %d",
-                             i, i, i, start[i] + (shape[i] - 1) * step[i], full_shape[i]);
+                             i, i, i, start_val + (shape_val - 1) * step_val, bound_val);
                 return NULL;
             }
         }
@@ -673,25 +747,27 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     }
 
     /* Step 8: Copy sub-region using carry-iteration mechanism with step support */
-    int total = 1;
-    for (int i = 0; i < dimension; ++i) total *= shape[i];
+    long long total_ll = 1;
+    for (int i = 0; i < dimension; ++i) total_ll *= shape[i];
 
     /* Match pure Python: when the result shape has zero elements, the
        carry loop still attempts one access into the source, which raises
        IndexError on an empty container. */
-    if (total == 0) {
-        int has_zero_dim = 0;
-        for (int i = 0; i < dimension; ++i) {
-            if (full_shape[i] == 0) { has_zero_dim = 1; break; }
-        }
-        if (has_zero_dim) {
-            free(full_strides);
-            Data_free(result_data); Data_free(full_data);
-            free(start); free(shape); free(step); free(full_shape);
-            PyErr_SetString(PyExc_IndexError, "list index out of range");
-            return NULL;
-        }
+    if (total_ll == 0) {
+        free(full_strides);
+        Data_free(result_data); Data_free(full_data);
+        free(start); free(shape); free(step); free(full_shape);
+        PyErr_SetString(PyExc_IndexError, "list index out of range");
+        return NULL;
     }
+    if (total_ll > (long long)INT_MAX) {
+        free(full_strides);
+        Data_free(result_data); Data_free(full_data);
+        free(start); free(shape); free(step); free(full_shape);
+        PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+        return NULL;
+    }
+    int total = (int)total_ll;
 
     int *num_list = (int*)malloc(((size_t)(dimension) + 1) * sizeof(int));
     if (!num_list) {
@@ -1134,6 +1210,11 @@ static PyObject* py_set_item(PyObject *self, PyObject *args) {
             temp = next;
         }
         /* Last index: set item */
+        if (n == 0) {
+            PyErr_SetString(PyExc_ValueError, "not enough values to unpack");
+            Py_DECREF(temp);
+            return NULL;
+        }
         PyObject *last_idx = PyTuple_GetItem(index, n - 1);
         PyObject *last_num = PyNumber_Index(last_idx);
         if (!last_num) { Py_DECREF(temp); return NULL; }
@@ -1195,12 +1276,18 @@ static double _py_algo_wrapper(double a, double b, double ab, CallbackContext *c
     PyObject *py_algo = PyObject_GetAttrString(ctx->name_space, "algorithm");
     if (!py_algo || !PyCallable_Check(py_algo)) {
         Py_XDECREF(py_algo);
+        PyErr_Clear();
         return 0.0;
     }
     PyObject *result = PyObject_CallFunction(py_algo, "dddO", a, b, ab, ctx->name_space);
     Py_DECREF(py_algo);
-    if (!result) { return 0.0; }
+    if (!result) { PyErr_Clear(); return 0.0; }
     double res = PyFloat_AsDouble(result);
+    if (res == -1.0 && PyErr_Occurred()) {
+        Py_DECREF(result);
+        PyErr_Clear();
+        return 0.0;
+    }
     Py_DECREF(result);
     return res;
 }
@@ -1511,7 +1598,7 @@ Data* cos_local_mean(const Data *data,
         }
     }
     
-    int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *num = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
@@ -1626,7 +1713,7 @@ Data* cos_local_variance(const Data *data,
         }
     }
     
-    int *num = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *num = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     if (!num) { PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
@@ -1762,68 +1849,33 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (!data) return NULL;
     int dim = data->dimension;
 
-    int *window_size = NULL; int ws_count = 0;
-    if (window_size_obj) {
-        if (_parse_int_seq(window_size_obj, &window_size, &ws_count) < 0) { Data_free(data); return NULL; }
-    } else {
-        window_size = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) window_size[i] = 1;
-        ws_count = dim;
-    }
+    int *window_size = NULL;
+    if (_parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(data); return NULL; }
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(start_obj, &tmp, &cnt) < 0) { free(window_size); Data_free(data); return NULL; }
-        memcpy(start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) start[i] = 0;
-    }
+    int *start = NULL;
+    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { free(window_size); Data_free(data); return NULL; }
 
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (end_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(end_obj, &tmp, &cnt) < 0) { free(start); free(window_size); Data_free(data); return NULL; }
-        memcpy(end, tmp, dim * sizeof(int)); free(tmp);
-    } else {
+    int *end = NULL;
+    if (end_obj == NULL) {
+        end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+        if (!end) { free(start); free(window_size); Data_free(data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
+    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+        free(start); free(window_size); Data_free(data); return NULL;
     }
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { free(end); free(start); free(window_size); Data_free(data); return NULL; }
-        memcpy(step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
-    int *d = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (d_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(d_obj, &tmp, &cnt) < 0) { free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
-        memcpy(d, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        d[0] = 1; for (int i = 1; i < dim; ++i) d[i] = 0;
-    }
+    int *d = NULL;
+    if (_parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
+    if (d_obj == NULL && dim > 0) d[0] = 1;
 
-    int *output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
-        memcpy(output_start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
-    int *output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) { free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
-        memcpy(output_step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
     algo_fn algo = _get_algo(algo_name);
     if (!algo) {
@@ -1832,7 +1884,9 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         if (global_error_callback && PyCallable_Check(global_error_callback)) {
             PyObject *ns = PyObject_CallObject((PyObject*)&FuncNameSpaceType, NULL);
             if (ns) {
-                PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, ns, NULL);
+                PyObject *exc = PyErr_Occurred();
+                PyObject *res = PyObject_CallFunctionObjArgs(
+                    global_error_callback, exc ? exc : Py_None, ns, NULL);
                 Py_XDECREF(res); Py_DECREF(ns);
             }
         }
@@ -1874,7 +1928,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
             if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-            for (int i = 0; i < dim; ++i) num[i] = (end[i] - start[i] - window_size[i] - d[i]) / step[i] + 1;
+            for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - window_size[i] - d[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
             PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
@@ -1944,7 +1998,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); Py_XDECREF(name_space); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -1952,6 +2006,17 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); Py_XDECREF(name_space);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -2077,50 +2142,26 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (!kernel) { Data_free(data); return NULL; }
     int dim = data->dimension;
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(start_obj, &tmp, &cnt) < 0) { Data_free(data); Data_free(kernel); return NULL; }
-        memcpy(start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) start[i] = 0;
-    }
+    int *start = NULL;
+    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(data); Data_free(kernel); return NULL; }
 
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (end_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(end_obj, &tmp, &cnt) < 0) { free(start); Data_free(data); Data_free(kernel); return NULL; }
-        memcpy(end, tmp, dim * sizeof(int)); free(tmp);
-    } else {
+    int *end = NULL;
+    if (end_obj == NULL) {
+        end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+        if (!end) { free(start); Data_free(data); Data_free(kernel); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
+    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+        free(start); Data_free(data); Data_free(kernel); return NULL;
     }
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
-        memcpy(step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
-    int *output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
-        memcpy(output_start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
-    int *output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) { free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
-        memcpy(output_step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
     algo_fn algo = _get_algo(algo_name);
     if (!algo) {
@@ -2129,7 +2170,9 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         if (global_error_callback && PyCallable_Check(global_error_callback)) {
             PyObject *ns = PyObject_CallObject((PyObject*)&FuncNameSpaceType, NULL);
             if (ns) {
-                PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, ns, NULL);
+                PyObject *exc = PyErr_Occurred();
+                PyObject *res = PyObject_CallFunctionObjArgs(
+                    global_error_callback, exc ? exc : Py_None, ns, NULL);
                 Py_XDECREF(res); Py_DECREF(ns);
             }
         }
@@ -2169,7 +2212,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
             if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-            for (int i = 0; i < dim; ++i) num[i] = (end[i] - start[i] - kernel->shape[i]) / step[i] + 1;
+            for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - kernel->shape[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
             PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
@@ -2239,7 +2282,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); Py_XDECREF(name_space); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2247,6 +2290,17 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); Py_XDECREF(name_space);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -2326,7 +2380,14 @@ static PyObject* py_cos_full(PyObject *self, PyObject *args, PyObject *kwargs) {
         if (a->shape[i] != b->shape[i]) { PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same."); Data_free(a); Data_free(b); return NULL; }
     }
 
-    algo_fn algo = _get_algo(algo_name ? algo_name : PyUnicode_FromString("cos"));
+    algo_fn algo;
+    if (algo_name) {
+        algo = _get_algo(algo_name);
+    } else {
+        PyObject *tmp = PyUnicode_FromString("cos");
+        algo = tmp ? _get_algo(tmp) : NULL;
+        Py_XDECREF(tmp);
+    }
     if (!algo) { Data_free(a); Data_free(b); return NULL; }
 
     CallbackContext ctx = {0};
@@ -2394,8 +2455,9 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         Data *wdata = _pyobj_to_data(weight_obj);
         if (!wdata) { free(local_size); Data_free(data); return NULL; }
         if (wdata->dimension != dim) {
+            int wdim = wdata->dimension;
             Data_free(wdata); free(local_size); Data_free(data);
-            PyErr_Format(PyExc_ValueError, "weight dimension %d must match data dimension %d", wdata->dimension, dim);
+            PyErr_Format(PyExc_ValueError, "weight dimension %d must match data dimension %d", wdim, dim);
             return NULL;
         }
         int wtot = 1;
@@ -2420,37 +2482,21 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         for (int i = 0; i < wtot; ++i) weights[i] = 1.0;
     }
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *start = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+    if (!start) { free(local_size); free(weights); Data_free(data); PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) start[i] = 0;
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+    if (!end) { free(start); free(local_size); free(weights); Data_free(data); PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
-        memcpy(step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
 
-    int *output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
-        memcpy(output_start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
 
-    int *output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
-        memcpy(output_step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
 
     Data *result = NULL;
     // Save user's output_start/output_step and set to 0/1 for core call when output is provided
@@ -2496,7 +2542,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2504,6 +2550,17 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -2589,37 +2646,21 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         return NULL;
     }
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *start = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+    if (!start) { free(local_size); Data_free(data); PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) start[i] = 0;
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
+    int *end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+    if (!end) { free(start); free(local_size); Data_free(data); PyErr_NoMemory(); return NULL; }
     for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { free(end); free(start); free(local_size); Data_free(data); return NULL; }
-        memcpy(step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); Data_free(data); return NULL; }
 
-    int *output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
-        memcpy(output_start, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
 
-    int *output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
-        memcpy(output_step, tmp, dim * sizeof(int)); free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
 
     Data *result = NULL;
     // Save user's output_start/output_step and set to 0/1 for core call when output is provided
@@ -2665,7 +2706,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2673,6 +2714,17 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -2765,13 +2817,15 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     /* Create contiguous copy of view data for core computation */
     Data *contig_data = Data_create(vec->dimension, vec->shape);
     if (!contig_data) return NULL;
-    int total = 1;
-    for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
-    int *indices = (int*)malloc((size_t)(total) * sizeof(int));
+    long long total_ll = 1;
+    for (int i = 0; i < vec->dimension; ++i) total_ll *= vec->shape[i];
+    int total = (int)total_ll;
+    int *indices = (int*)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
     if (!indices) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
     /* Iterate all indices with carry method */
-    {
-        int *idx = (int*)malloc((size_t)(vec->dimension) * sizeof(int));
+    if (total > 0) {
+        int *idx = (int*)malloc((size_t)(vec->dimension > 0 ? vec->dimension : 1) * sizeof(int));
+        if (!idx) { free(indices); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         memset(idx, 0, vec->dimension * sizeof(int));
         int pos = 0;
         while (1) {
@@ -2799,89 +2853,39 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     Data *data = contig_data;
     int dim = vec->dimension;
 
-    int *window_size = NULL; int ws_count = 0;
-    if (window_size_obj) {
-        if (_parse_int_seq(window_size_obj, &window_size, &ws_count) < 0) return NULL;
-    } else {
-        window_size = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) window_size[i] = 1;
-        ws_count = dim;
-    }
+    int *window_size = NULL;
+    if (_parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(contig_data); return NULL; }
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(start_obj, &tmp, &cnt) < 0) { free(window_size); free(start); return NULL; }
-        for (int i = 0; i < dim; ++i) start[i] = (i < cnt) ? tmp[i] : 0;
-        free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) start[i] = 0;
-    }
+    int *start = NULL;
+    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(contig_data); return NULL; }
 
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (end_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(end_obj, &tmp, &cnt) < 0) { free(window_size); free(start); free(end); return NULL; }
-        for (int i = 0; i < dim; ++i) end[i] = (i < cnt) ? tmp[i] : data->shape[i];
-        free(tmp);
-    } else {
+    int *end = NULL;
+    if (end_obj == NULL) {
+        end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+        if (!end) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
+    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+        Data_free(contig_data); return NULL;
     }
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { free(window_size); free(start); free(end); free(step); return NULL; }
-        for (int i = 0; i < dim; ++i) step[i] = (i < cnt) ? tmp[i] : 1;
-        free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { Data_free(contig_data); return NULL; }
 
-    int *d = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (d_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(d_obj, &tmp, &cnt) < 0) { free(window_size); free(start); free(end); free(step); free(d); return NULL; }
-        for (int i = 0; i < dim; ++i) d[i] = (i < cnt) ? tmp[i] : 0;
-        free(tmp);
-    } else {
-        d[0] = 1;
-        for (int i = 1; i < dim; ++i) d[i] = 0;
-    }
+    int *d = NULL;
+    if (_parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { Data_free(contig_data); return NULL; }
+    if (d_obj == NULL && dim > 0) d[0] = 1;
 
     algo_fn algo = _get_algo(algo_name);
     if (!algo) {
-        free(window_size); free(start); free(end); free(step); free(d);
+        Data_free(contig_data);
         return NULL;
     }
 
-    int *output_start = NULL; int *output_step = NULL;
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) {
-            free(window_size); free(start); free(end); free(step); free(d);
-            return NULL;
-        }
-        output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_start[i] = (i < cnt) ? tmp[i] : 0;
-        free(tmp);
-    } else {
-        output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) {
-            free(window_size); free(start); free(end); free(step); free(d); free(output_start);
-            return NULL;
-        }
-        output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_step[i] = (i < cnt) ? tmp[i] : 1;
-        free(tmp);
-    } else {
-        output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { Data_free(contig_data); return NULL; }
+
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { Data_free(contig_data); return NULL; }
 
     PyObject *name_space = NULL; CallbackContext ctx = {0};
     if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
@@ -2918,7 +2922,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
             if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-            for (int i = 0; i < dim; ++i) num[i] = (end[i] - start[i] - window_size[i] - d[i]) / step[i] + 1;
+            for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - window_size[i] - d[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
             PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
@@ -2988,7 +2992,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(contig_data); Py_XDECREF(name_space); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -2996,6 +3000,17 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(contig_data); Py_XDECREF(name_space);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -3100,13 +3115,15 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     /* Create contiguous copy of view data for core computation */
     Data *contig_data = Data_create(vec->dimension, vec->shape);
     if (!contig_data) return NULL;
-    int total = 1;
-    for (int i = 0; i < vec->dimension; ++i) total *= vec->shape[i];
-    int *indices = (int*)malloc((size_t)(total) * sizeof(int));
+    long long total_ll = 1;
+    for (int i = 0; i < vec->dimension; ++i) total_ll *= vec->shape[i];
+    int total = (int)total_ll;
+    int *indices = (int*)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
     if (!indices) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
     /* Iterate all indices with carry method */
-    {
-        int *idx = (int*)malloc((size_t)(vec->dimension) * sizeof(int));
+    if (total > 0) {
+        int *idx = (int*)malloc((size_t)(vec->dimension > 0 ? vec->dimension : 1) * sizeof(int));
+        if (!idx) { free(indices); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         memset(idx, 0, vec->dimension * sizeof(int));
         int pos = 0;
         while (1) {
@@ -3134,62 +3151,31 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     Data *data = contig_data;
     int dim = vec->dimension;
     Data *kernel = _pyobj_to_data(kernel_obj);
-    if (!kernel) return NULL;
+    if (!kernel) { Data_free(contig_data); return NULL; }
 
-    int *start = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(start_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); return NULL; }
-        for (int i = 0; i < dim; ++i) start[i] = (i < cnt) ? tmp[i] : 0;
-        free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) start[i] = 0;
-    }
+    int *start = NULL;
+    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
 
-    int *end = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (end_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(end_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); free(end); return NULL; }
-        for (int i = 0; i < dim; ++i) end[i] = (i < cnt) ? tmp[i] : data->shape[i];
-        free(tmp);
-    } else {
+    int *end = NULL;
+    if (end_obj == NULL) {
+        end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
+        if (!end) { Data_free(kernel); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
+    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+        Data_free(kernel); Data_free(contig_data); return NULL;
     }
 
-    int *step = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(step_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); free(end); free(step); return NULL; }
-        for (int i = 0; i < dim; ++i) step[i] = (i < cnt) ? tmp[i] : 1;
-        free(tmp);
-    } else {
-        for (int i = 0; i < dim; ++i) step[i] = 1;
-    }
+    int *step = NULL;
+    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
 
     algo_fn algo = _get_algo(algo_name);
-    if (!algo) { Data_free(kernel); free(start); free(end); free(step); return NULL; }
+    if (!algo) { Data_free(kernel); Data_free(contig_data); return NULL; }
 
-    int *output_start = NULL; int *output_step = NULL;
-    if (output_start_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_start_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); free(end); free(step); return NULL; }
-        output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_start[i] = (i < cnt) ? tmp[i] : 0;
-        free(tmp);
-    } else {
-        output_start = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_start[i] = 0;
-    }
-    if (output_step_obj) {
-        int cnt; int *tmp;
-        if (_parse_int_seq(output_step_obj, &tmp, &cnt) < 0) { Data_free(kernel); free(start); free(end); free(step); free(output_start); return NULL; }
-        output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_step[i] = (i < cnt) ? tmp[i] : 1;
-        free(tmp);
-    } else {
-        output_step = (int*)malloc((size_t)(dim) * sizeof(int));
-        for (int i = 0; i < dim; ++i) output_step[i] = 1;
-    }
+    int *output_start = NULL;
+    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
+
+    int *output_step = NULL;
+    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
 
     PyObject *name_space = NULL; CallbackContext ctx = {0};
     if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
@@ -3224,7 +3210,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
             if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-            for (int i = 0; i < dim; ++i) num[i] = (end[i] - start[i] - kernel->shape[i]) / step[i] + 1;
+            for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - kernel->shape[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
             PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
@@ -3294,7 +3280,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         int r_dim = result->dimension;
         int *idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
         int *out_idx = (int*)malloc((size_t)(r_dim) * sizeof(int));
-        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); PyErr_NoMemory(); return NULL; }
+        if (!idx || !out_idx) { free(idx); free(out_idx); Data_free(result); free(output_step); free(output_start); free(step); free(end); free(start); Data_free(contig_data); Data_free(kernel); Py_XDECREF(name_space); PyErr_NoMemory(); return NULL; }
         // Check if output is our C Vector type for direct write
         Data *out_data = NULL;
         if (PyObject_IsInstance(output_obj, (PyObject*)&VectorizeType)) {
@@ -3302,6 +3288,17 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             out_data = vec->data;
         }
         for (int i = 0; i < r_dim; ++i) idx[i] = 0;
+        if (out_data) {
+            for (int i = 0; i < r_dim; ++i) {
+                int last = output_start[i] + output_step[i] * (result->shape[i] - 1);
+                if (output_start[i] < 0 || last >= out_data->shape[i]) {
+                    free(idx); free(out_idx); Data_free(result);
+                    free(output_step); free(output_start); free(step); free(end); free(start); Data_free(contig_data); Data_free(kernel); Py_XDECREF(name_space);
+                    PyErr_SetString(PyExc_IndexError, "index out of range");
+                    return NULL;
+                }
+            }
+        }
         int flag = r_dim - 1;
         while (flag >= 0) {
             if (flag == r_dim - 1) {
@@ -3399,7 +3396,7 @@ static PyObject* VectorChainCompute_compute(VectorChainComputeObject *self, PyOb
             return NULL;
         }
         double dot = 0.0;
-        PyObject *v_item, *r_item;
+        PyObject *v_item = NULL, *r_item = NULL;
         while ((v_item = PyIter_Next(vec_iter)) && (r_item = PyIter_Next(row_iter))) {
             double v = PyFloat_AsDouble(v_item);
             double r = PyFloat_AsDouble(r_item);
@@ -3482,6 +3479,314 @@ static PyObject* py_vector_chain_compute(PyObject *self, PyObject *A) {
 }
 
 /* ------------------------------------------------------------------
+ * data_filter / data_mapping: callback-based element walk over a sampled
+ * region.  Callbacks are stateless (value only); errors are silently
+ * skipped.  Iterative odometer walk, never recursive.  All arrays are
+ * malloc'd and freed on every path.
+ * ------------------------------------------------------------------ */
+
+static int _check_region_len(PyObject *obj, int dimension, const char *name) {
+    if (obj == NULL || obj == Py_None) return 0;
+    if (!PyTuple_Check(obj) || PyTuple_Size(obj) != dimension) {
+        PyErr_Format(PyExc_ValueError, "%s length does not match data dimension", name);
+        return -1;
+    }
+    return 0;
+}
+
+/* Resolve the sampled read region (start/shape/step -> effective sizes and
+   element total), with the same clipping semantics as load_data's source
+   side.  Allocates r_start/r_step/effective (caller frees each).  Returns 0
+   on success, -1 with a Python exception set otherwise.  data_shape is
+   const: the caller's shape buffer is never modified. */
+static int _resolve_read_region(PyObject *start, PyObject *shape_obj,
+                                PyObject *step, const int *data_shape,
+                                int dimension,
+                                int **r_start_out, int **r_step_out,
+                                int **effective_out, long long *total_out) {
+    int *r_start = NULL, *r_step = NULL, *req_shape = NULL;
+    if (_parse_opt_int_seq(start, &r_start, dimension, 0) < 0
+        || _parse_opt_int_seq(step, &r_step, dimension, 1) < 0
+        || _parse_opt_int_seq(shape_obj, &req_shape, dimension, -1) < 0) {
+        free(r_start); free(r_step); free(req_shape);
+        return -1;
+    }
+    for (int i = 0; i < dimension; ++i) {
+        if (r_start[i] < 0) {
+            PyErr_SetString(PyExc_ValueError, "start entries must be non-negative");
+            free(r_start); free(r_step); free(req_shape);
+            return -1;
+        }
+        if (r_step[i] <= 0) {
+            PyErr_SetString(PyExc_ValueError, "step entries must be positive");
+            free(r_start); free(r_step); free(req_shape);
+            return -1;
+        }
+    }
+    int *effective = (int*)malloc((size_t)(dimension > 0 ? dimension : 1) * sizeof(int));
+    if (!effective) {
+        free(r_start); free(r_step); free(req_shape);
+        PyErr_NoMemory();
+        return -1;
+    }
+    long long total = 1;
+    for (int i = 0; i < dimension; ++i) {
+        int avail = (r_start[i] < data_shape[i])
+            ? (data_shape[i] - r_start[i] + r_step[i] - 1) / r_step[i] : 0;
+        int n = (req_shape[i] >= 0) ? req_shape[i] : avail;
+        effective[i] = (n < avail) ? n : avail;
+        total *= (long long)effective[i];
+    }
+    free(req_shape);
+    *r_start_out = r_start;
+    *r_step_out = r_step;
+    *effective_out = effective;
+    *total_out = total;
+    return 0;
+}
+
+static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"data", "callback", "start", "shape", "step",
+                             "origin", "basis", NULL};
+    PyObject *data, *callback;
+    PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
+    PyObject *origin = NULL, *basis = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
+            &data, &callback, &start, &shape_obj, &step, &origin, &basis))
+        return NULL;
+
+    int *data_shape = NULL, dimension = 0;
+    if (_infer_shape(data, &data_shape, &dimension) < 0) return NULL;
+
+    if (_check_region_len(start, dimension, "start") < 0
+        || _check_region_len(step, dimension, "step") < 0
+        || _check_region_len(shape_obj, dimension, "shape") < 0
+        || _check_region_len(origin, dimension, "origin") < 0
+        || _check_region_len(basis, dimension, "basis") < 0) {
+        free(data_shape);
+        return NULL;
+    }
+
+    int *r_start = NULL, *r_step = NULL, *effective = NULL;
+    long long total = 0;
+    if (_resolve_read_region(start, shape_obj, step, data_shape, dimension,
+                             &r_start, &r_step, &effective, &total) < 0) {
+        free(data_shape);
+        return NULL;
+    }
+
+    int *r_origin = NULL, *r_basis = NULL;
+    if (_parse_opt_int_seq(origin, &r_origin, dimension, 0) < 0
+        || _parse_opt_int_seq(basis, &r_basis, dimension, 1) < 0) {
+        free(data_shape); free(r_start); free(r_step); free(effective);
+        return NULL;
+    }
+    /* origin defaults to start, basis defaults to step */
+    for (int i = 0; i < dimension; ++i) {
+        if (origin == NULL || origin == Py_None) r_origin[i] = r_start[i];
+        if (basis == NULL || basis == Py_None) r_basis[i] = r_step[i];
+    }
+
+    PyObject *result = PyList_New(0);
+    if (!result) {
+        free(data_shape); free(r_start); free(r_step); free(effective);
+        free(r_origin); free(r_basis);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
+    if (!local) {
+        Py_DECREF(result); free(data_shape); free(r_start); free(r_step);
+        free(effective); free(r_origin); free(r_basis);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    for (long long k = 0; k < total; ++k) {
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long)r_start[i] + (long)local[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = py_get_item(self, get_args);
+        Py_DECREF(get_args);
+        if (!value) {
+            Py_DECREF(result); free(local); free(r_origin); free(r_basis);
+            free(effective); free(r_start); free(r_step); free(data_shape);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (!cb_res) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int truthy = PyObject_IsTrue(cb_res);
+            Py_DECREF(cb_res);
+            if (truthy < 0) {
+                PyErr_Clear();
+                truthy = 0;
+            }
+            if (truthy) {
+                PyObject *pos = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                    PyTuple_SET_ITEM(pos, i, PyLong_FromLong((long)r_origin[i] + (long)r_basis[i] * local[i]));
+                int app = PyList_Append(result, pos);
+                Py_DECREF(pos);
+                if (app < 0) {
+                    Py_DECREF(result); free(local); free(r_origin); free(r_basis);
+                    free(effective); free(r_start); free(r_step); free(data_shape);
+                    return NULL;
+                }
+            }
+        }
+        for (int i = dimension - 1; i >= 0; --i) {
+            local[i]++;
+            if (local[i] < effective[i]) break;
+            local[i] = 0;
+        }
+    }
+    free(local); free(r_origin); free(r_basis); free(effective);
+    free(r_start); free(r_step); free(data_shape);
+    return result;
+}
+
+static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"data", "callback", "start", "shape", "step",
+                             "out", "out_start", "out_step", NULL};
+    PyObject *data, *callback;
+    PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
+    PyObject *out = NULL, *out_start = NULL, *out_step = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
+            &data, &callback, &start, &shape_obj, &step, &out, &out_start, &out_step))
+        return NULL;
+
+    int *data_shape = NULL, dimension = 0;
+    if (_infer_shape(data, &data_shape, &dimension) < 0) return NULL;
+
+    if (_check_region_len(start, dimension, "start") < 0
+        || _check_region_len(step, dimension, "step") < 0
+        || _check_region_len(shape_obj, dimension, "shape") < 0
+        || _check_region_len(out_start, dimension, "out_start") < 0
+        || _check_region_len(out_step, dimension, "out_step") < 0) {
+        free(data_shape);
+        return NULL;
+    }
+
+    int *r_start = NULL, *r_step = NULL, *effective = NULL;
+    long long total = 0;
+    if (_resolve_read_region(start, shape_obj, step, data_shape, dimension,
+                             &r_start, &r_step, &effective, &total) < 0) {
+        free(data_shape);
+        return NULL;
+    }
+
+    /* output: default-allocate shaped like the read region */
+    if (out == NULL || out == Py_None) {
+        PyObject *shape_tuple = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+            PyTuple_SET_ITEM(shape_tuple, i, PyLong_FromLong(effective[i]));
+        PyObject *void_args = PyTuple_Pack(1, shape_tuple);
+        Py_DECREF(shape_tuple);
+        out = py_create_void_list(self, void_args, NULL);
+        Py_DECREF(void_args);
+        if (!out) { free(effective); free(r_start); free(r_step); free(data_shape); return NULL; }
+    } else {
+        Py_INCREF(out);
+    }
+
+    int *out_shape = NULL, out_dim = 0;
+    if (_infer_shape(out, &out_shape, &out_dim) < 0) {
+        Py_DECREF(out); free(effective); free(r_start); free(r_step); free(data_shape);
+        return NULL;
+    }
+    if (out_dim != dimension) {
+        PyErr_SetString(PyExc_ValueError, "output dimension does not match data dimension");
+        Py_DECREF(out); free(out_shape); free(effective); free(r_start); free(r_step); free(data_shape);
+        return NULL;
+    }
+
+    int *w_start = NULL, *w_step = NULL;
+    if (_parse_opt_int_seq(out_start, &w_start, dimension, 0) < 0
+        || _parse_opt_int_seq(out_step, &w_step, dimension, 1) < 0) {
+        Py_DECREF(out); free(out_shape); free(effective); free(r_start); free(r_step); free(data_shape);
+        return NULL;
+    }
+    for (int i = 0; i < dimension; ++i) {
+        if (w_start[i] < 0) {
+            PyErr_SetString(PyExc_ValueError, "out_start entries must be non-negative");
+            Py_DECREF(out); free(out_shape); free(w_start); free(w_step);
+            free(effective); free(r_start); free(r_step); free(data_shape);
+            return NULL;
+        }
+        if (w_step[i] <= 0) {
+            PyErr_SetString(PyExc_ValueError, "out_step entries must be positive");
+            Py_DECREF(out); free(out_shape); free(w_start); free(w_step);
+            free(effective); free(r_start); free(r_step); free(data_shape);
+            return NULL;
+        }
+    }
+
+    int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
+    if (!local) {
+        Py_DECREF(out); free(out_shape); free(w_start); free(w_step);
+        free(effective); free(r_start); free(r_step); free(data_shape);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    for (long long k = 0; k < total; ++k) {
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long)r_start[i] + (long)local[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = py_get_item(self, get_args);
+        Py_DECREF(get_args);
+        if (!value) {
+            Py_DECREF(out); free(local); free(out_shape); free(w_start); free(w_step);
+            free(effective); free(r_start); free(r_step); free(data_shape);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (!cb_res) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int in_bounds = 1;
+            for (int i = 0; i < dimension; ++i) {
+                long w = (long)w_start[i] + (long)local[i] * w_step[i];
+                if (w >= out_shape[i]) { in_bounds = 0; break; }
+            }
+            if (in_bounds) {
+                PyObject *write = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                    PyTuple_SET_ITEM(write, i, PyLong_FromLong((long)w_start[i] + (long)local[i] * w_step[i]));
+                PyObject *set_args = PyTuple_Pack(3, out, write, cb_res);
+                Py_DECREF(write);
+                PyObject *r = py_set_item(self, set_args);
+                Py_DECREF(set_args);
+                if (!r) {
+                    Py_DECREF(cb_res); Py_DECREF(out); free(local); free(out_shape);
+                    free(w_start); free(w_step); free(effective); free(r_start); free(r_step); free(data_shape);
+                    return NULL;
+                }
+                Py_DECREF(r);
+            }
+            Py_DECREF(cb_res);
+        }
+        for (int i = dimension - 1; i >= 0; --i) {
+            local[i]++;
+            if (local[i] < effective[i]) break;
+            local[i] = 0;
+        }
+    }
+    free(local); free(out_shape); free(w_start); free(w_step); free(effective);
+    free(r_start); free(r_step); free(data_shape);
+    return out;
+}
+
+/* ------------------------------------------------------------------
 Method table
 ------------------------------------------------------------------ */
 static PyMethodDef methods[] = {
@@ -3501,6 +3806,10 @@ static PyMethodDef methods[] = {
         "Get item from nested list with multi-dimensional index."},
     {"set_item", py_set_item, METH_VARARGS,
         "Set item in nested list with multi-dimensional index."},
+    {"data_filter", (PyCFunction)py_data_filter, METH_VARARGS | METH_KEYWORDS,
+        "Yield positions whose callback(value) is truthy over a sampled region."},
+    {"data_mapping", (PyCFunction)py_data_mapping, METH_VARARGS | METH_KEYWORDS,
+        "Map every sampled element through callback(value) into the output."},
     {"_cos", py_cos, METH_VARARGS, "inner cos algorithm."},
     {"_mod", py_mod, METH_VARARGS, "inner mod algorithm."},
     {"_cosmod", py_cosmod, METH_VARARGS, "inner cosmod algorithm."},

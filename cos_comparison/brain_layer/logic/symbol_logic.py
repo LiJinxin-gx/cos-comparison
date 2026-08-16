@@ -1,4 +1,4 @@
-"""
+﻿"""
 Symbolic logic system for cognitive reasoning.
 Implements three-valued logic, atomic propositions, variables and logical inference primitives.
 """
@@ -7,6 +7,7 @@ Implements three-valued logic, atomic propositions, variables and logical infere
 #-------- import --------
 from enum import Flag,auto
 from ...core import no_done
+from ...interface.tools.math_tool.topology import DirectedGraph, shortest_path_between
 
 #-------- constant supports -------
 class Logic(Flag):
@@ -113,11 +114,11 @@ class Logic_context:
                  judge_func=None):
         self.name = name
         self.extension = None #It provides extension to use by callback functions.
-        self.binds = binds if binds else []
+        self.binds = binds if binds is not None else []
         self.init_func = init_func if init_func else no_done
         self.add_func = add_func if add_func else no_done
         self.pop_func = pop_func if pop_func else no_done
-        self.judge_func = judge_func if judge_func else no_done
+        self.judge_func = judge_func if judge_func else default_judge_func
     def initialize(self,*args,**kwargs):
         return self.init_func(self.binds,*args,**kwargs)
     def add(self,logic_bind,**kwargs):
@@ -126,3 +127,36 @@ class Logic_context:
         return self.pop_func(self.binds,logic_bind,**kwargs)
     def logic_judge(self,a,b,**kwargs):
         return self.judge_func(self.binds,a,b,**kwargs)
+
+
+def _as_binds(context):
+    """Duck protocol: a context exposing .binds, or a bare binds container."""
+    return getattr(context, "binds", context)
+
+
+def default_judge_func(context, a, b, return_path=False, graph_factory=DirectedGraph):
+    """Default rule-chain judge: is b derivable from a?
+    binds elements expose reason/result (arc reason -> result); returns bool,
+    or the rule list [bind1, ...] proving a -> b when return_path=True
+    ([] if a == b, None when unreachable)."""
+    binds = _as_binds(context)
+    g = graph_factory()
+    for bind in binds:
+        g.add_edge(getattr(bind, "reason"), getattr(bind, "result"))
+    if a == b:
+        return [] if return_path else True
+    path = shortest_path_between(g, a, b)
+    if path is None:
+        return None if return_path else False
+    if not return_path:
+        return True
+    rules = []
+    for i in range(1, len(path)):
+        for bind in binds:
+            if getattr(bind, "reason") == path[i - 1] and getattr(bind, "result") == path[i]:
+                rules.append(bind)
+                break
+    return rules
+
+
+
