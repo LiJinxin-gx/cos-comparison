@@ -1605,7 +1605,10 @@ def load_data(source, target, *,
     return total
 
 def get_item(obj, index):
-    """Get item from nested list with multi-dimensional index."""
+    """Get item from nested list with multi-dimensional index.
+    A scalar index is treated as a 1-D index (matches the C backend)."""
+    if not isinstance(index, tuple):
+        index = (index,)
     if hasattr(obj, "__get_item__"):
         return obj.__get_item__(*index)
     temp = obj

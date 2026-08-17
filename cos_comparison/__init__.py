@@ -8,7 +8,7 @@ try:
     _script_dir = _osp.dirname(_osp.abspath(__file__))
     _file_path = _osp.join(_script_dir, "VERSION.txt")
 
-    with open(_file_path, "r") as _file:
+    with open(_file_path, "r", encoding="utf-8-sig") as _file:
         __version__ = _file.read().strip()
 
     del _file

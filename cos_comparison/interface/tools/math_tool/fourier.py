@@ -1,0 +1,155 @@
+"""
+Fourier transforms (procedural, recursion-free, multi-dimensional).
+
+Generic formula (real/imag split on floats):
+    F(ξ) = Σ f(x)·cos(2πξ·x) − i·Σ f(x)·sin(2πξ·x)
+    f(x) = (1/N)·Σ F(ξ)·cos(2πξ·x) + i·(1/N)·Σ F(ξ)·sin(2πξ·x)
+"""
+
+import math
+
+__all__ = ("dft", "idft", "power_spectrum")
+
+
+def _split(value):
+    if isinstance(value, complex):
+        return value.real, value.imag
+    if isinstance(value, (tuple, list)):
+        return float(value[0]), float(value[1])
+    return float(value), 0.0
+
+
+def _transform_1d(re, im, inverse):
+    """Generic trig-variant transform on float lists, in place."""
+    n = len(re)
+    if n <= 1:
+        return
+    sign = 1.0 if inverse else -1.0
+    out_re = [0.0] * n
+    out_im = [0.0] * n
+    for k in range(n):
+        sr = si = 0.0
+        for j in range(n):
+            t = sign * 2.0 * math.pi * k * j / n
+            cr = math.cos(t)
+            sn = math.sin(t)
+            sr += re[j] * cr - im[j] * sn
+            si += re[j] * sn + im[j] * cr
+        out_re[k] = sr
+        out_im[k] = si
+    re[:] = out_re
+    im[:] = out_im
+
+
+def _shape_of(data):
+    shape = []
+    obj = data
+    while True:
+        try:
+            n = len(obj)
+        except TypeError:
+            break
+        shape.append(n)
+        if n == 0:
+            break
+        obj = obj[0]
+    return tuple(shape)
+
+
+def _axes(shape, axis):
+    dim = len(shape)
+    if axis is None:
+        return tuple(range(dim))
+    if isinstance(axis, int):
+        return (axis % dim,)
+    return tuple(a % dim for a in axis)
+
+
+def _idx(fixed, axis, k, dim):
+    return [k if i == axis else fixed[i] for i in range(dim)]
+
+
+def _axes_transform(data, shape, axes, inverse):
+    """Apply the 1-D transform along each axis (odometer over fixed coords)."""
+    dim = len(shape)
+    for axis in axes:
+        size = shape[axis]
+        if size <= 1:
+            continue
+        total = 1
+        for i in range(dim):
+            if i != axis:
+                total *= shape[i]
+        fixed = [0] * dim
+        for _ in range(total):
+            re_line, im_line = [], []
+            for k in range(size):
+                obj = data
+                for p in _idx(fixed, axis, k, dim):
+                    obj = obj[p]
+                r, i = _split(obj)
+                re_line.append(r)
+                im_line.append(i)
+            _transform_1d(re_line, im_line, inverse)
+            for k in range(size):
+                obj = data
+                idx = _idx(fixed, axis, k, dim)
+                for p in idx[:-1]:
+                    obj = obj[p]
+                obj[idx[-1]] = complex(re_line[k], im_line[k])
+            for i in range(dim):
+                if i == axis:
+                    continue
+                fixed[i] += 1
+                if fixed[i] < shape[i]:
+                    break
+                fixed[i] = 0
+    return data
+
+
+def _mutable(data, shape):
+    if not shape:
+        return data
+
+    def build(dims, obj):
+        if len(dims) == 1:
+            return [obj[i] for i in range(dims[0])]
+        return [build(dims[1:], obj[i]) for i in range(dims[0])]
+
+    return build(shape, data)
+
+
+def _scale(data, factor):
+    if isinstance(data, list):
+        return [_scale(x, factor) for x in data]
+    return data * factor
+
+
+def dft(data, axis=None):
+    """Generic DFT (trig formula), multi-dimensional (axis=None: all)."""
+    shape = _shape_of(data)
+    return _axes_transform(_mutable(data, shape), shape, _axes(shape, axis),
+                           inverse=False)
+
+
+def idft(data, axis=None):
+    """Generic IDFT (1/N normalized), multi-dimensional (axis=None: all)."""
+    shape = _shape_of(data)
+    n = 1
+    for s in shape:
+        n *= s
+    work = _axes_transform(_mutable(data, shape), shape, _axes(shape, axis),
+                           inverse=True)
+    return _scale(work, 1.0 / n)
+
+
+def power_spectrum(data, axis=None):
+    """|X[k]|^2 per element (no normalization)."""
+    spectrum = dft(data, axis=axis)
+
+    def walk(obj):
+        if isinstance(obj, list):
+            return [walk(x) for x in obj]
+        return abs(obj) * abs(obj)
+
+    return walk(spectrum)

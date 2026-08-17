@@ -446,7 +446,10 @@ def get_item(obj, index):
 
     Falls back to plain nested indexing when the object does not
     implement the optional ``__get_item__`` extension protocol.
+    A scalar index is treated as a 1-D index (matches the C backend).
     """
+    if not isinstance(index, tuple):
+        index = (index,)
     if hasattr(obj, "__get_item__"):
         return obj.__get_item__(*index)
     temp = obj
