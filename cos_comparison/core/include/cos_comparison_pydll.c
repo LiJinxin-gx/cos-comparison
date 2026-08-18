@@ -1258,6 +1258,12 @@ static PyObject* py_cosmod(PyObject *self, PyObject *args) {
     return PyFloat_FromDouble(_cosmod_(a, b, ab, NULL));
 }
 
+static PyObject* py_convolution(PyObject *self, PyObject *args) {
+    double a, b, ab; PyObject *name;
+    if (!PyArg_ParseTuple(args, "dddO", &a, &b, &ab, &name)) return NULL;
+    return PyFloat_FromDouble(_convolution_(a, b, ab, NULL));
+}
+
 static PyObject* py_no_done(PyObject *self, PyObject *args, PyObject *kwds) {
     Py_RETURN_NONE;
 }
@@ -3813,6 +3819,7 @@ static PyMethodDef methods[] = {
     {"_cos", py_cos, METH_VARARGS, "inner cos algorithm."},
     {"_mod", py_mod, METH_VARARGS, "inner mod algorithm."},
     {"_cosmod", py_cosmod, METH_VARARGS, "inner cosmod algorithm."},
+    {"_convolution", py_convolution, METH_VARARGS, "inner convolution algorithm."},
     {"no_done", (PyCFunction)py_no_done, METH_VARARGS | METH_KEYWORDS, "Placeholder callback that does nothing."},
     {"sqrt", py_sqrt, METH_VARARGS, "Square root function (C math.h implementation)."},
     {"cos_comparison_passive", (PyCFunction)py_passive, METH_VARARGS | METH_KEYWORDS,
@@ -3891,11 +3898,13 @@ static int module_exec(PyObject *module) {
     PyObject *cos_algo = PyObject_GetAttrString(module, "_cos");
     PyObject *mod_algo = PyObject_GetAttrString(module, "_mod");
     PyObject *cosmod_algo = PyObject_GetAttrString(module, "_cosmod");
+    PyObject *conv_algo = PyObject_GetAttrString(module, "_convolution");
     PyObject *default_algo = PyObject_GetAttrString(module, "_cosmod");
-    if (!cos_algo || !mod_algo || !cosmod_algo || !default_algo) {
+    if (!cos_algo || !mod_algo || !cosmod_algo || !conv_algo || !default_algo) {
         Py_XDECREF(cos_algo);
         Py_XDECREF(mod_algo);
         Py_XDECREF(cosmod_algo);
+        Py_XDECREF(conv_algo);
         Py_XDECREF(default_algo);
         Py_DECREF(private_dict);
         return -1;
@@ -3903,10 +3912,12 @@ static int module_exec(PyObject *module) {
     PyDict_SetItemString(private_dict, "_cos", cos_algo);
     PyDict_SetItemString(private_dict, "_mod", mod_algo);
     PyDict_SetItemString(private_dict, "_cosmod", cosmod_algo);
+    PyDict_SetItemString(private_dict, "_convolution", conv_algo);
     PyDict_SetItemString(private_dict, "_default_algorithm", default_algo);
     Py_DECREF(cos_algo);
     Py_DECREF(mod_algo);
     Py_DECREF(cosmod_algo);
+    Py_DECREF(conv_algo);
     Py_DECREF(default_algo);
     if (PyModule_AddObject(module, "private_dict", private_dict) < 0) {
         Py_DECREF(private_dict);
@@ -3926,7 +3937,7 @@ static int module_exec(PyObject *module) {
         "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
         "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
         "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
-        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod",
+        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod", "_convolution",
         "vector_chain_compute",
         "vector_map_as_tensor", "func_name_space", "default_contain",
         "private_dict"

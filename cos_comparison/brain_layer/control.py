@@ -26,7 +26,7 @@ class Sequence(Control):
             yield func
 
 
-class Brance(Control):
+class Branch(Control):
     """Yield the chosen branch function once: the first trigger that returns
     truthy wins (its paired func), otherwise the else_func (None when no
     branch matches and no else is configured). Trigger errors are silently

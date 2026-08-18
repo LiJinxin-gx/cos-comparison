@@ -1,4 +1,4 @@
- # it provides basic functions of cos_comparsion module, an AI algorithm set
+﻿ # it provides basic functions of cos_comparsion module, an AI algorithm set
 #
 # core : information is produced by local comparison in raw data
 
@@ -1013,11 +1013,13 @@ class default_contain:
 _cos = lambda a, b, ab, name: ab / sqrt(a * b) if a * b else (1.0 if a == b else 0.0)
 _mod = lambda a, b, ab, name: 2 * sqrt(a * b) / (a + b) if a * b else (1.0 if a == b else 0.0)
 _cosmod = lambda a, b, ab, name: 2 * ab / (a + b) if a * b else (1.0 if a == b else 0.0)
+_convolution = lambda a, b, ab, name: ab
 _default_algorithm = _cosmod
 private_dict = {
     "_cos": _cos,
     "_mod": _mod,
     "_cosmod": _cosmod,
+    "_convolution": _convolution,
     "_default_algorithm": _default_algorithm
 }
 
@@ -1707,8 +1709,6 @@ def _make_threshold_predicate(low, high, inclusive):
     return lambda v: low < v < high
 
 
-class _Skip(Exception):
-    """Internal sentinel: skip this position (mapped to silent skip)."""
 
 
 def threshold_filter(data, low=None, high=None, *, inclusive=(True, True),
@@ -1719,21 +1719,22 @@ def threshold_filter(data, low=None, high=None, *, inclusive=(True, True),
     return data_filter(data, predicate, **region)
 
 
-def threshold_map(data, low=None, high=None, *, inclusive=(True, True),
-                  map_func=None, **region):
-    """data_mapping restricted to the interval [low, high]: map_func(value)
-    is applied only where the value is in range; positions outside the
-    interval (and callback errors) are silently skipped."""
-    if map_func is None:
-        raise ValueError("threshold_map requires map_func")
-    predicate = _make_threshold_predicate(low, high, inclusive)
+def threshold_map(data, pairs, *, default_value=0.0, **region):
+    """Map every element of the sampled region by iterating the (func, value)
+    pairs: the first func(value) that is truthy selects its paired value;
+    when none matches, default_value is used. Callback errors are silently
+    skipped. Region/read/write parameters (start/shape/step/out/out_start/
+    out_step) keep their usual data_mapping semantics."""
+    def matcher(value):
+        for func, mapped in pairs:
+            try:
+                if func(value):
+                    return mapped
+            except Exception:
+                continue
+        return default_value
 
-    def masked(value):
-        if predicate(value):
-            return map_func(value)
-        raise _Skip()
-
-    return data_mapping(data, masked, **region)
+    return data_mapping(data, matcher, **region)
 
 
 # ---------- public API export list (matches other backends) ----------
@@ -1744,10 +1745,28 @@ __all__ = [
     'cos', 'cos_1d', 'cos_2d', 'cos_3d', 'cos_4d',
     'mean_local', 'mean_local_1d', 'mean_local_2d', 'mean_local_3d', 'mean_local_4d',
     'local_variance', 'local_variance_1d', 'local_variance_2d', 'local_variance_3d', 'local_variance_4d',
-    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'load_data', 'infer_shape', 'get_item', 'set_item', '_cos', '_mod', '_cosmod',
-    'data_filter', 'data_mapping', 'threshold_filter', 'threshold_map',
+    'multiple_chain', 'add_chain', 'no_done', 'create_void_list', 'load_as_default_data', 'load_data', 'infer_shape', 'get_item', 'set_item', '_cos', '_mod', '_cosmod', '_convolution',
+    'data_filter', 'data_mapping', 'threshold_filter', 'threshold_map', 'threshold_judge',
     'vector_chain_compute',
     'vector_map_as_tensor', 'func_name_space', 'default_contain',
     'private_dict'
 ]
+
+
+def threshold_judge(data, low=None, high=None, *, inclusive=(True, True),
+                    map_func=None, default_value=0.0, **region):
+    """Threshold judge/mapping companion of threshold_map: positions whose
+    value lies in [low, high] are mapped through map_func (default: 1.0,
+    i.e. a pure threshold mask); positions outside receive default_value
+    (default 0.0). Endpoints per inclusive=(lo_in, hi_in); callback errors
+    are silently skipped (position keeps the output initial value)."""
+    predicate = _make_threshold_predicate(low, high, inclusive)
+    mapped = map_func if map_func is not None else (lambda value: 1.0)
+
+    def matcher(value):
+        if predicate(value):
+            return mapped(value)
+        return default_value
+
+    return data_mapping(data, matcher, **region)
 

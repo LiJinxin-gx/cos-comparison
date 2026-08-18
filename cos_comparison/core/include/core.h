@@ -29,6 +29,11 @@ static inline double _cosmod_(double a, double b, double ab, CallbackContext *ct
     return (a == b) ? 1.0 : 0.0;
 }
 
+static inline double _convolution_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)a; (void)b; (void)ctx;
+    return ab;
+}
+
 typedef double (*algo_fn)(double, double, double, CallbackContext*);
 
 static inline Data* _compute_output_shape(int dim, const int num[],
