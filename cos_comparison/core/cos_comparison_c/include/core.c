@@ -102,6 +102,7 @@ COS_API int Data_total_elements(const Data *self) {
 }
 
 COS_API int Data_shape_equal(const Data *a, const Data *b) {
+    if (!a || !b) return 0;
     if (a->dimension != b->dimension) return 0;
     for (int i = 0; i < a->dimension; ++i)
         if (a->shape[i] != b->shape[i]) return 0;
@@ -118,7 +119,7 @@ COS_API VectorMap* VectorMap_new(Data *base, int dimension, const int shape[],
     self->dimension = dimension;
     self->shape = (int*)malloc((size_t)(dimension) * sizeof(int));
     if (!self->shape) { free(self); return NULL; }
-    memcpy(self->shape, shape, dimension * sizeof(int));
+    memcpy(self->shape, shape, (size_t)(dimension) * sizeof(int));
     if (end < 0) {
         int total = 1;
         for (int i = 0; i < base->dimension; ++i) total *= base->shape[i];
@@ -134,6 +135,11 @@ COS_API VectorMap* VectorMap_new(Data *base, int dimension, const int shape[],
     int s = 1;
     for (int i = dimension - 1; i >= 0; --i) {
         self->strides[i] = s;
+        /* Guard against stride overflow (C99 6.5p5 UB) */
+        if (shape[i] > 0 && s > INT_MAX / shape[i]) {   /* 0-shape guard */
+            free(self->strides); free(self->shape); free(self);
+            return NULL;
+        }
         s *= shape[i];
     }
     return self;
@@ -181,6 +187,7 @@ COS_API double VectorMap_mean(const VectorMap *self) {
     double sum = 0.0;
     int *indices = (int*)calloc((size_t)(self->dimension), sizeof(int));
     if (!indices) return 0.0;
+    COS_SIMD_LOOP
     for (int idx = 0; idx < total; ++idx) {
         int offset = self->start;
         for (int i = 0; i < self->dimension; ++i)
@@ -211,6 +218,7 @@ COS_API double VectorMap_variance(const VectorMap *self) {
     double sum_sq = 0.0;
     int *indices = (int*)calloc((size_t)(self->dimension), sizeof(int));
     if (!indices) return 0.0;
+    COS_SIMD_LOOP
     for (int idx = 0; idx < total; ++idx) {
         int offset = self->start;
         for (int i = 0; i < self->dimension; ++i)
@@ -237,17 +245,14 @@ COS_API double VectorMap_variance(const VectorMap *self) {
 COS_API VectorMap* VectorMap_subview(const VectorMap *self, int index) {
     if (!self || index < 0 || index >= self->shape[self->p]) return NULL;
     int new_start = self->start + index * self->strides[self->p];
-    int new_end = new_start + self->strides[self->p]; // length of one element along this dim
-    // Actually, we need to adjust end based on remaining dimensions.
-    // For a subview, we move one level deeper.
+    int new_end = new_start + self->strides[self->p];
     int new_p = self->p + 1;
     int new_stride = (new_p < self->dimension) ? self->strides[new_p] : 0;
-    VectorMap *sub = VectorMap_new(self->base, self->dimension, self->shape,
-                                   new_start, new_end, new_p, new_stride);
-    return sub;
+    return VectorMap_new(self->base, self->dimension, self->shape,
+                         new_start, new_end, new_p, new_stride);
 }
 
-/* ---------- NEW: Slice operations (top-level dimension only) ---------- */
+/* ---------- Slice operations (top-level dimension only) ---------- */
 COS_API VectorMap* VectorMap_slice(const VectorMap *self, int start, int stop) {
     if (!self) return NULL;
     int length = self->shape[self->p];
@@ -372,17 +377,24 @@ static int* _compute_num(const int *shape, int dim,
             free(num);
             return NULL;
         }
-        num[i] = effective / step[i] + 1;
+        num[i] = (step[i] != 0) ? effective / step[i] + 1 : 0;
     }
     return num;
 }
 
 static Data* _compute_output_shape(int dim, const int num[],
                                    const int output_start[], const int output_step[]) {
+    (void)output_start; /* output always starts at 0 when created by core */
     int *out_shape = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!out_shape) return NULL;
-    for (int i = 0; i < dim; ++i)
+    for (int i = 0; i < dim; ++i) {
+        /* Guard against int overflow in shape computation (C99 6.5p5 UB) */
+        if (num[i] > 1 && output_step[i] > INT_MAX / (num[i] - 1)) {
+            free(out_shape);
+            return NULL;
+        }
         out_shape[i] = (num[i] - 1) * output_step[i] + 1;
+    }
     Data *out = Data_create(dim, out_shape);
     free(out_shape);
     return out;
@@ -398,7 +410,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
                                      const int *output_start,
                                      const int *output_step,
                                      void *ctx) {
-    if (!data || !window_size) return NULL;
+    if (!data || !window_size || data->dimension <= 0) return NULL;
     int dim = data->dimension;
     control default_ctrl;
     const control *c;
@@ -408,6 +420,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
         default_ctrl = create_default_control(dim);
         c = &default_ctrl;
     }
+    const int owns_ctrl = (ctrl == NULL);
     int *start = c->start ? c->start : (int*)calloc((size_t)(dim), sizeof(int));
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
@@ -417,6 +430,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
         if (!c->end) free(end);
         if (!c->step) free(step);
         if (!c->d) free(d);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
@@ -424,9 +438,21 @@ COS_API Data* cos_comparison_passive(const Data *data,
     if (!c->d)     { d[0] = 1; for (int i=1; i<dim; ++i) d[i] = 0; }
     linear lin = c->li;
 
+    /* Validate window_size and step to prevent division-by-zero / overflow */
+    for (int i = 0; i < dim; ++i) {
+        if (window_size[i] <= 0 || step[i] <= 0) {
+            if (!c->start) free(start); if (!c->end) free(end);
+            if (!c->step) free(step); if (!c->d) free(d);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+            if (cb && cb->global_error) cb->global_error(ctx);
+            return NULL;
+        }
+    }
+
     int *num = _compute_num(data->shape, dim, start, end, step, window_size, d);
     if (!num) {
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step); if (!c->d) free(d);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         if (cb && cb->global_error) cb->global_error(ctx);
         return NULL;
     }
@@ -436,6 +462,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
     if (!os || !ost) {
         free(num); free(os); free(ost);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step); if (!c->d) free(d);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i < dim; ++i) {
@@ -451,6 +478,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
         if (!out) {
             free(num); free(os); free(ost);
             if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step); if (!c->d) free(d);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
             if (cb && cb->global_error) cb->global_error(ctx);
             return NULL;
         }
@@ -458,9 +486,10 @@ COS_API Data* cos_comparison_passive(const Data *data,
     if (out_param) {
         for (int i = 0; i < dim; ++i) {
             int last = os[i] + ost[i] * (num[i] - 1);
-            if (last >= out_param->shape[i]) {
+            if (last < 0 || last >= out_param->shape[i]) {   /* negative-start guard */
                 free(num); free(os); free(ost);
                 if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step); if (!c->d) free(d);
+                if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
                 if (cb && cb->global_error) cb->global_error(ctx);
                 return NULL;
             }
@@ -477,6 +506,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
         free(num_list); free(inner_list); free(main_place); free(other_place); free(out_idx);
         if (!c->start) free(start); if (!c->end) free(end);
         if (!c->step) free(step); if (!c->d) free(d);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
@@ -557,6 +587,7 @@ COS_API Data* cos_comparison_passive(const Data *data,
     free(num_list); free(inner_list);
     free(main_place); free(other_place); free(out_idx);
     if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step); if (!c->d) free(d);
+    if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
 
     return out;
 }
@@ -571,7 +602,7 @@ COS_API Data* cos_comparison_active(const Data *data,
                                     const int *output_start,
                                     const int *output_step,
                                     void *ctx) {
-    if (!data || !kernel || data->dimension != kernel->dimension) {
+    if (!data || !kernel || data->dimension != kernel->dimension || data->dimension <= 0) {
         if (cb && cb->global_error) cb->global_error(ctx);
         return NULL;
     }
@@ -586,6 +617,7 @@ COS_API Data* cos_comparison_active(const Data *data,
         default_ctrl = create_default_control(dim);
         c = &default_ctrl;
     }
+    const int owns_ctrl = (ctrl == NULL);
     int *start = c->start ? c->start : (int*)calloc((size_t)(dim), sizeof(int));
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
     int *step  = c->step  ? c->step  : (int*)malloc((size_t)(dim) * sizeof(int));
@@ -595,16 +627,29 @@ COS_API Data* cos_comparison_active(const Data *data,
         if (!c->end) free(end);
         if (!c->step) free(step);
         free(d_dummy);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
     linear lin = c->li;
 
+    /* Validate window_size and step to prevent division-by-zero / overflow */
+    for (int i = 0; i < dim; ++i) {
+        if (window_size[i] <= 0 || step[i] <= 0) {
+            free(d_dummy);
+            if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+            if (cb && cb->global_error) cb->global_error(ctx);
+            return NULL;
+        }
+    }
+
     int *num = _compute_num(data->shape, dim, start, end, step, window_size, d_dummy);
     if (!num) {
         free(d_dummy);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         if (cb && cb->global_error) cb->global_error(ctx);
         return NULL;
     }
@@ -612,8 +657,9 @@ COS_API Data* cos_comparison_active(const Data *data,
     int *os = (int*)malloc((size_t)(dim) * sizeof(int));
     int *ost = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!os || !ost) {
-        free(num); free(os); free(ost);
-        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        free(num); free(os); free(ost); free(d_dummy);
+        if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i < dim; ++i) {
@@ -629,6 +675,7 @@ COS_API Data* cos_comparison_active(const Data *data,
         if (!out) {
             free(num); free(os); free(ost); free(d_dummy);
             if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
             if (cb && cb->global_error) cb->global_error(ctx);
             return NULL;
         }
@@ -636,9 +683,10 @@ COS_API Data* cos_comparison_active(const Data *data,
     if (out_param) {
         for (int i = 0; i < dim; ++i) {
             int last = os[i] + ost[i] * (num[i] - 1);
-            if (last >= out_param->shape[i]) {
+            if (last < 0 || last >= out_param->shape[i]) {   /* negative-start guard */
                 free(num); free(os); free(ost); free(d_dummy);
                 if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+                if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
                 if (cb && cb->global_error) cb->global_error(ctx);
                 return NULL;
             }
@@ -654,6 +702,7 @@ COS_API Data* cos_comparison_active(const Data *data,
         free(num); free(os); free(ost); free(d_dummy);
         free(num_list); free(inner_list); free(data_place); free(kern_place); free(out_idx);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
@@ -735,6 +784,7 @@ COS_API Data* cos_comparison_active(const Data *data,
     free(data_place); free(kern_place); free(out_idx);
     free(d_dummy);
     if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+    if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
 
     return out;
 }
@@ -742,8 +792,8 @@ COS_API Data* cos_comparison_active(const Data *data,
 /* Full tensor similarity */
 COS_API double cos_full(const Data *a, const Data *b,
                         double (*sim_func)(double,double,double)) {
-    if (!Data_shape_equal(a, b)) {
-        return COS_NAN; /* Shape mismatch, return NaN intentionally */
+    if (!a || !b || !Data_shape_equal(a, b)) {
+        return COS_NAN; /* NULL or shape mismatch */
     }
     int total = Data_total(a);
     double sum_a = 0.0, sum_b = 0.0, sum_ab = 0.0;
@@ -780,7 +830,7 @@ COS_API Data* cos_local_mean(const Data *data,
                              const int output_start[],
                              const int output_step[],
                              void *ctx) {
-    if (!data || !window_size) return NULL;
+    if (!data || !window_size || data->dimension <= 0) return NULL;
     int dim = data->dimension;
 
     control default_ctrl;
@@ -791,6 +841,7 @@ COS_API Data* cos_local_mean(const Data *data,
         default_ctrl = create_default_control(dim);
         c = &default_ctrl;
     }
+    const int owns_ctrl = (ctrl == NULL);
 
     int *start = c->start ? c->start : (int*)calloc((size_t)(dim), sizeof(int));
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
@@ -801,15 +852,28 @@ COS_API Data* cos_local_mean(const Data *data,
         if (!c->end) free(end);
         if (!c->step) free(step);
         free(d_dummy);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
 
+    /* Validate window_size and step to prevent division-by-zero / overflow */
+    for (int i = 0; i < dim; ++i) {
+        if (window_size[i] <= 0 || step[i] <= 0) {
+            free(d_dummy);
+            if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+            if (cb && cb->global_error) cb->global_error(ctx);
+            return NULL;
+        }
+    }
+
     int *num = _compute_num(data->shape, dim, start, end, step, window_size, d_dummy);
     if (!num) {
         free(d_dummy);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         if (cb && cb->global_error) cb->global_error(ctx);
         return NULL;
     }
@@ -817,8 +881,9 @@ COS_API Data* cos_local_mean(const Data *data,
     int *os = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     int *ost = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     if (!os || !ost) {
-        free(num); free(os); free(ost);
-        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        free(num); free(os); free(ost); free(d_dummy);
+        if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i < dim; ++i) {
@@ -834,6 +899,7 @@ COS_API Data* cos_local_mean(const Data *data,
         if (!out) {
             free(num); free(os); free(ost); free(d_dummy);
             if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
             if (cb && cb->global_error) cb->global_error(ctx);
             return NULL;
         }
@@ -841,6 +907,13 @@ COS_API Data* cos_local_mean(const Data *data,
 
     int N = 1;
     for (int i = 0; i < dim; ++i) N *= window_size[i];
+    if (N <= 0) { /* overflow or empty window */
+        free(num); free(os); free(ost); free(d_dummy);
+        if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+        if (cb && cb->global_error) cb->global_error(ctx);
+        return NULL;
+    }
 
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -850,6 +923,7 @@ COS_API Data* cos_local_mean(const Data *data,
         free(num); free(os); free(ost); free(d_dummy);
         free(num_list); free(inner_list); free(data_place); free(out_idx);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
@@ -917,6 +991,7 @@ COS_API Data* cos_local_mean(const Data *data,
     free(num_list); free(inner_list); free(data_place); free(out_idx);
     free(d_dummy);
     if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+    if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
 
     return out;
 }
@@ -930,7 +1005,7 @@ COS_API Data* cos_local_variance(const Data *data,
                                  const int output_start[],
                                  const int output_step[],
                                  void *ctx) {
-    if (!data || !window_size) return NULL;
+    if (!data || !window_size || data->dimension <= 0) return NULL;
     int dim = data->dimension;
 
     control default_ctrl;
@@ -941,6 +1016,7 @@ COS_API Data* cos_local_variance(const Data *data,
         default_ctrl = create_default_control(dim);
         c = &default_ctrl;
     }
+    const int owns_ctrl = (ctrl == NULL);
 
     int *start = c->start ? c->start : (int*)calloc((size_t)(dim), sizeof(int));
     int *end   = c->end   ? c->end   : (int*)malloc((size_t)(dim) * sizeof(int));
@@ -951,15 +1027,28 @@ COS_API Data* cos_local_variance(const Data *data,
         if (!c->end) free(end);
         if (!c->step) free(step);
         free(d_dummy);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     if (!c->end)   { for (int i=0; i<dim; ++i) end[i] = -1; }
     if (!c->step)  { for (int i=0; i<dim; ++i) step[i] = 1; }
 
+    /* Validate window_size and step to prevent division-by-zero / overflow */
+    for (int i = 0; i < dim; ++i) {
+        if (window_size[i] <= 0 || step[i] <= 0) {
+            free(d_dummy);
+            if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+            if (cb && cb->global_error) cb->global_error(ctx);
+            return NULL;
+        }
+    }
+
     int *num = _compute_num(data->shape, dim, start, end, step, window_size, d_dummy);
     if (!num) {
         free(d_dummy);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         if (cb && cb->global_error) cb->global_error(ctx);
         return NULL;
     }
@@ -967,8 +1056,9 @@ COS_API Data* cos_local_variance(const Data *data,
     int *os = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     int *ost = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
     if (!os || !ost) {
-        free(num); free(os); free(ost);
-        if (!ctrl) { free(start); free(end); free(step); free(d_dummy); }
+        free(num); free(os); free(ost); free(d_dummy);
+        if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i < dim; ++i) {
@@ -984,6 +1074,7 @@ COS_API Data* cos_local_variance(const Data *data,
         if (!out) {
             free(num); free(os); free(ost); free(d_dummy);
             if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+            if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
             if (cb && cb->global_error) cb->global_error(ctx);
             return NULL;
         }
@@ -991,6 +1082,13 @@ COS_API Data* cos_local_variance(const Data *data,
 
     int N = 1;
     for (int i = 0; i < dim; ++i) N *= window_size[i];
+    if (N <= 0) { /* overflow or empty window */
+        free(num); free(os); free(ost); free(d_dummy);
+        if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
+        if (cb && cb->global_error) cb->global_error(ctx);
+        return NULL;
+    }
 
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -1000,6 +1098,7 @@ COS_API Data* cos_local_variance(const Data *data,
         free(num); free(os); free(ost); free(d_dummy);
         free(num_list); free(inner_list); free(data_place); free(out_idx);
         if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+        if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
         return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
@@ -1070,6 +1169,7 @@ COS_API Data* cos_local_variance(const Data *data,
     free(num_list); free(inner_list); free(data_place); free(out_idx);
     free(d_dummy);
     if (!c->start) free(start); if (!c->end) free(end); if (!c->step) free(step);
+    if (owns_ctrl) { free(c->start); free(c->end); free(c->step); free(c->d); }
 
     return out;
 }

@@ -1753,20 +1753,14 @@ __all__ = [
 ]
 
 
-def threshold_judge(data, low=None, high=None, *, inclusive=(True, True),
-                    map_func=None, default_value=0.0, **region):
-    """Threshold judge/mapping companion of threshold_map: positions whose
-    value lies in [low, high] are mapped through map_func (default: 1.0,
-    i.e. a pure threshold mask); positions outside receive default_value
-    (default 0.0). Endpoints per inclusive=(lo_in, hi_in); callback errors
-    are silently skipped (position keeps the output initial value)."""
+def threshold_judge(low=None, high=None, *, inclusive=(True, True)):
+    """Return a judge function: 1 if the value lies within [low, high],
+    else 0 (single-bound thresholds allowed). Companion for threshold_map's
+    (func, value) pair iteration, e.g.
+        threshold_map(data, [(threshold_judge(low=3, high=7), 2.0),
+                             (lambda v: True, 3.0)])
+    """
     predicate = _make_threshold_predicate(low, high, inclusive)
-    mapped = map_func if map_func is not None else (lambda value: 1.0)
+    return lambda value: 1 if predicate(value) else 0
 
-    def matcher(value):
-        if predicate(value):
-            return mapped(value)
-        return default_value
-
-    return data_mapping(data, matcher, **region)
 

@@ -30,14 +30,17 @@ def _write_version_file():
     pyproject_path = os.path.join(setup_dir, "pyproject.toml")
     version_path = os.path.join(setup_dir, "cos_comparison", "VERSION.txt")
     try:
-        with open(pyproject_path, encoding="utf-8") as text_file:
+        # utf-8-sig tolerates a BOM in pyproject.toml (a BOM would otherwise
+        # break the ^version regex anchor).
+        with open(pyproject_path, encoding="utf-8-sig") as text_file:
             text = text_file.read()
         match = re.search(r"^version\s*=\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
         if not match or not match.group(1):
             return
         version_str = match.group(1).strip()
-        with open(version_path, "w", encoding="utf-8") as version_file:
-            version_file.write(version_str + "\n")
+        # write the pure version string: no trailing newline, no BOM
+        with open(version_path, "w", encoding="utf-8", newline="") as version_file:
+            version_file.write(version_str)
         print("VERSION file written: {0}".format(version_str))
     except Exception as exc:
         print("Warning: skipping VERSION file generation ({0})".format(exc))

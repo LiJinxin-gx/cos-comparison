@@ -38,10 +38,17 @@ typedef double (*algo_fn)(double, double, double, CallbackContext*);
 
 static inline Data* _compute_output_shape(int dim, const int num[],
                                           const int output_start[], const int output_step[]) {
-    (void)output_start; // unused, output always starts at 0 when created by core
+    (void)output_start; /* output always starts at 0 when created by core */
     int *out_shape = (int*)malloc((size_t)(dim) * sizeof(int));
-    for (int i = 0; i < dim; ++i)
+    if (!out_shape) return NULL;
+    for (int i = 0; i < dim; ++i) {
+        /* Guard against int overflow in shape computation (C99 6.5p5 UB) */
+        if (num[i] > 1 && output_step[i] > INT_MAX / (num[i] - 1)) {
+            free(out_shape);
+            return NULL;
+        }
         out_shape[i] = (num[i] - 1) * output_step[i] + 1;
+    }
     Data *out = Data_create(dim, out_shape);
     free(out_shape);
     return out;
@@ -73,6 +80,7 @@ static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int dep
             if (!idx_obj) {
                 for (int j = 0; j < i; ++j) {
                     Py_DECREF(PyTuple_GET_ITEM(idx_tuple, j));
+                    PyTuple_SET_ITEM(idx_tuple, j, NULL); /* avoid double free in tuple dealloc */
                 }
                 Py_DECREF(idx_tuple);
                 Py_DECREF(args);
@@ -86,6 +94,7 @@ static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int dep
         PyObject *val_obj = PyFloat_FromDouble(value);
         if (!val_obj) {
             Py_DECREF(idx_tuple);
+            PyTuple_SET_ITEM(args, 0, NULL); /* idx_tuple already freed; avoid UAF */
             Py_DECREF(args);
             Py_DECREF(set_item_method);
             return;

@@ -1,6 +1,44 @@
 cos-comparison Project History
 =============================
-v0.4.0 (2026-08-11)
+v0.4.3 (2026-08-16)
+-------------------
+Robustness, protocol-style delegation and default-algorithm release:
+- **C core hardening (18 fixes, API unchanged)**: memory-safety NULL checks, single-fire end/return callbacks, step=0 division protection, output write-bounds checks, short-parameter tolerance, integer-overflow guards, global_error callback ABI alignment (pydll + ctypes backends)
+- **Element-wise filter/mapping API (all three backends)**: `data_filter` (yield positions whose callback(value) is truthy over a sampled read region, with origin/basis position reporting; stateless value-only callbacks; callback errors silently skipped), `data_mapping` (map a region through callback into a new or pre-allocated output with out_start/out_step), `threshold_filter` / `threshold_map` (interval [low, high] with inclusive endpoint control). C implementation is C99-strict (no VLA/GNU extensions, all static, const-correct, shared `_resolve_read_region` core, long-long totals, explicit free on every path) and backend-switch safe
+- **Upper-layer defect fixes**: database `executemany` partial-replay removal (errors re-raise, cursor-less fallback only), `MapMemory.commit` atomicity (applied entries dropped, retry never re-applies; `create_hook` factory support), `Process.stop(terminate=True)` child termination + synchronous reader threads, monitor handle race fixed via `parallel_lock` binding, `Graph.__repr__` and `DirectedGraph.shortest_path` nested-lock deadlocks eliminated, `Receptor.receptor` kwargs=None handling
+- **Logic layers (protocol-style)**: `event_context` delegated slots (`init_func`/`add_func`/`probability_func`), relative-probability axiom system (A1–A5: relativism, reflexivity, chain rule, Bayes duality, union; absolute forms degenerate from `global_event`), two-stage rigorous resolution (exact hit → relative Bayes over direct references → shortest-path chain fallback), `EventBinds` binds-as-engine protocol container (cached graph, stats, strict switch; default construction), `EventContextProtocol` deploy form, default graph-reachability judge for `Logic_context` (`logic_judge`), `shortest_path_between` in `interface.tools.math_tool.topology`
+- **Default dict-protocol implementations**: `Map` three-slot defaults (mapper), truthiness substitution → `is not None` default construction (call_api / executer / symbol_logic / logic contexts)
+- **Generate layer**: `TensorGenerator.generate(func, args, kwargs)` unified delegation entry, `set_point` via the core `set_item` protocol, module-level `copy_region` region fill (core `load_data` wrapper, target-first)
+- **Sense layer**: `data_match` — integrated matching-position iterator (active comparison + threshold filter; algorithm default resolved inside the backend, pydll-safe; None region parameters omitted so backends treat them uniformly); `Receptor.receptor` delegation entry (kwargs=None handling). The sense layer now exposes a single perception entry instead of separate filter/mapping functions (core keeps the full four-function API)
+- **Fourier module** (`interface.tools.math_tool.fourier`): generic `dft` / `idft` / `power_spectrum` from the cos/sin integral formula F(ξ)=Σf(x)cos(2πξ·x)−i·Σf(x)sin(2πξ·x) — multi-dimensional (axis-wise, odometer), recursion-free, trig-variant float arithmetic (no complex-object overhead), iterative loops only
+- **get_item scalar-index parity**: the pure-Python and ctypes backends now treat a scalar index as a 1-D index like the C extension (previously `*index` unpacking raised TypeError)
+- **Version handling**: VERSION.txt restored at the package directory, `__init__.py` reads it with `.strip()` and `utf-8-sig` (clean `version_tuple`, BOM/newline tolerant); `setup.py` writes the pure version string (no trailing newline, no BOM) and reads pyproject.toml BOM-tolerantly; version set to 0.4.3
+- **Docs**: README (v0.4.3 section), cognitive-layers / modular-architecture / seven-layer / core / backend-system updated for v0.4.3
+
+v0.4.2 (2026-08-13)
+-------------------
+Portability and robustness release - no API changes:
+- **ARM / piwheels build fixes**: Fixed C99 label-after-declaration errors in the C extension (type_vector.h) that blocked compilation on ARM Linux with `-std=c99`; removed non-static inline declarations from ctypes backend type_data.h that caused duplicate-symbol issues
+- **Empty-input hardening**: All backends now raise consistent exceptions (IndexError / ValueError / TypeError) for empty tensors instead of crashing; the C extension previously segfaulted on `vector_map_as_tensor(vector=[])`
+- **C extension Vector_init**: Default shape is now (1,) matching pure Python; scalar/empty vector inputs convert gracefully to 0.0 instead of triggering inconsistent-shape errors
+- **Memory safety audit**: Added NULL checks after every malloc/calloc across both C codebases; fixed a missing-brace bug (`if (!num) PyErr_NoMemory(); return NULL;`) that caused unconditional failure on allocation failure; fixed 12 reference-count and memory leaks in arithmetic operators and statistics
+- **Duck typing for indices**: Index parameters now accept any object implementing `__index__` (via PyNumber_Index) instead of requiring exact int/Long types, supporting numpy integers and custom index types
+- **Unified error messages**: ctypes backend now uses "effectless args." consistently; `infer_shape(None)` and `infer_shape(scalar)` return None on all backends
+- **Buffer protocol**: C extension now raises TypeError for zero-shaped tensors (matching pure Python memoryview behavior)
+- **Arithmetic on empty tensors**: All arithmetic operators and in-place variants raise IndexError on empty tensors across all backends
+- **mean/variance on empty tensors**: Now raise IndexError instead of returning None, matching pure Python behavior
+- **Removed dead code**: Deleted unused `_flatten_list_to_data` (68 lines), unused variables, and duplicate function declarations
+- **Restored missing func_tools.py**: The `no_done` no-op helper module was accidentally missing from the source tree, causing import failures in the interface layer
+- **Zero compiler warnings** on MSVC (C11, /W3), GCC, and Clang; C99-compatible for piwheels ARM builds
+- **`vector_map_as_tensor(vector=None, shape=)` auto-creation**: passing `vector=None` (with or without `shape=`) now auto-creates the default zero-filled flat vector — a list of zeros on the Python backends, the native zero-filled array on the C backends.  Previously the C extension crashed with heap corruption (0xC0000374) on `vector=None`; the Python backends stored `None` and failed on access.  An *omitted* `vector` keeps the historical default `(1,)` with value `1.0` on all backends
+- **C extension scalar in-place operators**: `t += scalar` / `t -= scalar` now work on the pydll backend, matching the ctypes and pure-Python backends (which already supported scalar in-place for `*=`, `/=`, `**=`); cross-backend operator behaviour is now identical
+- **Type-promotion decision (documented, not implemented)**: integer-typed results / most-precise-type promotion for arithmetic were considered and deliberately NOT implemented — the design keeps double as the single universal element type so the C hot loops stay SIMD-vectorizable; arithmetic always returns float-valued tensors (division is always double, as before)
+- **Buffer-protocol write-through for memoryview inputs**: the C extension previously obtained memoryview buffers with `PyBUF_SIMPLE | PyBUF_FORMAT`, which CPython satisfies with a detached copy for multi-byte formats — silently breaking zero-copy write-through.  It now requests `PyBUF_ND | PyBUF_FORMAT | PyBUF_STRIDES` for memoryview inputs (keeping C-contiguous views zero-copy and shared), so `memoryview`-backed tensors write through to the original buffer on every backend
+- **Buffer export read-only unification**: the Python backends' `__buffer__` (PEP 688) export was writable-but-write-lost (a fresh bytearray snapshot per export); it now exports read-only (`.toreadonly()`), matching the C extension and numpy's `frombuffer` of immutable input.  Writing to `memoryview(tensor)` raises TypeError on all backends
+- **ctypes `Data` structure layout fix**: the ctypes wrapper's `Data` Structure was missing the C struct's `dtype` field; added `("dtype", c_int)` so Python-side layout exactly matches the C layout (no out-of-bounds write if a Python-constructed `Data` is passed to C)
+- **C type-size/overflow hardening**: `Vector_getbuffer` itemsize uses `sizeof(double)` instead of a hardcoded 8; shape/sequence-length conversions from `Py_ssize_t` to `int` now raise OverflowError instead of silently truncating (`_infer_shape` buffer and sequence paths, `_parse_shape_tuple`, `_parse_int_seq`)
+
+v0.4.1 (2026-08-11)
 -------------------
 Major architecture upgrade release - modernized indexing, new features, and performance improvements:
 - **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from vector_map_as_tensor, final migration to stride+offset architecture
@@ -12,7 +50,7 @@ Major architecture upgrade release - modernized indexing, new features, and perf
 - **Enhanced PyBuffer protocol**: Improved zero-copy support for array.array, memoryview, bytes, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char), unified type detection
 - **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, added portable optimization macros (unroll, alignment, branch prediction, inline)
 - **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
-- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.0 features with 100% behavioral parity
+- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.1 features with 100% behavioral parity
 - **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
 - **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
 - **Updated core module loader**: `infer_shape` added to hot API list for zero-overhead access

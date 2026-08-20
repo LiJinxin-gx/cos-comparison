@@ -145,10 +145,18 @@ static PyObject* Vector_get_start(Vector *self, void *closure) {
     return PyLong_FromLong(self->start);
 }
 
+
+static PyObject* Vector_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
+    /* zero-filled: Vector_dealloc is safe even if tp_init fails midway */
+    (void)args; (void)kwds;
+    return PyType_GenericAlloc(type, 0);
+}
+
 static PyObject* Vector_get_vector(Vector *self, void *closure) {
     /* Iterate all elements (handles non-contiguous views) */
     int total = 1;
     for (int i = 0; i < self->dimension; ++i) total *= self->shape[i];
+    if (total <= 0) return PyList_New(0);   /* degenerate shape guard */
     PyObject *list = PyList_New(total);
     if (!list) return NULL;
     double *data = (double*)self->data->data;
@@ -1016,6 +1024,10 @@ static PyObject *Vector_subscript(Vector *self, PyObject *item) {
     }
     
     int n_idx = (int)PyTuple_Size(index_tuple);
+    if (n_idx > self->dimension) {
+        PyErr_SetString(PyExc_IndexError, "too many indices for vector");
+        return NULL;
+    }
     
     /* First pass: count how many dimensions remain after integer indexing */
     int new_dim = 0;
@@ -1394,7 +1406,7 @@ static Vector* _new_vector_like(Vector *src) {
     // Precompute strides for new tensor
     result->strides = (int*)malloc((size_t)(ndim) * sizeof(int));
     if (!result->strides) { free(result->shape); Data_free(result->data); Py_DECREF(result); return NULL; }
-    result->strides[ndim - 1] = 1;
+    if (ndim > 0) result->strides[ndim - 1] = 1;   /* 0-dim guard */
     for (int i = ndim - 2; i >= 0; --i) {
         result->strides[i] = result->strides[i+1] * result->shape[i+1];
     }
@@ -2065,7 +2077,7 @@ static PyTypeObject VectorizeType = {
     .tp_methods   = Vector_methods,
     .tp_getset    = Vector_getseters,
     .tp_init      = (initproc)Vector_init,
-    .tp_new       = PyType_GenericNew,
+    .tp_new       = Vector_tp_new,
     .tp_iter      = (getiterfunc)Vector_iter,
 };
 
