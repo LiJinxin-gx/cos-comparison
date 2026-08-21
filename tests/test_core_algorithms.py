@@ -187,5 +187,77 @@ class TestMeanAndVariance(unittest.TestCase):
         self.assertAlmostEqual(r[0], 2.0)
 
 
+class TestThresholdMap(unittest.TestCase):
+    """threshold_map: iterate (func, value) pairs, first truthy func(value)
+    selects the paired value; else default_value (default 0.0)."""
+
+    def test_first_truthy_mapping(self):
+        pairs = [(lambda v: v < 3, -1.0), (lambda v: v < 8, 0.0),
+                 (lambda v: True, 1.0)]
+        out = core.threshold_map([[1.0, 5.0], [9.0, 3.0]], pairs)
+        self.assertEqual(core.get_item(out, (0, 0)), -1.0)
+        self.assertEqual(core.get_item(out, (0, 1)), 0.0)
+        self.assertEqual(core.get_item(out, (1, 0)), 1.0)
+        self.assertEqual(core.get_item(out, (1, 1)), 0.0)
+
+    def test_default_value(self):
+        out = core.threshold_map([[1.0, 2.0]],
+                                 [(lambda v: v > 100, 9.0)])
+        self.assertEqual(core.get_item(out, (0, 0)), 0.0)
+        out2 = core.threshold_map([[1.0, 2.0]],
+                                  [(lambda v: v > 100, 9.0)],
+                                  default_value=5.0)
+        self.assertEqual(core.get_item(out2, (0, 1)), 5.0)
+
+    def test_region_params_kept(self):
+        data = [[1.0, 5.0, 9.0], [3.0, 7.0, 11.0]]
+        out = core.threshold_map(data, [(lambda v: v >= 7, 1.0)],
+                                 start=(1, 0), shape=(1, 3), step=(1, 1),
+                                 default_value=-1.0)
+        vals = [core.get_item(out, i) for i in [(0, 0), (0, 1), (0, 2)]]
+        self.assertEqual(vals, [-1.0, 1.0, 1.0])
+
+    def test_error_skipped(self):
+        def bad(value):
+            raise RuntimeError("boom")
+
+        data = [[1.0, 5.0]]
+        out = core.threshold_map(data, [(bad, 1.0), (lambda v: v > 4, 2.0)],
+                                 default_value=-1.0)
+        self.assertEqual(core.get_item(out, (0, 0)), -1.0)
+        self.assertEqual(core.get_item(out, (0, 1)), 2.0)
+
+
+class TestThresholdJudge(unittest.TestCase):
+    """threshold_judge: judge-function factory returning 1 (in range) /
+    0 (out of range); pairs with threshold_map's (func, value) iteration."""
+
+    def test_judge_value(self):
+        judge = core.threshold_judge(low=3, high=7)
+        self.assertEqual(judge(5.0), 1)
+        self.assertEqual(judge(1.0), 0)
+        self.assertEqual(judge(3.0), 1)
+
+    def test_single_bound_and_open(self):
+        judge_lo = core.threshold_judge(low=5)
+        self.assertEqual(judge_lo(6.0), 1)
+        self.assertEqual(judge_lo(4.0), 0)
+        judge_open = core.threshold_judge(low=3, high=7,
+                                          inclusive=(False, True))
+        self.assertEqual(judge_open(3.0), 0)
+
+    def test_with_threshold_map(self):
+        data = [[1.0, 5.0, 9.0], [3.0, 7.0, 11.0]]
+        pairs = [(core.threshold_judge(low=3, high=7), 2.0),
+                 (lambda v: True, 3.0)]
+        out = core.threshold_map(data, pairs)
+        vals = [core.get_item(out, i) for i in [(0, 0), (0, 1), (0, 2), (1, 0)]]
+        self.assertEqual(vals, [3.0, 2.0, 3.0, 2.0])
+
+    def test_no_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            core.threshold_judge()
+
+
 if __name__ == "__main__":
     unittest.main()

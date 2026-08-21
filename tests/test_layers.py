@@ -82,12 +82,12 @@ class TestSenseLayer(unittest.TestCase):
         self.assertEqual(act.shape, (1, 1))
 
     def test_receptor_point(self):
-        from cos_comparison.sense_layer import Receptor
+        from cos_comparison.sense_layer import TensorReceptor
         v = make((2, 2), default=1.0)
-        r = Receptor(v)
-        self.assertEqual(r.point((1, 1)), 1.0)   # tuple -> 2D index
+        r = TensorReceptor(v)
+        self.assertEqual(r.point((1, 1)), 1.0)   # tuple -> 2D index (core.get_item)
         v1 = make((3,), default=4.0)
-        self.assertEqual(Receptor(v1).point(1), 4.0)  # scalar -> 1D index
+        self.assertEqual(TensorReceptor(v1).point(1), 4.0)  # scalar -> 1D index
 
 
 class TestMemoryLayer(unittest.TestCase):
@@ -201,7 +201,8 @@ class TestBrainLogic(unittest.TestCase):
     def test_logic_context_defaults(self):
         from cos_comparison.brain_layer.logic import Logic_context
         ctx = Logic_context()
-        self.assertIsNone(ctx.logic_judge(1, 2))   # no_done fallback
+        # default judge algorithm: empty rule set -> unreachable -> False
+        self.assertFalse(ctx.logic_judge(1, 2))
         self.assertIsNone(ctx.initialize())
 
     def test_event_ne_complementary(self):
@@ -220,8 +221,11 @@ class TestBrainMapper(unittest.TestCase):
     def test_map_accessors(self):
         from cos_comparison.brain_layer.mapper import Map
         m = Map()
-        self.assertIsNone(m[1])          # no_done fallback, no NameError
-        self.assertFalse(1 in m)
+        # default dict-protocol: missing map_obj fails loudly (no silent None)
+        with self.assertRaises(TypeError):
+            m[1]
+        with self.assertRaises(TypeError):
+            1 in m
         m2 = Map(map_obj={1: "a"}, map_func=lambda obj, k: obj.get(k))
         self.assertEqual(m2[1], "a")
 

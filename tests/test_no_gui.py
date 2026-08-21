@@ -37,6 +37,8 @@ MODULES = [
     "cos_comparison.brain_layer.logic",
     "cos_comparison.brain_layer.reflex",
     "cos_comparison.brain_layer.mapper",
+    "cos_comparison.brain_layer.control",
+    "cos_comparison.interface.tools.func_tool",
     "cos_comparison.action_layer",
     "cos_comparison.generate_layer",
     "cos_comparison.extension_layer",
