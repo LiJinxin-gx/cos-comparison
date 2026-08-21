@@ -85,6 +85,11 @@ static inline Data* Data_create(int dimension, const int shape[]) {
 	self->dimension = dimension;
 	self->shape = (int*)calloc((size_t)(dim), sizeof(int));
 	if (!self->shape) { free(self); return NULL; }
+	if (dimension > 0 && shape == NULL) {
+		free(self->shape);
+		free(self);
+		return NULL;
+	}
 	if (dimension > 0) memcpy(self->shape, shape, (size_t)(dimension) * sizeof(int));
 	self->strides = (int*)calloc((size_t)(dim), sizeof(int));
 	if (!self->strides) { free(self->shape); free(self); return NULL; }

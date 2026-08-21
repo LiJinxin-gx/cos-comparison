@@ -55,3 +55,12 @@ class AsyncIntegrateContext(IntegrateContext):
         if self.flag:
             for c in reversed(self.a_contexts):
                 await c.__aexit__(err_type,err_val,err_tb)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "VoidContext",
+    "IntegrateContext",
+    "AsyncIntegrateContext",
+)

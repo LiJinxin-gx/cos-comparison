@@ -1,140 +1,76 @@
 # Dual Working Modes
 
-Cos-comparison features two complementary working modes: **Passive Mode** and **Active Mode**. This dual-mode philosophy is a core design principle that extends across all layers of the architecture.
+Two complementary modes: **Passive** (self-similarity) and **Active** (template matching). This duality extends across all architecture layers.
+
+## Contents
+
+- [Overview](#overview)
+- [Passive Mode](#passive-mode)
+- [Active Mode](#active-mode)
+- [Relationship](#relationship)
+- [Selection Guide](#selection-guide)
+
+---
 
 ## Overview
 
 | Mode | Core Idea | Analogy | Key Parameter |
 |------|-----------|---------|---------------|
-| Passive | Self-similarity within data | Reflex / Bottom-up | Displacement vector `d` |
-| Active | Matching against external template | Attention / Top-down | Kernel `kernel` |
-
-## Passive Mode
-
-### Concept
-
-**Passive mode** compares two offset windows within the same data, computing self-similarity across the dataset.
-
-```
-Data: [ 1, 2, 3, 4, 5, 6, 7, 8 ]
-        ↑     ↑
-      Window A  Window B
-         <── d ──>
-```
-
-The displacement vector `d` controls both the direction and distance between the two comparison windows.
-
-### Key Characteristics
-
-1. **Template-free**: No external template required
-2. **Unsupervised**: Works on any data without prior knowledge
-3. **Reflex-like**: Analogous to automatic sensory processing
-4. **Boundary detection**: Naturally detects edges, transitions, and boundaries
-
-### Mathematical Formulation
-
-```
-result[x] = similarity(data[x : x+window], data[x+d : x+d+window])
-```
-
-### Use Cases
-
-- **Edge detection**: Displacement perpendicular to edge direction
-- **Texture analysis**: Multiple displacement directions capture texture anisotropy
-- **Motion detection**: Temporal displacement in video data
-- **Anomaly detection**: Regions with unusual self-similarity patterns
-- **Keypoint detection**: Points with high directional derivative diversity
-
-### Multi-Scale and Multi-Direction
-
-By varying **window size** (captures features at different scales), **displacement magnitude** (controls comparison scale), and **displacement direction** (captures oriented features), passive mode naturally supports multi-scale, multi-directional feature extraction.
-
-## Active Mode
-
-### Concept
-
-**Active mode** slides an external kernel (template) across the data, computing similarity between each local window and the kernel.
-
-```
-Data:   [ 1, 2, 3, 4, 5, 6, 7, 8 ]
-          ↑  ↑  ↑
-        Window A
-Kernel: [ 1, 0, 1 ]
-          ↑  ↑  ↑
-```
-
-The kernel serves as a "search template" that the algorithm actively looks for in the data.
-
-### Key Characteristics
-
-1. **Template-driven**: Requires an external kernel/template
-2. **Goal-oriented**: Actively searches for specific patterns
-3. **Attention-like**: Analogous to top-down attention
-4. **Pattern matching**: Finds occurrences of known patterns
-
-### Mathematical Formulation
-
-```
-result[x] = similarity(data[x : x+window], kernel)
-```
-
-Where `window` is determined by the kernel shape.
-
-### Use Cases
-
-- **Template matching / object detection**: Finding specific patterns via sliding window
-- **Feature detection**: Matching predefined feature templates
-- **Pattern recognition**: Identifying known patterns
-- **Convolution-like operations**: With similarity instead of dot product
-
-### Kernel Design
-
-The kernel is the "query" in active mode. Design considerations:
-
-- **Size**: Determines the scale of features to detect
-- **Shape**: Defines the pattern to match
-- **Values**: Weighting of different positions within the kernel
-- **Normalization**: Whether to normalize the kernel values
-
-## Relationship Between Modes
-
-### Complementary, Not Opposite
-
-- **Passive** = what the data tells us about itself
-- **Active** = what we look for in the data
-
-### Mathematical Connection
-
-Active mode can be seen as a generalization: when kernel = shifted version of data → becomes passive mode; passive mode is active mode with a data-derived kernel.
-
-### Cognitive Analogy
-
-| Mode | Cognitive Analog | Neural Correlate |
-|------|-----------------|------------------|
-| Passive | Bottom-up processing | Feedforward sensory pathways |
-| Active | Top-down attention | Feedback from higher brain areas |
-
-Both modes work together in biological perception: passive processing extracts basic features, active attention selects relevant patterns.
-
-## Mode Selection Guide
-
-| Scenario | Recommended Mode | Reason |
-|----------|-----------------|--------|
-| Unknown data exploration | Passive | No prior assumptions needed |
-| Edge detection | Passive | Naturally emerges from self-comparison |
-| Finding specific patterns | Active | Template defines what to look for |
-| Unsupervised feature extraction | Passive | Works without prior knowledge |
-| Target detection | Active | Explicit target template |
-| Texture analysis | Passive + multiple directions | Captures intrinsic texture properties |
-
-## Advanced: Combining Modes
-
-1. **Passive → Active pipeline**: Use passive mode to extract candidate regions, then active mode for precise matching
-2. **Multi-mode features**: Concatenate features from both modes for richer representations
-3. **Feedback loops**: Active mode results modulate passive mode parameters (attention mechanism)
-
-This layered, multi-mode approach mirrors how biological vision systems work.
+| Passive | Self-similarity within data | Reflex / bottom-up | Displacement `d` |
+| Active | Matching against external template | Attention / top-down | `kernel` |
 
 ---
 
-**Next**: [Seven-Layer Cognitive Architecture](../architecture/seven-layer.md) — Brain-inspired layered design
+## Passive Mode
+
+Compares two offset windows within the same data:
+
+```
+result[x] = similarity(data[x:x+window], data[x+d:x+d+window])
+```
+
+**Characteristics:**
+- Template-free, unsupervised, reflex-like
+- Naturally detects edges and boundaries
+- Varying window size (scale), displacement magnitude (comparison distance), and direction (oriented features) enables multi-scale, multi-directional extraction
+
+**Use cases:** edge detection, texture analysis, motion detection, anomaly/keypoint detection.
+
+---
+
+## Active Mode
+
+Slides an external kernel across data:
+
+```
+result[x] = similarity(data[x:x+window], kernel)
+```
+
+**Characteristics:**
+- Template-driven, goal-oriented
+- Finds occurrences of known patterns
+- Kernel design: size (feature scale), shape (pattern), values (weighting), normalization
+
+**Use cases:** template matching, feature detection, pattern recognition, convolution-like operations.
+
+---
+
+## Relationship
+
+- **Passive** = what data tells about itself; **Active** = what we look for in data
+- Mathematically, passive is active with a data-derived kernel (shifted window)
+- Biologically: passive ≈ feedforward sensory pathways; active ≈ top-down attention
+
+---
+
+## Selection Guide
+
+| Scenario | Mode |
+|----------|------|
+| Unknown data exploration, edge detection, unsupervised features, texture | Passive |
+| Finding specific patterns, target detection | Active |
+| Richer representations | Combine both (passive candidates → active matching) |
+
+---
+
+**Next:** [Seven-Layer Architecture](../architecture/seven-layer.md) · [Similarity Measures](similarity-measures.md)

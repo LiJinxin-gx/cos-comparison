@@ -343,3 +343,24 @@ class EventBinds(dict):
         binds = getattr(context, "binds")
         return _resolve(binds, A, B, strict=binds.strict,
                         graph=binds._ensure_graph(), stats=binds.stats)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "UnionEvent",
+    "IntersectionEvent",
+    "GlobalEvent",
+    "event_bind",
+    "event_context",
+    "default_add_bind",
+    "default_context_init",
+    "chain_probability",
+    "default_probability_func",
+    "strict_probability_func",
+    "chain_intersection",
+    "union_probability",
+    "consistency_diagnostic",
+    "EventContextProtocol",
+    "EventBinds",
+)

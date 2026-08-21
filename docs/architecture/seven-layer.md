@@ -1,33 +1,45 @@
-﻿# Seven-Layer Cognitive Architecture
+# Seven-Layer Cognitive Architecture
 
-Cos-comparison adopts a **seven-layer brain-inspired cognitive architecture**, where each layer corresponds to different levels of biological cognitive processing. This layered design enables modular development and clear separation of concerns.
+A **seven-layer brain-inspired cognitive architecture**, where each layer corresponds to a level of biological cognitive processing. This design enables modular development and clear separation of concerns.
+
+## Contents
+
+- [Overview](#overview)
+- [Design Principles](#design-principles)
+- [Layer Details](#layer-details)
+- [Cross-Cutting Modules](#cross-cutting-modules)
+- [Current State](#current-state)
+
+---
 
 ## Overview
 
 | Layer | Directory | Brain Analogue | Maturity | Core Function |
 |-------|-----------|----------------|----------|---------------|
-| 1 | `core` | Brainstem / Cerebellum | ✅ Production | Low-level local comparison computation, stride-based tensor indexing, multi-backend acceleration |
-| 2 | `sense_layer` | Sensory Cortex | 🟡 Early Development | Receive external stimuli (Receptor / TensorReceptor) |
-| 3 | `memory_layer` | Hippocampus / Cortex | 🟡 Early Development | Short-term and long-term memory (map, table, database backends) |
-| 4 | `brain_layer` | Prefrontal Cortex | 🟡 Early Development | Symbolic logic, probabilistic logic, reflex system |
-| 5 | `action_layer` | Motor Cortex | 🔵 Exploratory Development | Action output control (ExecuterDriver) |
-| 6 | `generate_layer` | Broca's / Wernicke's Area | 🔵 Exploratory Development | Generate data by matching data structures (Generator) |
-| 7 | `extension_layer` | Association Areas | 🔴 Skeleton | Extended functions and special capabilities |
+| 1 | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, stride indexing, multi-backend acceleration |
+| 2 | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception (Receptor / TensorReceptor) |
+| 3 | `memory_layer` | Hippocampus / Cortex | 🟡 Early | Map/table/database memory, transactions |
+| 4 | `brain_layer` | Prefrontal Cortex | 🟡 Partial | Symbolic/probabilistic logic, reflex system |
+| 5 | `action_layer` | Motor Cortex | 🔵 Exploratory | Action output (ExecuterDriver) |
+| 6 | `generate_layer` | Broca's / Wernicke's | 🔵 Exploratory | Data generation (Generator / TensorGenerator) |
+| 7 | `extension_layer` | Association Areas | 🔴 Skeleton | Extended capabilities |
 
-Cross-cutting modules that serve every layer:
+**Cross-cutting modules:**
 
 | Module | Role |
 |--------|------|
-| `interface` | External interface abstraction: system/process control, call containers, communication, parallel tools, context tools |
-| `data` | Unified data carrier interfaces and tensor containers |
-| `test_tool` | Testing and debugging utilities (Timer, perf_count) |
-| `app` | Aggregation of functionality across layers |
+| `interface` | External abstraction: system/process, call containers, communication, parallel tools, context tools |
+| `data` | Data carriers and tensor containers |
+| `test_tool` | Debug probes and benchmarking (Timer, MemoryProbe, ErrorWatcher, TraceProbe) |
+| `app` | Aggregation of cross-layer functionality (planned) |
+
+---
 
 ## Design Principles
 
 ### 1. Bottom-Up Dependency
 
-Each layer only depends on layers below it, never on layers above.
+Each layer depends only on layers below it, never above:
 
 ```
 Layer 7 (Extension)
@@ -39,120 +51,136 @@ Layer 4 (Brain)           Layer 3 (Memory)
 Layer 2 (Sense)           Layer 1 (Core)
 ```
 
-This ensures clean separation of concerns, independently testable layers, optimizable lower layers without affecting higher ones, and a system that remains functional even if higher layers are incomplete.
+This ensures independently testable layers, optimizable lower layers, and a system that remains functional even if higher layers are incomplete.
 
 ### 2. Neuroscience Homology
 
-Each layer corresponds to a biological brain structure — low-level, fast, automatic processing (core → brainstem/cerebellum), initial feature extraction (sense → sensory cortex), storage and retrieval (memory → hippocampus), reasoning and planning (brain → prefrontal cortex), execution of actions (action → motor cortex), generation of complex outputs (generate → language areas), and integration (extension → association areas).
+Each layer maps to a biological brain structure:
+
+| Layer | Structure | Role |
+|-------|-----------|------|
+| Core | Brainstem / Cerebellum | Low-level, fast, automatic processing |
+| Sense | Sensory Cortex | Initial feature extraction |
+| Memory | Hippocampus | Storage and retrieval |
+| Brain | Prefrontal Cortex | Reasoning and planning |
+| Action | Motor Cortex | Execution of actions |
+| Generate | Language areas | Complex output generation |
+| Extension | Association areas | Integration |
 
 ### 3. Dual-Mode Consistency
 
-The passive/active dual-mode philosophy extends vertically through all layers — e.g. core: self-similarity vs template matching; memory: content-based retrieval vs pattern-based search; brain: bottom-up reasoning vs top-down planning.
+The passive/active philosophy extends vertically:
+
+| Layer | Passive | Active |
+|-------|---------|--------|
+| Core | Self-similarity | Template matching |
+| Memory | Content-based retrieval | Pattern-based search |
+| Brain | Bottom-up reasoning | Top-down planning |
+
+---
 
 ## Layer Details
 
-### Layer 1: Core
+### Layer 1: Core ✅ Production
 
-**Status**: ✅ Production (v0.4.3)
-
-**Responsibilities**:
-- Fundamental local comparison computation (passive self-similarity, active template matching) and statistics (mean, variance)
-- Dimension-agnostic (1D, 2D, 3D, 4D, ...); stride-based `vector_map_as_tensor` with NumPy-like fancy indexing, zero-copy views, arbitrary slices/steps, negative indices, dimension collapse
-- `__shape__` protocol / `infer_shape` (PyBuffer > `__shape__` > length detection), `load_as_default_data`, `load_data`, `vector_chain_compute`
+**Responsibilities:**
+- Local comparison (passive self-similarity, active template matching) and statistics (mean, variance)
+- Dimension-agnostic stride-based `vector_map_as_tensor` with fancy indexing, zero-copy views, negative indices, dimension collapse
+- `__shape__` protocol / `infer_shape`, `load_as_default_data`, `load_data`, `vector_chain_compute`
 - Similarity algorithms (cos, mod, cosmod) and callback system
-- Zero-dependency pure Python reference plus three acceleration backends with automatic fallback (C extension / ctypes C / pure Python); full free-threaded Python (3.13+) support; duck-typing support for NumPy/PyTorch arrays
+- Three backends (C extension / ctypes / pure Python) with automatic fallback; free-threaded 3.13+ support; duck-typing for NumPy/PyTorch arrays
 
-**Full API**: [Core Module API](../api/core.md)
+→ [Core Module API](../api/core.md)
 
-### Layer 2: Sense Layer
+### Layer 2: Sense 🟡 Early
 
-**Status**: 🟡 Early Development
+**Responsibilities:** Input normalization, basic feature extraction, sensory adaptation.
 
-**Responsibilities**: Input normalization and preprocessing, basic feature extraction pipelines, sensory adaptation.
+**Current:** `Receptor` (wraps data, `point(index)` access), `TensorReceptor` (core `get_item` + `comparison_passive()`/`comparison_active()` shortcuts).
 
-**Current implementation**: `Receptor` (wraps any data, `point(index)` element access) and `TensorReceptor` (`point(index)` via `core.get_item`, `comparison_passive()`/`comparison_active()` shortcuts to core modes). **Details**: [Cognitive Layer APIs — sense layer](../api/cognitive-layers.md#sense-layer)
+→ [Cognitive Layer APIs — Sense](../api/cognitive-layers.md#sense-layer)
 
-**Design ideas**: standardized input interfaces for different data types, automatic dimension detection, sensory attention mechanisms (spatial/temporal), adaptation to input statistics.
+### Layer 3: Memory 🟡 Early
 
-### Layer 3: Memory Layer
+**Responsibilities:** Short/long-term storage, consolidation, retrieval, dual-mode database.
 
-**Status**: 🟡 Early Development (functional memory backends implemented)
+**Current:** `Memory` (lifecycle with pluggable rules), `Status` flags, `MapMemory` (dict-backed, atomic transactions), `TableMemory` (nested-key), `DatabaseMemory` (SQLite), wrappers `MemoryWrap`/`MemoryWrapPool`/`MemoryWrapMap`.
 
-**Responsibilities**: Short/long-term memory storage, memory consolidation, retrieval, dual-mode database (passive + active).
+→ [Cognitive Layer APIs — Memory](../api/cognitive-layers.md#memory-layer)
 
-**Current implementation**: Lifecycle memory (`BaseMemory`/`Memory` with pluggable rules), `Status` flag (READ/WRITE/EXECUTE), `MapMemory` (dict-backed, transactions, atomic commit), `TableMemory` (nested-key convenience), `DatabaseMemory` (SQLite-backed), wrappers `MemoryWrap`/`MemoryWrapPool`/`MemoryWrapMap` with hierarchical tagging, `Transaction`. **Details**: [Cognitive Layer APIs — memory layer](../api/cognitive-layers.md#memory-layer)
+### Layer 4: Brain 🟡 Partial
 
-**Design ideas**: key-value store abstraction, vector similarity search, memory decay and reinforcement, episodic vs semantic memory distinction, database backend pluggability.
+**Responsibilities:** Symbolic/probabilistic logic, decision making, planning, metacognition.
 
-### Layer 4: Brain Layer
+**Current:**
+- **Symbolic logic**: `Logic`, `Variable`, `Atomic_proposition`, `Logic_bind`, `Logic_context` (graph-reachability judge)
+- **Probabilistic logic**: `event_bind`/`event_context` with relative-probability axioms, `EventBinds` cached-graph engine
+- **Reflex**: `Trigger` (trigger→callback via shared stack), `Monitor` (pure logic, all mechanisms delegated to `interface`)
 
-**Status**: 🟡 Partial (logic + reflex implemented)
+→ [Cognitive Layer APIs — Brain](../api/cognitive-layers.md#brain-layer)
 
-**Responsibilities**: Symbolic/probabilistic logic and reasoning, decision making, planning, metacognition.
+### Layer 5: Action 🔵 Exploratory
 
-**Current implementation**: Three-valued style symbolic logic (`Logic`, `Variable`, `Atomic_proposition`, `Logic_bind`, `Logic_context`, `No_limit`), probabilistic logic (`UnionEvent`/`IntersectionEvent`/`GlobalEvent`, `event_bind`, `event_context`), reflex (`Trigger` binds trigger→callback via shared result stack; `Monitor` is pure monitoring logic — all mechanisms delegated to `interface`). **Details**: [Cognitive Layer APIs — brain layer](../api/cognitive-layers.md#brain-layer)
+**Responsibilities:** Action selection/execution, motor control, environment interaction.
 
-**Design ideas**: three-valued logic (addressing hallucination), rule-based reasoning engine, goal hierarchy management, planning with subgoals, confidence estimation.
+**Current:** `ExecuterDriver` — ordered callable list; `call_all` runs strictly in order on a delegated background worker (non-blocking, `wait`/timeout, per-item `out`/`err` via `ActionResult`).
 
-### Layer 5: Action Layer
+→ [Cognitive Layer APIs — Action](../api/cognitive-layers.md#action-layer)
 
-**Status**: 🔵 Exploratory Development
+### Layer 6: Generate 🔵 Exploratory
 
-**Responsibilities**: Action selection/execution, motor control, environment interaction, outcome evaluation, reflex arcs.
+**Responsibilities:** Language/image/signal generation, output formatting.
 
-**Current implementation**: `ExecuterDriver` — ordered callable list with indexed invocation. **Details**: [Cognitive Layer APIs — action layer](../api/cognitive-layers.md)
+**Current:** `Generator` (applies callable), `TensorGenerator` (`generate(func)` unified entry + `set_point`), `copy_region` region fill.
 
-**Design ideas**: action primitive library, action sequencing, feedback-based adjustment, exploration vs exploitation balance, innate vs learned reflexes.
+→ [Cognitive Layer APIs — Generate](../api/cognitive-layers.md#generate-layer)
 
-### Layer 6: Generate Layer
+### Layer 7: Extension 🔴 Skeleton
 
-**Status**: 🔵 Exploratory Development
+**Responsibilities:** Specialized capabilities, cross-modal integration, plugin system.
 
-**Responsibilities**: Language/image/signal generation, output formatting, expression of internal states.
+**Current:** Empty package.
 
-**Current implementation**: `Generator` (applies a callable to wrapped data), `TensorGenerator` (uniform `generate(func, ...)` delegation entry + `set_point` via the core `set_item` protocol; module-level `copy_region` region fill) **Details**: [Cognitive Layer APIs — generate layer](../api/cognitive-layers.md)
-
-**Design ideas**: template-based generation, compositional generation, style control, multi-modal output generation.
-
-### Layer 7: Extension Layer
-
-**Status**: 🔴 Skeleton (empty package)
-
-**Responsibilities**: Specialized capabilities, cross-modal integration, plugin system for extensions.
-
-**Design ideas**: plugin architecture, cross-modal association, meta-learning capabilities, social cognition modules.
+---
 
 ## Cross-Cutting Modules
 
-- **`interface`** — system/process control, call containers (Python modules & native libraries), IO/socket/pipe/file communication, thread/process locks & shared arrays & `run_in_thread`, blocking async event host `AsyncRunner` and periodic task host `EventLoop`, context tools. Imports cleanly.
-- **`data`** — `DataWrap` generic carrier; `Tensor`/`SafeTensor`/`ParallelTensor` over `core.vector_map_as_tensor`. Imports cleanly.
-- **`test_tool`** — `Timer` (`mark`/`get_time`/`reset`), `perf_count = time.perf_counter`. Stable.
-- **`app`** — skeleton aggregation of cross-layer functionality (planned).
+| Module | Details |
+|--------|---------|
+| `interface` | System/process control, call containers, IO/socket/pipe/file communication, locks/shared arrays/threads, `AsyncRunner`/`EventLoop`, context tools. Stdlib only. Imports cleanly. |
+| `data` | `DataWrap` carrier; `Tensor`/`SafeTensor`/`ParallelTensor` over core tensor. Imports cleanly. |
+| `test_tool` | `Timer`, `perf_count`, `ResultManager`, `MemoryProbe`, `ErrorWatcher`, `TraceProbe`, decorators. Stable. |
+| `app` | Skeleton aggregation (planned). |
 
-Full class-level details: [Cognitive Layer APIs](../api/cognitive-layers.md)
+→ [Cognitive Layer APIs](../api/cognitive-layers.md)
 
-## Current State Assessment (v0.4.3)
+---
+
+## Current State
 
 ### Strengths
+
 - Clear architectural vision with strong neuroscience inspiration
-- Production-ready core layer with solid, well-tested implementation
-- Clean separation of concerns and dependency direction (bottom-up, layers never depend on each other)
+- Production-ready core with solid, well-tested implementation
+- Clean separation of concerns and dependency direction (layers never depend on each other)
 - Dual-mode philosophy provides conceptual coherence
 - Memory layer has functional backends (map/table/database) with transaction support
-- Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system (Monitor delegated to `interface` mechanisms)
-- Three backends fully API-aligned with zero-warning C code; v0.4.2 adds empty-input hardening, exhaustive malloc checks, and ARM/piwheels C99 compatibility; v0.4.3 adds 18 C-level fixes (memory safety, single-fire callbacks, step=0 protection) with no API change, protocol-style logic layers (relative-probability axioms, cached-graph engines) and default dict-protocol implementations (mapper / generate)
+- Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system
+- Three backends fully API-aligned with zero-warning C code; v0.4.3 adds memory-safety fixes, protocol-style logic layers, and default dict-protocol implementations
 
 ### Gaps
-- Action and generation layers only have minimal primitives
+
+- Action and generation layers have minimal primitives
 - Extension layer is an empty skeleton
 - No clear roadmap for layer-by-layer development
 
 ### Recommendations
-1. **Prioritize memory layer** as the next milestone — it's the bridge from perception to cognition
-2. **Flesh out brain layer** with more reasoning capabilities
+
+1. **Prioritize memory layer** — bridge from perception to cognition
+2. **Flesh out brain layer** — more reasoning capabilities
 3. **Define clear interfaces** between layers before extensive implementation
 4. **Build vertical demos** showing multiple layers working together
 
 ---
 
-**Next**: [Backend Management System](backend-system.md) — Multi-backend dynamic loading
+**Next:** [Backend Management System](backend-system.md) · [Modular Architecture](modular-architecture.md)

@@ -160,3 +160,18 @@ def default_judge_func(context, a, b, return_path=False, graph_factory=DirectedG
 
 
 
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Logic",
+    "No_limit",
+    "Variable",
+    "UnsupportedError",
+    "LogicError",
+    "Atomic_proposition",
+    "Logic_bind",
+    "Logic_context",
+    "default_judge_func",
+)

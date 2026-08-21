@@ -26,6 +26,11 @@ COS_API Data* Data_create(int dimension, const int shape[]) {
     self->dimension = dimension;
     self->shape = (int*)calloc((size_t)(dim), sizeof(int));
     if (!self->shape) { free(self); return NULL; }
+    if (dimension > 0 && shape == NULL) {
+        free(self->shape);
+        free(self);
+        return NULL;
+    }
     if (dimension > 0) memcpy(self->shape, shape, (size_t)(dimension) * sizeof(int));
     self->strides = (int*)calloc((size_t)(dim), sizeof(int));
     if (!self->strides) { free(self->shape); free(self); return NULL; }
@@ -154,6 +159,9 @@ COS_API void VectorMap_free(VectorMap *self) {
 
 COS_API double VectorMap_get(const VectorMap *self, const int index[]) {
     if (!self || !index) return 0.0;
+    for (int i = 0; i < self->dimension; ++i) {
+        if (index[i] < 0 || index[i] >= self->shape[i]) return 0.0;
+    }
     int offset = self->start;
     for (int i = 0; i < self->dimension; ++i) {
         offset += index[i] * self->strides[i];
@@ -164,6 +172,9 @@ COS_API double VectorMap_get(const VectorMap *self, const int index[]) {
 
 COS_API void VectorMap_set(VectorMap *self, const int index[], double value) {
     if (!self || !index) return;
+    for (int i = 0; i < self->dimension; ++i) {
+        if (index[i] < 0 || index[i] >= self->shape[i]) return;
+    }
     int offset = self->start;
     for (int i = 0; i < self->dimension; ++i) {
         offset += index[i] * self->strides[i];
@@ -174,7 +185,7 @@ COS_API void VectorMap_set(VectorMap *self, const int index[], double value) {
 }
 
 COS_API int VectorMap_len(const VectorMap *self) {
-    if (!self) return 0;
+    if (!self || self->p < 0 || self->p >= self->dimension) return 0;
     return self->shape[self->p];
 }
 
@@ -182,7 +193,10 @@ COS_API double VectorMap_mean(const VectorMap *self) {
     if (!self) return 0.0;
     if (self->dimension < 0) return 0.0;
     int total = 1;
-    for (int i = 0; i < self->dimension; ++i) total *= self->shape[i];
+    for (int i = 0; i < self->dimension; ++i) {
+        if (self->shape[i] > 0 && total > INT_MAX / self->shape[i]) { total = 0; break; }
+        total *= self->shape[i];
+    }
     if (total == 0) return 0.0;
     double sum = 0.0;
     int *indices = (int*)calloc((size_t)(self->dimension), sizeof(int));
@@ -212,7 +226,10 @@ COS_API double VectorMap_variance(const VectorMap *self) {
     if (!self) return 0.0;
     if (self->dimension < 0) return 0.0;
     int total = 1;
-    for (int i = 0; i < self->dimension; ++i) total *= self->shape[i];
+    for (int i = 0; i < self->dimension; ++i) {
+        if (self->shape[i] > 0 && total > INT_MAX / self->shape[i]) { total = 0; break; }
+        total *= self->shape[i];
+    }
     if (total == 0) return 0.0;
     double sum = 0.0;
     double sum_sq = 0.0;
@@ -243,7 +260,8 @@ COS_API double VectorMap_variance(const VectorMap *self) {
 }
 
 COS_API VectorMap* VectorMap_subview(const VectorMap *self, int index) {
-    if (!self || index < 0 || index >= self->shape[self->p]) return NULL;
+    if (!self || self->p < 0 || self->p >= self->dimension) return NULL;
+    if (index < 0 || index >= self->shape[self->p]) return NULL;
     int new_start = self->start + index * self->strides[self->p];
     int new_end = new_start + self->strides[self->p];
     int new_p = self->p + 1;

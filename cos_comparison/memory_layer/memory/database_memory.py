@@ -45,3 +45,9 @@ class DatabaseMemory(Memory):
             return 1
         self.cursor.executemany(command,args)
         return 0
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "DatabaseMemory",
+)

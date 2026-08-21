@@ -155,7 +155,7 @@ class Monitor:
     def run(self, *args, **kwargs):
         return self.runner(self.poller, *args, **kwargs)
 
-    def maintrain(self, *args, **kwargs):
+    def maintain(self, *args, **kwargs):
         return self.maintainer(self.run, *args, **kwargs)
 
     def stop(self, *args, **kwargs):

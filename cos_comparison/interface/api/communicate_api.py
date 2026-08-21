@@ -125,3 +125,16 @@ class FileCommunicate(IOCommunicate):
                          reader=io_type.read,
                          writer=io_type.write,
                          closer=io_type.close)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "BaseCommunicate",
+    "Communicate",
+    "IOCommunicate",
+    "FdCommunicate",
+    "PIPECommunicate",
+    "SocketCommunicate",
+    "FileCommunicate",
+)

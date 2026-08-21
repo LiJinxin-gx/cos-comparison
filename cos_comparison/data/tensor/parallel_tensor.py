@@ -73,3 +73,12 @@ class ParallelTensor(Tensor):
         # (start, strides, offset, ...) in kwargs is still forwarded completely.
         super().__init__(vector=vector,shape=shape,**kwargs)
         
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Task",
+    "SafeTensor",
+    "ParallelTensor",
+)

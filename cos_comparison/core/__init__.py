@@ -11,7 +11,7 @@ for maximum runtime performance while maintaining full extensibility.
 import importlib
 import json
 import os.path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # -------------------------------------------------------------------
 # 1. Configuration
@@ -87,14 +87,17 @@ _backend: Dict[str, Any] = {}
 _current_backend_name: Optional[str] = None
 _module_globals = globals()
 
-# High-frequency core APIs that are directly injected into module namespace
-# for zero-overhead access, __getattr__ remains as fallback for other attributes
-_HOT_API = {
-    "create_void_list", "load_as_default_data", "infer_shape", "vector_map_as_tensor",
-    "vector_chain_compute", "set_item", "get_item",
-    "_cos", "_mod", "_cosmod", "_default_algorithm",
-    "NaN",
-}
+# Every backend public export is hot-injected into the module namespace
+# for zero-overhead access; __getattr__ remains as a fallback for
+# attributes that are not injected.
+_HOT_API: Set[str] = set()   # names currently injected into module globals
+
+# Module-level API (backend exports are appended on load; private names
+# such as _cos are exported deliberately).
+__all__ = ["get_mode", "get_available_backends", "set_mode"]
+
+# Names owned by this module; never overwritten by backend injection.
+_SELF_NAMES = frozenset(("get_mode", "get_available_backends", "set_mode", "__all__"))
 
 
 def _load_backend(module_name: str) -> bool:
@@ -111,7 +114,6 @@ def _load_backend(module_name: str) -> bool:
         
         # Build new backend dict
         new_backend = {}
-        new_hot = {}
         for attr_name in public_attrs:
             if attr_name.startswith("__") and attr_name.endswith("__"):
                 continue
@@ -120,8 +122,6 @@ def _load_backend(module_name: str) -> bool:
             if attr is None:
                 continue
             new_backend[attr_name] = attr
-            if attr_name in _HOT_API:
-                new_hot[attr_name] = attr
         
         # Backfill public APIs that the loaded backend does not expose from the
         # pure Python backend, keeping the external surface identical across
@@ -136,8 +136,6 @@ def _load_backend(module_name: str) -> bool:
                     _fill_attr = getattr(_pure_mod, _fill, None)
                     if _fill_attr is not None:
                         new_backend[_fill] = _fill_attr
-                        if _fill in _HOT_API:
-                            new_hot[_fill] = _fill_attr
             except Exception:
                 pass
 
@@ -157,18 +155,24 @@ def _load_backend(module_name: str) -> bool:
                     _norm_no_done = None
                 if _norm_no_done is not None:
                     new_backend["no_done"] = _norm_no_done
-                    if "no_done" in new_hot:
-                        new_hot["no_done"] = _norm_no_done
 
         # Replace old backend state
         # Remove old hot APIs
         for old_name in _HOT_API:
             if old_name in _module_globals:
                 del _module_globals[old_name]
-        
+        _HOT_API.clear()
+
         _backend.clear()
         _backend.update(new_backend)
-        _module_globals.update(new_hot)
+        # Hot-inject the full public surface (skip this module's own names)
+        for _name, _attr in new_backend.items():
+            if _name in _SELF_NAMES:
+                continue
+            _module_globals[_name] = _attr
+            _HOT_API.add(_name)
+            if _name not in __all__:
+                __all__.append(_name)
         
         _current_backend_name = module_name
         return True

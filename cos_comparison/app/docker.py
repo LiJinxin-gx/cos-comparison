@@ -34,3 +34,11 @@ class Docker(BaseDocker):
         To start docker to run.
         """
         return self.starter(self.run)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "BaseDocker",
+    "Docker",
+)

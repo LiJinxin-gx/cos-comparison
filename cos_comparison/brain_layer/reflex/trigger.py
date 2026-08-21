@@ -37,3 +37,12 @@ class Trigger:
     def stack_operate(self,caller,*args,**kwargs):
         return caller(self,self.stack,*args,**kwargs)
 
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Empty",
+    "DEVNULL",
+    "Trigger",
+)

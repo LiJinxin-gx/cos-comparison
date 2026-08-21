@@ -1,179 +1,170 @@
 # Getting Started
 
-This guide will help you get up and running with cos-comparison in 5 minutes.
+5-minute guide to cos-comparison.
+
+## Contents
+
+- [Installation](#installation)
+- [Quick Examples](#quick-examples)
+- [Basics](#basics)
+- [Tensors](#tensors)
+- [Common Use Cases](#common-use-cases)
+- [Dimensions](#dimensions)
+- [Backend Management](#backend-management)
+- [Troubleshooting](#troubleshooting)
+
+---
 
 ## Installation
-
-### Basic Installation
 
 ```bash
 pip install cos-comparison
 ```
 
-This installs the package. The installer will automatically attempt to compile C acceleration backends during installation; if no C compiler is available, it will fall back to the pure Python backend automatically, which works out of the box with zero dependencies.
-
-### Verify Installation
+C backends compile automatically if a compiler is available; otherwise the pure Python backend works with zero dependencies.
 
 ```python
 import cos_comparison
 print(cos_comparison.__version__)
-
 from cos_comparison import core as cc
-print(cc.get_mode())          # enabled backends, e.g. ('.cos_comparison_pydll', ...)
-print(cc.get_available_backends())  # all configured backends
+print(cc.get_mode())  # enabled backends
 ```
+
+---
 
 ## Quick Examples
 
-### 1D Signal: Detect a Step Transition
+### 1D Step Detection
 
 ```python
 from cos_comparison import core as cc
 
 data = [1.0, 1.0, 1.0, 5.0, 5.0, 5.0]
 result = cc.cos_comparison_passive_1d(data, window_size=(2,), step=(1,), d=(1,))
-
-print("Input:", data)
-print("Output:", list(result))
+# Low similarity at the 1.0→5.0 transition = edge detected
 ```
 
-**What's happening**: Two windows of size 2 slide across the data, offset by 1 position (displacement `d=1`). Similarity between windows is computed at each position — low similarity = big difference = edge/transition.
+Two windows of size 2 slide across the data, offset by `d=1`. Low similarity = transition/edge.
 
-### 2D Image: Detect Vertical Edges
+### 2D Vertical Edges
 
 ```python
-image = [
-    [1, 1, 1, 0, 0, 0],
-    [1, 1, 1, 0, 0, 0],
-    [1, 1, 1, 0, 0, 0],
-    [1, 1, 1, 0, 0, 0],
-    [1, 1, 1, 0, 0, 0],
-    [1, 1, 1, 0, 0, 0],
-]
-
 vertical_edges = cc.cos_comparison_passive_2d(
-    image, window_size=(3, 3), step=(1, 1), d=(0, 1)   # compare with right neighbor
-)
-
-for row in vertical_edges:
-    print([f"{x:.2f}" for x in row])
+    image, window_size=(3, 3), step=(1, 1), d=(0, 1))  # compare with right neighbor
 ```
 
-### 1D Template Matching (Active Mode)
+### 1D Template Matching
 
 ```python
-data = [0, 0, 1, 2, 3, 2, 1, 0, 0]
-kernel = [1, 2, 3, 2, 1]
-
-result = cc.cos_comparison_active_1d(data, kernel=kernel, step=(1,))
-print("Match scores:", [f"{x:.2f}" for x in result])
+result = cc.cos_comparison_active_1d(
+    [0, 0, 1, 2, 3, 2, 1, 0, 0],
+    kernel=[1, 2, 3, 2, 1],
+    step=(1,))
+# Peak indicates where the pattern occurs
 ```
 
-## Understanding the Basics
+---
 
-- **Two modes**: Passive (self-similarity, parameter `d`) and Active (template matching, parameter `kernel`) — see [Dual Working Modes](principles/dual-mode.md)
-- **Three similarity algorithms**: `_cos` (direction), `_mod` (magnitude), `_cosmod` (both, default) — see [Similarity Measures](principles/similarity-measures.md)
-- **Key parameters**: `window_size`, `step`, `d` (passive), `kernel` (active), `algorithm` — see [Core Module — Common Parameters](api/core.md#common-parameters)
+## Basics
 
-## Working with Tensors
+| Concept | Parameter | Details |
+|---------|-----------|---------|
+| **Passive mode** | `d` | Self-similarity: two offset windows within the same data |
+| **Active mode** | `kernel` | Template matching: sliding kernel vs data windows |
+| **Algorithm** | `algorithm` | `_cos` (direction), `_mod` (magnitude), `_cosmod` (both, default) |
+| **Window** | `window_size` | Tuple matching data dimension, e.g. `(3, 3)` for 2D |
+| **Step** | `step` | Sliding stride; larger = fewer output points = faster |
+
+→ [Dual Modes](principles/dual-mode.md) · [Similarity Measures](principles/similarity-measures.md) · [Common Parameters](api/core.md#common-parameters)
+
+---
+
+## Tensors
 
 The core uses a stride-based tensor view (`vector_map_as_tensor`) with NumPy-like indexing:
 
 ```python
 from cos_comparison import core as cc
 
-# Create a tensor directly
-t = cc.create_void_list((3, 3))        # 3x3 tensor filled with 0.0
+# Create and fill
+t = cc.create_void_list((3, 3))        # 3×3 filled with 0.0
 t[1, 1] = 123.0                        # direct tuple assignment
 
-# Load nested data into a tensor
+# Load nested data
 v = cc.load_as_default_data([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
 
 # Slicing creates zero-copy views
-view = v[1:3]
-print(view.shape)          # (2, 3)
-print(v.mean())            # 5.0
-print(v.variance())        # ~6.667
+view = v[1:3]                          # shape (2, 3)
+v.mean()                               # 5.0
+v.variance()                           # ~6.667
 
-# Step slices, negative indices, dimension collapse — NumPy style
-print(v[:, ::-1].shape)    # (3, 3), reversed columns
-print(v[0, 0])             # 1.0, scalar after full indexing
+# Step slices, negative indices, dimension collapse
+v[:, ::-1].shape                       # (3, 3) reversed columns
+v[0, 0]                                # 1.0 (scalar after full indexing)
 ```
+
+---
 
 ## Common Use Cases
 
-### 1. Edge Detection
+### Edge Detection
 
 ```python
-horizontal = cc.cos_comparison_passive_2d(image, window_size=(3, 3), step=(1, 1), d=(1, 0))  # bottom neighbor
-vertical   = cc.cos_comparison_passive_2d(image, window_size=(3, 3), step=(1, 1), d=(0, 1))  # right neighbor
+# Horizontal edges (compare with bottom neighbor)
+h = cc.cos_comparison_passive_2d(image, window_size=(3, 3), d=(1, 0))
+# Vertical edges (compare with right neighbor)
+v = cc.cos_comparison_passive_2d(image, window_size=(3, 3), d=(0, 1))
 ```
 
-### 2. Local Statistics
+### Local Statistics
 
 ```python
-blurred  = cc.mean_local_2d(image, local_size=(5, 5), step=(1, 1))   # local mean (average pooling)
-variance = cc.local_variance_2d(image, local_size=(5, 5), step=(1, 1))  # texture strength
+blurred  = cc.mean_local_2d(image, local_size=(5, 5))      # average pooling
+variance = cc.local_variance_2d(image, local_size=(5, 5))  # texture strength
 ```
 
-## Working with Different Dimensions
+---
+
+## Dimensions
 
 ```python
 # 1D (signals, audio, time series)
-result = cc.cos_comparison_passive_1d(signal, window_size=(10,), step=(1,), d=(1,))
+cc.cos_comparison_passive_1d(signal, window_size=(10,), d=(1,))
 
 # 2D (images, grids, matrices)
-result = cc.cos_comparison_passive_2d(image, window_size=(3, 3), step=(1, 1), d=(1, 0))
+cc.cos_comparison_passive_2d(image, window_size=(3, 3), d=(1, 0))
 
 # 3D (video, volumetric data)
-result = cc.cos_comparison_passive_3d(volume, window_size=(3, 3, 3), step=(1, 1, 1), d=(1, 0, 0))
+cc.cos_comparison_passive_3d(volume, window_size=(3, 3, 3), d=(1, 0, 0))
 
 # N-dimensional (generic)
-result = cc.cos_comparison_passive(data, window_size=(3, 3, 3, 3), step=(1, 1, 1, 1), d=(1, 0, 0, 0))
+cc.cos_comparison_passive(data, window_size=(3, 3, 3, 3), d=(1, 0, 0, 0))
 ```
+
+---
 
 ## Backend Management
 
 ```python
-print(cc.get_mode())                      # current backend priority
-cc.set_mode("cos_comparison")             # force pure Python (debugging)
-cc.set_mode(["cos_comparison_pydll", "cos_comparison_c", "cos_comparison"])  # custom order
+cc.get_mode()                  # current backend priority
+cc.set_mode("cos_comparison")  # force pure Python for debugging
 ```
 
-Backend names may be written with or without the leading dot (e.g. `"cos_comparison"` or `".cos_comparison"`). See [Backend Management System](architecture/backend-system.md) for details.
-
-## Next Steps
-
-- **[Passive Mode API](api/passive-mode.md)** — Detailed reference for passive mode
-- **[Active Mode API](api/active-mode.md)** — Detailed reference for active mode
-- **[Similarity Measures](principles/similarity-measures.md)** — Understand the algorithms
-- **[Architecture](architecture/seven-layer.md)** — Learn about the seven-layer design
-- **[Cognitive Layer APIs](api/cognitive-layers.md)** — Memory, logic, interface and more
-
-## Troubleshooting
-
-### ImportError: No module named 'cos_comparison'
-
-```bash
-pip install cos-comparison
-```
-
-### All results are 1.0
-
-Your data might be uniform. Try different data or parameters.
-
-### All results are 0.0
-
-Windows might be completely different. Check your data and parameters.
-
-### ValueError: effectless args.
-
-The window (+ displacement `d` in passive mode) does not fit inside the data bounds. Increase the data size or shrink `window_size` / `d`.
-
-### Importing non-core packages
-
-`cos_comparison.interface`, `cos_comparison.data`, and `cos_comparison.generate_layer` import cleanly in a fresh interpreter (verified). The core module remains the production-ready center; the non-core layers (`sense / memory / brain / action / generate`) keep evolving — see the [Cognitive Layer APIs](api/cognitive-layers.md) for their current surface.
+→ [Backend Management System](architecture/backend-system.md)
 
 ---
 
-**Need help?** [Open an issue on GitHub](https://github.com/LiJinxin-gx/cos-comparison/issues)
+## Troubleshooting
+
+| Symptom | Cause / Fix |
+|---------|-------------|
+| All results `1.0` | Data is uniform; try different data or parameters |
+| All results `0.0` | Windows are completely different; check data/parameters |
+| `ValueError: effectless args.` | Window (+ `d` in passive) doesn't fit; enlarge data or shrink window/`d` |
+| `ImportError` | No backend available; ensure `pip install cos-comparison` succeeded |
+
+> Non-core packages (`interface`, `data`, `generate_layer`) import cleanly in a fresh interpreter. The core module remains production-ready; non-core layers keep evolving — see [Cognitive Layer APIs](api/cognitive-layers.md).
+
+---
+
+**Need help?** [Open an issue](https://github.com/LiJinxin-gx/cos-comparison/issues)

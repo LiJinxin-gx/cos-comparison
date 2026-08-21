@@ -168,11 +168,28 @@ static PyObject* Vector_get_vector(Vector *self, void *closure) {
     int pos = 0;
     
     while (1) {
-        int flat = self->start + self->offset;
+        long long flat = (long long)self->start + self->offset;
         for (int i = 0; i < self->dimension; ++i) {
-            flat += self->strides[i] * (self->start_offset[i] + idx[i] * self->step_offset[i]);
+            long long term = (long long)self->strides[i];
+            long long off = (long long)self->start_offset[i] +
+                            (long long)idx[i] * self->step_offset[i];
+            if (term != 0 && off != 0) {
+                /* guard the multiplication against long long overflow */
+                if ((off > 0 && (term > LLONG_MAX / off || term < LLONG_MIN / off)) ||
+                    (off < 0 && (term > LLONG_MIN / off || term < LLONG_MAX / off))) {
+                    PyMem_Free(idx); Py_DECREF(list);
+                    PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+                    return NULL;
+                }
+            }
+            flat += term * off;
         }
-        PyList_SET_ITEM(list, pos++, PyFloat_FromDouble(data[flat]));
+        if (flat < 0 || flat > INT_MAX) {
+            PyMem_Free(idx); Py_DECREF(list);
+            PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+            return NULL;
+        }
+        PyList_SET_ITEM(list, pos++, PyFloat_FromDouble(data[(int)flat]));
         
         /* Increment with carry */
         int dim = self->dimension - 1;

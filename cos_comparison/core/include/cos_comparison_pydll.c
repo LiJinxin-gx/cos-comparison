@@ -103,12 +103,22 @@ static Data* _pyobj_to_data(PyObject *obj) {
         memcpy(data->shape, v->shape, ndim * sizeof(int));
         data->strides = (int*)malloc((size_t)(ndim) * sizeof(int));
         if (!data->strides) { free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
-        int stride = 1;
+        long long stride = 1;
         for (int i = ndim - 1; i >= 0; --i) {
-            data->strides[i] = stride;
-            stride *= data->shape[i];
+            data->strides[i] = (int)stride;
+            if (data->shape[i] > 0 && stride > LLONG_MAX / (long long)data->shape[i]) {
+                free(data->strides); free(data->shape); free(data);
+                PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+                return NULL;
+            }
+            stride *= (long long)data->shape[i];
+            if (stride > INT_MAX) {
+                free(data->strides); free(data->shape); free(data);
+                PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+                return NULL;
+            }
         }
-        int total = stride;
+        int total = (int)stride;
         /* Always copy data to ensure contiguous, handles non-contiguous views */
         data->data = (double*)malloc((size_t)(total) * sizeof(double));
         if (!data->data) { free(data->strides); free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
@@ -122,11 +132,28 @@ static Data* _pyobj_to_data(PyObject *obj) {
         int pos = 0;
         if (total > 0) {
         while (1) {
-            int flat = v->start + v->offset;
+            long long flat = (long long)v->start + v->offset;
             for (int i = 0; i < ndim; ++i) {
-                flat += v->strides[i] * (v->start_offset[i] + idx[i] * v->step_offset[i]);
+                long long term = (long long)v->strides[i];
+                long long off = (long long)v->start_offset[i] +
+                                (long long)idx[i] * v->step_offset[i];
+                if (term != 0 && off != 0) {
+                    /* guard the multiplication against long long overflow */
+                    if ((off > 0 && (term > LLONG_MAX / off || term < LLONG_MIN / off)) ||
+                        (off < 0 && (term > LLONG_MIN / off || term < LLONG_MAX / off))) {
+                        free(indices); free(idx); Data_free(data);
+                        PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+                        return NULL;
+                    }
+                }
+                flat += term * off;
             }
-            indices[pos++] = flat;
+            if (flat < 0 || flat > INT_MAX) {
+                free(indices); free(idx); Data_free(data);
+                PyErr_SetString(PyExc_OverflowError, "tensor is too large");
+                return NULL;
+            }
+            indices[pos++] = (int)flat;
             int dim = ndim - 1;
             while (dim >= 0) {
                 idx[dim]++;
@@ -704,16 +731,13 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
                 PyErr_Format(PyExc_ValueError, "start[%d] cannot be negative", i);
                 return NULL;
             }
-            /* Bounds check with step */
-            if (shape[i] > 0 && start[i] + (shape[i] - 1) * step[i] >= full_shape[i]) {
-                int start_val = start[i];
-                int shape_val = shape[i];
-                int step_val = step[i];
-                int bound_val = full_shape[i];
+            /* Bounds check with step (long long: guard int overflow) */
+            long long end_val = (long long)start[i] + ((long long)shape[i] - 1) * step[i];
+            if (shape[i] > 0 && end_val >= (long long)full_shape[i]) {
                 free(start); free(shape); free(step); free(full_shape);
                 PyErr_Format(PyExc_ValueError,
-                             "start[%d] + (shape[%d]-1)*step[%d] = %d out of bounds for dimension size %d",
-                             i, i, i, start_val + (shape_val - 1) * step_val, bound_val);
+                             "start[%d] + (shape[%d]-1)*step[%d] = %lld out of bounds for dimension size %d",
+                             i, i, i, end_val, full_shape[i]);
                 return NULL;
             }
         }
@@ -1619,15 +1643,40 @@ Data* cos_local_mean(const Data *data,
         output = _compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
-    int N = 1;
-    for (int i = 0; i < dim; ++i) N *= window_size[i];
+    long long N = 1;
+    for (int i = 0; i < dim; ++i) {
+        if (N > LLONG_MAX / (long long)window_size[i]) {
+            free(num); if (!output_is_data) Data_free(output);
+            PyErr_SetString(PyExc_OverflowError, "local window too large");
+            return NULL;
+        }
+        N *= (long long)window_size[i];
+        if (N > INT_MAX) {
+            free(num); if (!output_is_data) Data_free(output);
+            PyErr_SetString(PyExc_OverflowError, "local window too large");
+            return NULL;
+        }
+    }
     if (N <= 0) { free(num); if (!output_is_data) Data_free(output); return NULL; }
     /* Precompute window strides so weights are indexed in row-major order */
     int *wstrides = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!wstrides) { free(num); if (!output_is_data) Data_free(output); PyErr_NoMemory(); return NULL; }
     {
-        int acc = 1;
-        for (int i = dim - 1; i >= 0; --i) { wstrides[i] = acc; acc *= window_size[i]; }
+        long long acc = 1;
+        for (int i = dim - 1; i >= 0; --i) {
+            wstrides[i] = (int)acc;
+            if (acc > LLONG_MAX / (long long)window_size[i]) {
+                free(num); free(wstrides); if (!output_is_data) Data_free(output);
+                PyErr_SetString(PyExc_OverflowError, "local window too large");
+                return NULL;
+            }
+            acc *= (long long)window_size[i];
+            if (acc > INT_MAX) {
+                free(num); free(wstrides); if (!output_is_data) Data_free(output);
+                PyErr_SetString(PyExc_OverflowError, "local window too large");
+                return NULL;
+            }
+        }
     }
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -1649,13 +1698,13 @@ Data* cos_local_mean(const Data *data,
             sum_x = 0.0;
             while (inner_flag > 0) {
                 if (inner_flag == dim) {
-                    int wflat = 0;
+                    long long wflat = 0;
                     for (int i = 0; i < dim; ++i) {
                         data_place[i] = start[i] + step[i] * (num_list[i+1] - 1) + (inner_list[i+1] - 1);
-                        wflat += (inner_list[i+1] - 1) * wstrides[i];
+                        wflat += (long long)(inner_list[i+1] - 1) * wstrides[i];
                     }
                     double x = Data_get(data, data_place);
-                    sum_x += weights ? weights[wflat] * x : x;
+                    sum_x += weights ? weights[(int)wflat] * x : x;
                     if (inner_list[dim] < window_size[dim - 1]) {
                         inner_list[dim]++;
                     } else {
@@ -1735,8 +1784,20 @@ Data* cos_local_variance(const Data *data,
         output = _compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
-    int N = 1;
-    for (int i = 0; i < dim; ++i) N *= window_size[i];
+    long long N = 1;
+    for (int i = 0; i < dim; ++i) {
+        if (N > LLONG_MAX / (long long)window_size[i]) {
+            free(num); if (!output_is_data) Data_free(output);
+            PyErr_SetString(PyExc_OverflowError, "local window too large");
+            return NULL;
+        }
+        N *= (long long)window_size[i];
+        if (N > INT_MAX) {
+            free(num); if (!output_is_data) Data_free(output);
+            PyErr_SetString(PyExc_OverflowError, "local window too large");
+            return NULL;
+        }
+    }
     if (N <= 0) { free(num); if (!output_is_data) Data_free(output); return NULL; }
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
     int *inner_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -1961,6 +2022,11 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -2246,6 +2312,11 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -2517,6 +2588,11 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -2681,6 +2757,11 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -2958,6 +3039,11 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -3247,6 +3333,11 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     if (output_obj && output_obj != Py_None) {
         saved_os = (int*)malloc((size_t)(dim) * sizeof(int));
         saved_ost = (int*)malloc((size_t)(dim) * sizeof(int));
+        if (!saved_os || !saved_ost) {
+            free(saved_os); free(saved_ost);
+            PyErr_NoMemory();
+            return NULL;
+        }
         memcpy(saved_os, output_start, dim * sizeof(int));
         memcpy(saved_ost, output_step, dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
@@ -3940,20 +4031,33 @@ static int module_exec(PyObject *module) {
     }
 
     // Add __all__ (public API list, matches pure Python backend)
-    PyObject *__all__ = Py_BuildValue("[ssssssssssssssssssssssssssssssssssssssssssss]",
-        "NaN", "sqrt",
-        "cos_comparison_passive", "cos_comparison_passive_1d", "cos_comparison_passive_2d", "cos_comparison_passive_3d", "cos_comparison_passive_4d",
-        "cos_comparison_active", "cos_comparison_active_1d", "cos_comparison_active_2d", "cos_comparison_active_3d", "cos_comparison_active_4d",
-        "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
-        "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
-        "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
-        "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod", "_convolution",
-        "vector_chain_compute",
-        "vector_map_as_tensor", "func_name_space", "default_contain",
-        "private_dict"
-    );
+    PyObject *__all__ = PyList_New(0);
     if (!__all__) {
         return -1;
+    }
+    {
+        static const char *const _all_names[] = {
+            "NaN", "sqrt",
+            "cos_comparison_passive", "cos_comparison_passive_1d", "cos_comparison_passive_2d", "cos_comparison_passive_3d", "cos_comparison_passive_4d",
+            "cos_comparison_active", "cos_comparison_active_1d", "cos_comparison_active_2d", "cos_comparison_active_3d", "cos_comparison_active_4d",
+            "cos", "cos_1d", "cos_2d", "cos_3d", "cos_4d",
+            "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
+            "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
+            "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod", "_convolution",
+            "vector_chain_compute",
+            "vector_map_as_tensor", "func_name_space", "default_contain",
+            "private_dict"
+        };
+        size_t i;
+        for (i = 0; i < sizeof(_all_names) / sizeof(_all_names[0]); ++i) {
+            PyObject *name = PyUnicode_FromString(_all_names[i]);
+            if (name == NULL || PyList_Append(__all__, name) < 0) {
+                Py_XDECREF(name);
+                Py_DECREF(__all__);
+                return -1;
+            }
+            Py_DECREF(name);
+        }
     }
     if (PyModule_AddObject(module, "__all__", __all__) < 0) {
         Py_DECREF(__all__);

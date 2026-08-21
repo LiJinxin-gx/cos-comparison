@@ -43,3 +43,12 @@ def data_match(data, template, start=None, end=None, step=None, algorithm=None,
     if low is None and high is None:
         return core.data_filter(out, lambda value: True)
     return core.threshold_filter(out, low, high, inclusive=inclusive)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Receptor",
+    "TensorReceptor",
+    "data_match",
+)

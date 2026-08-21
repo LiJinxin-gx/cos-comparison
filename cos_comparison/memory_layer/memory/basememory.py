@@ -63,3 +63,15 @@ class Memory(BaseMemory):
     def call(self,name,args=(),kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         return getattr(self.memory,name)(*args,**kwargs)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Status",
+    "ST_READ",
+    "ST_WRITE",
+    "ST_EXECUTE",
+    "BaseMemory",
+    "Memory",
+)

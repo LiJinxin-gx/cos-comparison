@@ -46,3 +46,11 @@ class Tensor(core.vector_map_as_tensor,BaseTensor):
         elif start is not None:
             kwargs["start"] = start
         super().__init__(*args,**kwargs)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "BaseTensor",
+    "Tensor",
+)

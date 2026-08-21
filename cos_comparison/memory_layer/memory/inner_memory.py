@@ -79,3 +79,13 @@ class TableMemory(MapMemory):
         return super().save(keys,value,nesting=True,create=True)
     def refer(self,keys):
         return super().refer(keys,nesting=True)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "create_map",
+    "Transaction",
+    "MapMemory",
+    "TableMemory",
+)

@@ -59,3 +59,15 @@ class CallDict:
         #CallDict.call(4)
         kwargs = kwargs if kwargs is not None else {}
         return self.dict[tag](*args,**kwargs)
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "BaseCallContainer",
+    "Module_CallContain",
+    "C_CallContainer",
+    "CDLL_CallContainer",
+    "WinDLL_CallContainer",
+    "CallDict",
+)

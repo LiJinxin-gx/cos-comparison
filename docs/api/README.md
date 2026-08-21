@@ -1,11 +1,17 @@
-﻿# API Reference
+# API Reference
 
-This section provides detailed API documentation for cos-comparison.
+Detailed API documentation for cos-comparison.
 
 ## Documents
 
-- [Core Module](core.md) — Overview of core functions, tensor types, and common parameters
-- [Passive Mode](passive-mode.md) — `cos_comparison_passive` detailed reference
-- [Active Mode](active-mode.md) — `cos_comparison_active` detailed reference
-- [Statistics Functions](statistics.md) — `mean_local`, `local_variance`, and more
-- [Cognitive Layer APIs](cognitive-layers.md) — sense, memory, mapper, logic, reflex, generate, interface, data, test tools
+| Doc | Contents |
+|-----|----------|
+| [Core Module](core.md) | Functions, tensor types, common parameters, utility details |
+| [Passive Mode](passive-mode.md) | `cos_comparison_passive` — self-similarity |
+| [Active Mode](active-mode.md) | `cos_comparison_active` — template matching |
+| [Statistics Functions](statistics.md) | `mean_local`, `local_variance` |
+| [Cognitive Layer APIs](cognitive-layers.md) | Sense, memory, brain, action, generate, interface, data, test tools |
+
+---
+
+**Related:** [Architecture](../architecture/README.md) · [Principles](../principles/README.md) · [Getting Started](../getting-started.md)

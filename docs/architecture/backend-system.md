@@ -1,84 +1,90 @@
-﻿# Backend Management System
+# Backend Management System
 
-Cos-comparison features a **multi-backend management system** that allows transparent switching between implementation backends while maintaining a unified API.
+Transparent switching between implementation backends with a unified API.
 
-## Overview
+## Contents
 
-### Backend Priority (Default)
+- [Backend Priority](#backend-priority-default)
+- [Key Features](#key-features)
+- [Loading Mechanism](#loading-mechanism)
+- [Configuration](#configuration)
+- [Public API](#public-api)
+- [API Contract](#api-contract)
+- [Custom Backends](#custom-backends)
 
-| Priority | Backend | Implementation | Relative Speed | Memory Usage | Free-thread Support |
-|----------|---------|----------------|----------------|--------------|---------------------|
-| 1 | `.cos_comparison_pydll` | Python C Extension | 100-150x | ~5–8 MB | ✅ Full (no GIL) |
-| 2 | `.cos_comparison_c` | C via ctypes | 60-80x | ~8–12 MB | ✅ Full |
-| 3 | `.cos_comparison` | Pure Python | 1x (reference) | ~22 MB | ✅ Full |
+---
 
-> Memory measurements are based on a 322×424×3 test image with 3×3 window. C backend memory is estimated from process working set, as `tracemalloc` cannot track C-level allocations.
+## Backend Priority (Default)
 
-### Key Features
+| Priority | Backend | Implementation | Speed | Memory | Free-thread |
+|----------|---------|----------------|-------|--------|-------------|
+| 1 | `.cos_comparison_pydll` | Python C Extension | 100–150× | ~5–8 MB | ✅ Full (no GIL) |
+| 2 | `.cos_comparison_c` | C via ctypes | 60–80× | ~8–12 MB | ✅ Full |
+| 3 | `.cos_comparison` | Pure Python | 1× (reference) | ~22 MB | ✅ Full |
 
-- **Automatic fallback**: If a higher-priority backend is unavailable, automatically try the next one; the pure Python backend is always unconditionally appended as the final fallback
-- **Runtime switching**: Manually switch backends at any time via `set_mode`
-- **Unified API**: All backends expose the same functions via `__all__`
-- **Hot API injection**: High-frequency core functions are injected directly into the module namespace for zero-overhead access; `__getattr__` remains as fallback for other attributes
-- **LSP compliance**: Full support for subclass operations (Liskov Substitution Principle)
-- **Enhanced PyBuffer support**: Zero-copy creation and slice assignment for buffer-protocol objects (array.array, bytes, memoryview), double and unsigned char types
-- **SIMD auto-vectorization**: Cross-compiler hints for element-wise loops, 50-100% performance improvement
-- **Free-threaded support**: GIL released during compute-heavy operations on Python 3.13+ free-threaded builds
-- **Robust error handling**: Zero division protection for all core algorithms; original exceptions preserved instead of masked by generic errors
+> Memory based on 322×424×3 image with 3×3 window. C backend memory estimated from working set (`tracemalloc` cannot track C allocations).
 
-### Memory Efficiency Analyses
+### When to Use Which
 
-1. **C Extension is most memory-efficient** — direct C-level allocation avoids Python object overhead (~1/3 to 1/5 of pure Python)
-2. **ctypes C backend has low overhead** — minimal Python objects, most memory allocated in C, zero-copy for compatible inputs
-3. **Window size inversely correlates with memory usage** — larger windows ⇒ smaller output ⇒ less memory
-4. **Algorithm choice has negligible memory impact** — cos/mod/cosmod share the same computational framework
+| Scenario | Recommendation |
+|----------|----------------|
+| Small data | Pure Python (switching overhead may not be worth it) |
+| Medium data | ctypes C (good speedup without compilation) |
+| Large data / multi-threaded | C extension (free-threaded no-GIL parallelism) |
+| Many small calls | C extension (minimizes Python overhead) |
+| Memory-constrained | C extension (lowest memory usage) |
 
-### When Performance Matters
+---
 
-- **Small data**: Pure Python is often fast enough; backend-switching overhead may not be worth it
-- **Medium data**: ctypes C backend gives good speedup without compilation requirements
-- **Large data / multi-threaded workloads**: Python C extension recommended (free-threaded no-GIL parallelism)
-- **Many small calls**: C extension minimizes Python overhead
-- **Memory-constrained environments**: C extension preferred for lowest memory usage
+## Key Features
 
-## Architecture
+- **Automatic fallback** — if a higher-priority backend is unavailable, try the next; pure Python always appended as final fallback
+- **Runtime switching** — `set_mode` at any time
+- **Unified API** — all backends expose the same functions via `__all__`
+- **Hot API injection** — high-frequency functions injected directly into module namespace for zero-overhead access; `__getattr__` fallback for others
+- **LSP compliance** — full subclass operation support
+- **Enhanced PyBuffer** — zero-copy creation and slice assignment for `array.array`, `bytes`, `memoryview` (double and unsigned char types)
+- **SIMD auto-vectorization** — cross-compiler hints for element-wise loops (50–100% improvement)
+- **Free-threaded support** — GIL released on compute-heavy operations (Python 3.13+)
+- **Robust error handling** — zero division protection; original exceptions preserved
 
-### Loading Mechanism
+### Memory Efficiency
+
+1. **C Extension** is most memory-efficient — direct C allocation avoids Python object overhead (~1/3 to 1/5 of pure Python)
+2. **ctypes C** has low overhead — minimal Python objects, zero-copy for compatible inputs
+3. **Window size inversely correlates** with memory — larger windows ⇒ smaller output ⇒ less memory
+4. **Algorithm choice** has negligible memory impact — cos/mod/cosmod share the same framework
+
+---
+
+## Loading Mechanism
 
 ```
-User imports cos_comparison.core
-          ↓
-    Load config.json
-          ↓
-  Build backend priority list
-          ↓
-Try first backend → Success? → Yes → Use it
-        ↓ No
-Try next backend → ...
-        ↓
-All failed? → Restore previous state, raise ImportError
+import core → load config.json → build priority list
+→ try each backend in order → first success wins
+→ all fail: restore previous state, raise ImportError
 ```
 
 ### Hot API + Dynamic Attribute Proxy
 
-Frequently called APIs are injected into the module namespace directly, so user code never pays the proxy lookup cost:
+High-frequency APIs are injected directly into the module namespace:
 
 ```python
 from cos_comparison import core as cc
-result = cc.cos_comparison_passive(data, ...)
+result = cc.cos_comparison_passive(data, ...)  # zero-overhead direct access
 ```
 
-High-frequency hot APIs (injected): `create_void_list`, `load_as_default_data`, `infer_shape`, `vector_map_as_tensor`, `vector_chain_compute`, `set_item`, `get_item`, `_cos`, `_mod`, `_cosmod`, `_default_algorithm`, `NaN`.
+**Injected APIs:** `create_void_list`, `load_as_default_data`, `infer_shape`, `vector_map_as_tensor`, `vector_chain_compute`, `set_item`, `get_item`, `_cos`, `_mod`, `_cosmod`, `_default_algorithm`, `NaN`.
 
-All other attributes are resolved through `__getattr__`, which forwards the lookup to the loaded backend's attribute dict; `__dir__` merges backend attributes so autocompletion works. Users never need to know which backend is actually running.
+All other attributes resolve through `__getattr__` (forwards to loaded backend); `__dir__` merges backend attributes for autocompletion.
+
+---
 
 ## Configuration
 
-### 1. config.json (Highest Priority)
+### config.json
 
 Location: `cos_comparison/core/config.json`
-
-Supports the new key-based format:
 
 ```json
 {
@@ -90,115 +96,86 @@ Supports the new key-based format:
 }
 ```
 
-Also accepts the legacy list format with plain strings:
+| Field | Description |
+|-------|-------------|
+| `name` | Backend module (leading dot optional, auto-normalized to relative import) |
+| `enabled` | Whether to consider this backend |
 
-```json
-[
-    {"name": "cos_comparison_pydll", "enabled": true},
-    {"name": "cos_comparison_c", "enabled": true},
-    {"name": "cos_comparison", "enabled": true}
-]
-```
+**Notes:**
+- Missing/invalid config silently falls back to built-in defaults
+- Pure Python `.cos_comparison` is always appended as final fallback, even if not listed
+- Set ctypes backend `"enabled": false` if prebuilt binaries are unavailable on target platform
 
-Fields:
-- `name`: Backend module name (leading dot optional; normalized to a relative import automatically)
-- `enabled`: Whether to consider this backend
+### Built-in Default
 
-Notes:
-- A missing or invalid config file silently falls back to the built-in defaults
-- The pure Python backend `.cos_comparison` is always appended as the final fallback, even if not listed
-- The ctypes backend (`.cos_comparison_c`) is enabled in both the built-in default and the shipped config.json; revert it to `"enabled": false` if prebuilt binaries are unavailable on a target platform
+If no config file exists: `.cos_comparison_pydll` → `.cos_comparison_c` → `.cos_comparison`.
 
-### 2. Built-in Default (Lowest Priority)
-
-If no config file exists, the built-in priority is used: `.cos_comparison_pydll` → `.cos_comparison_c` → `.cos_comparison`.
+---
 
 ## Public API
 
 ### `get_mode()`
 
-Returns the enabled backends in priority order (immutable tuple). Names include the leading dot (relative import form).
+Returns enabled backends in priority order (immutable tuple). Names include leading dot.
 
 ```python
-backends = cc.get_mode()
-# Returns: ('.cos_comparison_pydll', '.cos_comparison_c', '.cos_comparison')
+cc.get_mode()
+# ('.cos_comparison_pydll', '.cos_comparison_c', '.cos_comparison')
 ```
 
 ### `get_available_backends()`
 
-Returns all configured backends, including disabled ones (immutable tuple).
-
-```python
-cc.get_available_backends()
-# Returns: ('.cos_comparison_pydll', '.cos_comparison_c', '.cos_comparison')
-```
+Returns all configured backends including disabled ones (immutable tuple).
 
 ### `set_mode(backends)`
 
-Manually specify which backend(s) to use, overriding automatic mode. Names may be passed with or without the leading dot.
+Manually specify backend(s), overriding automatic mode. Names may include or omit leading dot.
 
 ```python
-cc.set_mode("cos_comparison")                              # single backend
-cc.set_mode(["cos_comparison_pydll", "cos_comparison_c", "cos_comparison"])  # tried in order
+cc.set_mode("cos_comparison")                               # single backend
+cc.set_mode(["pydll", "c", "cos_comparison"])               # tried in order
 ```
 
-- `backends`: `str` or `list`/`tuple` of `str` — backend name(s) to try, in priority order
-- **Raises** `TypeError` if `backends` is not a string or list/tuple, or any name is not a string; `ImportError` if none of the specified backends are available (previous backend state is restored)
+- `backends`: `str` or `list`/`tuple` of `str`
+- **Raises** `TypeError` for bad arguments; `ImportError` if no backend available (previous state restored)
 
-## Backend Compatibility
+---
 
-### API Contract
+## API Contract
 
-All backends must define an `__all__` list (or expose public names) covering:
+All backends must expose via `__all__`:
 
-- **Core Functions**: `cos_comparison_passive`, `cos_comparison_active`, `cos` (`cos_1d`...`cos_4d`), `mean_local`, `local_variance`
-- **Dimension Aliases**: `*_1d`, `*_2d`, `*_3d`, `*_4d` for each core function
-- **Utility Functions**: `multiple_chain`, `add_chain`, `create_void_list`, `load_as_default_data`, `load_data` (per-side start/step, silent clipping, returns copied count; natively implemented on all three backends as of v0.4.3), `infer_shape`, `get_item` / `set_item`, `vector_chain_compute`, `no_done`
-- **Similarity Functions**: `_cos`, `_mod`, `_cosmod`, `_default_algorithm` (= `_cosmod`), `private_dict` (name → algorithm mapping)
-- **Types/Classes**: `vector_map_as_tensor`, `func_name_space`, `default_contain`
-- **Constants**: `NaN` (= `float("nan")`), `sqrt` (= `math.sqrt`)
+| Category | Functions |
+|----------|-----------|
+| Core | `cos_comparison_passive`, `cos_comparison_active`, `cos` (+ `*_1d/2d/3d/4d`), `mean_local`, `local_variance` |
+| Utilities | `multiple_chain`, `add_chain`, `create_void_list`, `load_as_default_data`, `load_data`, `infer_shape`, `get_item`/`set_item`, `vector_chain_compute`, `no_done`, `data_filter`, `data_mapping`, `threshold_*` |
+| Similarity | `_cos`, `_mod`, `_cosmod`, `_default_algorithm`, `private_dict` |
+| Types | `vector_map_as_tensor`, `func_name_space`, `default_contain` |
+| Constants | `NaN`, `sqrt` |
 
-## Developing Custom Backends
+---
 
-### Requirements
+## Custom Backends
 
-1. Implement all functions in the API contract
-2. Maintain identical function signatures
-3. Return identical data structures
-4. Handle edge cases identically (zero vectors, empty inputs, etc.)
-5. Define `__all__` to declare the public API
+**Requirements:**
+1. Implement all API-contract functions with identical signatures
+2. Return identical data structures
+3. Handle edge cases identically (zero vectors, empty inputs)
+4. Define `__all__`
 
-### Naming Convention
+**Naming:** `cos_comparison_<backend_name>` (e.g. `cos_comparison_cuda`, `cos_comparison_opencl`)
 
-Backend module names should follow the pattern `cos_comparison_<backend_name>`.
-
-Example: `cos_comparison_cuda`, `cos_comparison_opencl`, `cos_comparison_jax`
-
-### Registration
-
-Add your backend to `config.json` with appropriate priority:
+**Registration:** add to `config.json` with appropriate priority:
 
 ```json
-{
-    "backends": [
-        {"name": "cos_comparison_cuda", "enabled": true},
-        {"name": "cos_comparison_pydll", "enabled": true},
-        {"name": "cos_comparison", "enabled": true}
-    ]
-}
+{"backends": [
+    {"name": "cos_comparison_cuda", "enabled": true},
+    {"name": ".cos_comparison_pydll", "enabled": true},
+    {"name": ".cos_comparison", "enabled": true}
+]}
 ```
 
-## Advanced Usage
-
-### Forcing Pure Python
-
-Useful for debugging or ensuring reproducibility:
-
-```python
-cc.set_mode("cos_comparison")
-```
-
-### Benchmarking Different Backends
+### Benchmarking Backends
 
 ```python
 import time
@@ -219,6 +196,4 @@ for backend in ["cos_comparison", "cos_comparison_c", "cos_comparison_pydll"]:
 
 ---
 
-**Related**:
-- [Core Module API](../api/core.md) — Core function reference
-- [Seven-Layer Architecture](seven-layer.md) — Overall architecture
+**Related:** [Core Module API](../api/core.md) · [Seven-Layer Architecture](seven-layer.md)

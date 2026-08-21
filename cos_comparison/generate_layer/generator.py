@@ -38,3 +38,12 @@ def copy_region(target, source, *, shape=None, source_start=None, source_step=No
                           source_step=source_step, target_start=target_start,
                           target_step=target_step)
         
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "Generator",
+    "TensorGenerator",
+    "copy_region",
+)

@@ -1,6 +1,6 @@
 # cos-comparison Documentation
 
-Welcome to the cos-comparison documentation. The docs are organized into four sections:
+Four sections covering the full project:
 
 | Section | Purpose |
 |---------|---------|
@@ -16,14 +16,16 @@ Welcome to the cos-comparison documentation. The docs are organized into four se
 3. **[API → Core Module](api/core.md)** — the core API surface and common parameters
 4. **[Architecture → Seven-Layer](architecture/seven-layer.md)** — the big picture
 
-## Quick Links
+## Quick Reference
 
-- **Core API**: [core.md](api/core.md) — functions, tensor types, common parameters
-- **Passive mode**: [passive-mode.md](api/passive-mode.md)
-- **Active mode**: [active-mode.md](api/active-mode.md)
-- **Statistics**: [statistics.md](api/statistics.md)
-- **Upper layers**: [cognitive-layers.md](api/cognitive-layers.md)
-- **Backend switching**: [backend-system.md](architecture/backend-system.md)
+| Topic | Doc |
+|-------|-----|
+| Core API (functions, tensors, params) | [api/core.md](api/core.md) |
+| Passive mode (self-similarity) | [api/passive-mode.md](api/passive-mode.md) |
+| Active mode (template matching) | [api/active-mode.md](api/active-mode.md) |
+| Statistics (mean, variance) | [api/statistics.md](api/statistics.md) |
+| Upper layers (sense/memory/brain/...) | [api/cognitive-layers.md](api/cognitive-layers.md) |
+| Backend switching | [architecture/backend-system.md](architecture/backend-system.md) |
 
 ## Conventions
 
@@ -31,4 +33,4 @@ Welcome to the cos-comparison documentation. The docs are organized into four se
 - All backends (C extension / ctypes / pure Python) expose the same API and produce bit-identical results unless a known divergence is documented.
 - Non-core layers are under active development; the core module follows semantic versioning.
 
-> See the root [README](../README.md) for the project overview and the [History](../History.txt) for the changelog.
+> See the root [README](../README.md) for the project overview and [History](../History.txt) for the changelog.

@@ -80,3 +80,15 @@ class FuncWrap:
 
 
 
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "BaseMap",
+    "default_map_func",
+    "default_set_func",
+    "default_contain_judge_func",
+    "Map",
+    "FuncWrap",
+)

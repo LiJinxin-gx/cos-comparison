@@ -4,7 +4,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**An AGI-oriented project based on local similarity comparison for feature extraction – biologically inspired, zero-training edge / pattern detection.**
+**An AGI-oriented project based on local similarity comparison for feature extraction — biologically inspired, zero-training edge / pattern detection.**
 
 ---
 
@@ -18,7 +18,7 @@ $$
 \text{cosmod} = \frac{2(A \cdot B)}{|A|^2 + |B|^2}
 $$
 
-Three similarity measures are provided, selected via the `algorithm` parameter:
+Three similarity measures, selected via the `algorithm` parameter:
 
 | Measure | Formula | Use Case |
 |---------|---------|----------|
@@ -26,7 +26,7 @@ Three similarity measures are provided, selected via the `algorithm` parameter:
 | **mod** | `2\|A\|·\|B\| / (\|A\|²+\|B\|²)` | Magnitude similarity, blob/region detection |
 | **cosmod** | `2(A·B) / (\|A\|²+\|B\|²)` | Combined (default), edge/keypoint detection |
 
-Key features:
+**Key features:**
 
 - **No training, no labels, no backpropagation** — a step toward biologically plausible AGI
 - Works on **1D–4D** data (audio, images, video, volumetric data)
@@ -40,32 +40,43 @@ Key features:
 
 ## 🚀 What's New
 
-**v0.4.3** — robustness, protocol-style delegation and default-algorithm release:
-- Element-wise filter/mapping API (`data_filter`, `data_mapping`, `threshold_filter`/`threshold_map`/`threshold_judge`) across all backends
-- C core hardening: memory-safety NULL checks, single-fire callbacks, `step=0` protection, output bounds checks, overflow guards
-- Protocol-style logic layers with relative-probability axiom system and `EventBinds` graph engine
-- Fourier transforms (`interface.tools.math_tool.fourier`): generic multi-dimensional DFT/IDFT, recursion-free
-- Default dict-protocol implementations; `TensorGenerator.generate` unified delegation; `data_match` template matching
-- Upper-layer defect fixes (database atomicity, process management, topology locks, scalar-index parity)
+**v0.4.3** — robustness, protocol-style delegation, default-algorithm release:
+
+- **C core hardening (18 fixes, API unchanged)**: memory-safety NULL checks, single-fire end/return callbacks, `step=0` division protection, output write-bounds checks, short-parameter tolerance, integer-overflow guards, `global_error` callback ABI alignment (pydll + ctypes backends)
+- **Element-wise filter/mapping API (all three backends)**: `data_filter`, `data_mapping`, `threshold_filter` / `threshold_map` (interval `[low, high]` with inclusive endpoint control). C implementation is C99-strict (no VLA/GNU extensions, all static, const-correct, shared `_resolve_read_region` core, long-long totals, explicit free on every path) and backend-switch safe
+- **Upper-layer defect fixes**: database `executemany` partial-replay removal, `MapMemory.commit` atomicity, `Process.stop(terminate=True)` child termination + synchronous reader threads, monitor handle race via `parallel_lock`, topology nested-lock deadlocks, `Receptor.receptor` kwargs=None handling
+- **Logic layers (protocol-style)**: `event_context` delegated slots (`init_func`/`add_func`/`probability_func`), relative-probability axiom system (A1–A5), two-stage rigorous resolution, `EventBinds` binds-as-engine protocol container (cached graph, stats, strict switch), default graph-reachability judge (`logic_judge`)
+- **Default dict-protocol implementations**: `Map` three-slot defaults (mapper), truthiness substitution → `is not None` default construction (call_api / executer / symbol_logic / logic contexts)
+- **Generate layer**: `TensorGenerator.generate(func, args, kwargs)` unified delegation entry, `set_point` via the core `set_item` protocol, module-level `copy_region` region fill (core `load_data` wrapper, target-first)
+- **Sense layer**: `data_match` — integrated matching-position iterator (active comparison + threshold filter; algorithm default resolved inside the backend, pydll-safe; None region parameters omitted so backends treat them uniformly); `Receptor.receptor` delegation entry
+- **Fourier module** (`interface.tools.math_tool.fourier`): generic `dft` / `idft` / `power_spectrum` from the cos/sin integral formula — multi-dimensional (axis-wise, odometer), recursion-free, trig-variant float arithmetic (no complex-object overhead), iterative loops only
+- **get_item scalar-index parity**: the pure-Python and ctypes backends now treat a scalar index as a 1-D index like the C extension
+- **Version handling**: VERSION.txt restored at the package directory, `__init__.py` reads it with `.strip()` and `utf-8-sig` (clean `version_tuple`, BOM/newline tolerant); `setup.py` writes the pure version string and reads pyproject.toml BOM-tolerantly; version set to 0.4.3
+- **Nested control flow (`brain_layer.control`)**: flat `Sequence` / `Branch` / `Loop` containers yield FUNCTIONS (caller executes, containers never invoke); `ControlFlatten` expands nested flows iteratively (explicit stack, recursion-free, custom flattening via subclassing); `ControlFlowDriver` composes flows dynamically through the sequence protocol, mapping keys and multi-index access; `Control` is a pure placeholder marker
+- **Function helper tools (`interface.tools.func_tool`)**: `ComposalFunction` composes multiple functions into one callable over a shared stack (first/last direct, middle steps read configured slots, maintenance delegated to `ComposalFunctionManage`); `FuncHelper` wraps stdlib helpers (partial / reduce / compose / wraps / itemgetter / attrgetter) with injectable slots; `FuncWrap` discard-first-arg wrapper
+- **Test tools**: attach-style debug probes — `ResultManager` output collection (injectable `output` callback, no standard-stream writes), `MemoryProbe` (tracemalloc-backed, injectable slots), `ErrorWatcher` (run-space protection: errors recorded then swallowed), `TraceProbe` (call-level tracing); decorators `@memory_report` / `@error_watch` / `@trace_report`
+- **Action layer async execution**: `ExecuterDriver.call_all` runs the call list strictly in order on a delegated background worker — non-blocking, unlimited/limited `wait`, per-item captured `out`/`err` via `ActionResult`; thread launching stays inside `interface`
+- **Core hot injection**: the full backend API is hot-injected into the `core` module namespace (zero-overhead access) with explicit `__all__` (including private-but-exported `_cos` / `_mod` / `_cosmod`); `__all__` added across every `import *` source module to prevent namespace pollution
+- **Docs**: README, cognitive-layers / modular-architecture / seven-layer / core / backend-system updated for v0.4.3
 
 **v0.4.2** — portability & robustness:
-- ARM/piwheels C99 fixes, empty-input consistency
-- Exhaustive malloc NULL checks; 12 reference/memory leaks fixed
-- Duck typing (`PyNumber_Index`); free-threaded Python 3.14t verified
+
+- ARM/piwheels C99 fixes, empty-input consistency, exhaustive malloc NULL checks
+- 12 reference/memory leaks fixed; duck typing (`PyNumber_Index`); free-threaded 3.14t verified
 - Zero-copy buffer protocol
 
 **v0.4.1** — architecture upgrade:
-- Stride+offset indexing migration, `infer_shape` / `__shape__` protocol
-- `load_data` bulk-copy, keyword-only constructors, PyBuffer zero-copy
-- SIMD hints, slice performance, free-threaded dual binaries
 
-See [History.txt](History.txt) for the full changelog.
+- Stride+offset indexing, `infer_shape` / `__shape__` protocol, `load_data` bulk-copy
+- Keyword-only constructors, PyBuffer zero-copy, SIMD hints, slice performance, free-threaded dual binaries
+
+> See [History.txt](History.txt) for the full changelog.
 
 ---
 
 ## 🧬 Seven-Layer Cognitive Architecture
 
-Biologically inspired seven-layer architecture mimicking mammalian brain structure. Only the core layer is production-ready; others are in early development.
+Biologically inspired architecture mimicking mammalian brain structure. Only the core layer is production-ready.
 
 | # | Layer | Directory | Brain Structure | Maturity | Core Function |
 |---|-------|-----------|-----------------|----------|---------------|
@@ -85,14 +96,16 @@ Biologically inspired seven-layer architecture mimicking mammalian brain structu
 
 Three-flow logical decoupling (data / operation / control) with clear ownership boundaries:
 
-- **`core`** — low-level algorithms and data format; standard library only, fully independent
-- **`interface`** — all external interaction (processes, locks, shared memory, async, IO); standard library only
-- **`data`** — data carrying and generic abstraction (`DataWrap`, `Tensor`/`SafeTensor`/`ParallelTensor`)
-- **Five functional layers** — attach to incoming data, consume core algorithms, delegate mechanisms to `interface`
+| Foundation | Role | Independence |
+|------------|------|:------------:|
+| **`core`** | Low-level algorithms and data format | ✅ stdlib only |
+| **`interface`** | All external interaction (processes, locks, shared memory, async, IO) | ✅ stdlib only |
+| **`data`** | Data carrying and generic abstraction (`DataWrap`, `Tensor`/`SafeTensor`/`ParallelTensor`) | — |
+| **Functional layers** | Attach to data, consume core algorithms, delegate mechanisms to `interface` | — |
 
-Dependency rules: layers must not depend on each other; data is attach-and-take (never owned/transformed by layers); all boundary crossing goes through `interface`.
+**Dependency rules:** layers must not depend on each other; data is attach-and-take (never owned/transformed by layers); all boundary crossing goes through `interface`.
 
-See [docs/architecture/](docs/architecture/) for full details.
+> See [docs/architecture/](docs/architecture/) for full details.
 
 ---
 
@@ -108,20 +121,24 @@ Benchmarked on a 322×424×3 RGB image with 3×3 window (Windows 11 x64, Python 
 
 On Intel N150 (1000×1000, 3×3 passive): C extension 14s (9×), free-threaded 4 threads 4.6s (27×) vs pure Python 126s.
 
-Key performance features: zero-copy PyBuffer, SIMD auto-vectorization (SSE/AVX/NEON), view-based slicing, stride indexing, recursion-free carry iteration, GIL release on compute paths.
+**Key performance features:** zero-copy PyBuffer, SIMD auto-vectorization (SSE/AVX/NEON), view-based slicing, stride indexing, recursion-free carry iteration, GIL release on compute paths.
 
 ---
 
 ## 📦 Installation
 
 ```bash
-pip install cos-comparison          # core package (attempts C compilation automatically)
+pip install cos-comparison          # core package (C compilation attempted automatically)
 pip install cos-comparison[test]    # with test dependencies
 ```
 
 If no C compiler is available, installation succeeds with the pure Python backend only.
 
-**Requirements**: Python 3.8+ (3.13+ for free-threaded builds), optional C compiler, no runtime dependencies.
+| Requirement | Details |
+|-------------|---------|
+| Python | 3.8+ (3.13+ for free-threaded builds) |
+| C compiler | Optional (auto-fallback to pure Python) |
+| Runtime deps | None |
 
 To recompile after source changes: `python setup.py build_ext --inplace`
 
@@ -132,24 +149,24 @@ To recompile after source changes: `python setup.py build_ext --inplace`
 ```python
 from cos_comparison import core
 
-# 64x64 checkerboard
+# --- Create a 64x64 checkerboard ---
 data = core.create_void_list((64, 64))
 for i in range(64):
     for j in range(64):
         data[i, j] = 1.0 if (i + j) % 2 == 0 else 0.0
 
-# Passive mode: sliding-window self-similarity
+# --- Passive mode: sliding-window self-similarity ---
 edges = core.cos_comparison_passive(data, window_size=(3, 3))
 print(edges.shape)  # (61, 62)
 
 # Displacement vector d shifts the second window (edge orientation)
 edges2 = core.cos_comparison_passive(data, window_size=(3, 3), d=(0, 1))
 
-# Active mode: template matching
+# --- Active mode: template matching ---
 kernel = core.create_void_list((3, 3), default=1.0)
 matches = core.cos_comparison_active(data, kernel=kernel)
 
-# Switch backends
+# --- Switch backends ---
 core.set_mode(".cos_comparison")  # force pure Python for debugging
 ```
 
@@ -166,6 +183,17 @@ The suite covers core algorithms, tensor ops, backend parity, empty/edge cases, 
 
 ---
 
+## 📚 Documentation
+
+| Section | Contents |
+|---------|----------|
+| [Getting Started](docs/getting-started.md) | 5-minute tutorial |
+| [API Reference](docs/api/README.md) | Core, passive/active modes, statistics, upper layers |
+| [Architecture](docs/architecture/README.md) | Seven-layer design, modular architecture, backends |
+| [Principles](docs/principles/README.md) | First principle, similarity measures, dual modes |
+
+---
+
 ## 👤 Author
 
 I was born on May 31, 2008, and feel fortunate to grow up in an era of rapid progress in artificial intelligence.
@@ -176,19 +204,16 @@ There remains a long road to true AGI. I may be forced to set aside this researc
 
 ---
 
-## 📚 Documentation
-
-- [Getting Started](docs/getting-started.md) — 5-minute tutorial
-- [API Reference](docs/api/README.md) — core, passive/active modes, statistics, upper layers
-- [Architecture](docs/architecture/README.md) — seven-layer design, modular architecture, backends
-- [Principles](docs/principles/README.md) — first principle, similarity measures, dual modes
-
 ## 📫 Contact
 
-- **GitHub**: [LiJinxin-gx/cos-comparison](https://github.com/LiJinxin-gx/cos-comparison)
-- **Issues**: [GitHub Issues](https://github.com/LiJinxin-gx/cos-comparison/issues)
-- **Email**: lijinxin_gx@sina.cn
-- **PyPI**: [cos-comparison](https://pypi.org/project/cos-comparison/)
+| Channel | Link |
+|---------|------|
+| GitHub | [LiJinxin-gx/cos-comparison](https://github.com/LiJinxin-gx/cos-comparison) |
+| Issues | [GitHub Issues](https://github.com/LiJinxin-gx/cos-comparison/issues) |
+| Email | lijinxin_gx@sina.cn |
+| PyPI | [cos-comparison](https://pypi.org/project/cos-comparison/) |
+
+---
 
 ## 📄 License
 
