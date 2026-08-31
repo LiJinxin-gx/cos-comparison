@@ -111,13 +111,13 @@ Biologically inspired design mimicking mammalian brain structure. Only the core 
 
 | # | Layer | Directory | Brain Structure | Maturity | Core Function |
 |---|-------|-----------|-----------------|----------|---------------|
-| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, three-backend acceleration, free-thread support |
-| 2 | Sense | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception, raw feature extraction |
-| 3 | Memory | `memory_layer` | Hippocampus | 🟡 Early | Short/long-term storage, hierarchical isolation memory |
-| 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟡 Early | Cognition, logical reasoning, control flow |
-| 5 | Action | `action_layer` | Motor Cortex | 🔵 Exploratory | Action output, async execution, environment interaction |
-| 6 | Generate | `generate_layer` | Broca's / Wernicke's | 🔵 Exploratory | Language, image generation, template reverse-generation |
-| 7 | Extension | `extension_layer` | Association Cortex | 🔴 Skeleton | Extended capabilities |
+| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, three-backend acceleration, free-thread support, element-wise filter/mapping |
+| 2 | Sense | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception, raw feature extraction, data matching |
+| 3 | Memory | `memory_layer` | Hippocampus | 🟡 Early | Short/long-term storage, continuous-mapping hierarchical isolation memory, database-backed persistence |
+| 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟡 Early | Relative-probability logic (A1–A5 axioms), symbol logic, nested control flow (Sequence/Branch/Loop), reflex feedback/monitor/trigger, context mapping |
+| 5 | Action | `action_layer` | Motor Cortex | 🟡 Early | Async execution driver, action result wrapping, delegated background workers |
+| 6 | Generate | `generate_layer` | Broca's / Wernicke's | 🔵 Exploratory | Template-based reverse generation, multi-modal output (validated in exploration) |
+| 7 | Extension | `extension_layer` | Association Cortex | 🔴 Skeleton | Extended capabilities (placeholder) |
 
 > Non-core layers do not affect core API stability. `cos_comparison.core` follows semantic versioning.
 
@@ -155,24 +155,9 @@ To recompile after source changes: `python setup.py build_ext --inplace`
 
 ### Quick Start
 
-```python
-from cos_comparison.core import cos_comparison_passive, cos_comparison_active, cos
+The core module exposes three primary APIs: full-tensor similarity (`cos`), passive self-similarity (`cos_comparison_passive`), and active template matching (`cos_comparison_active`). All three operate on 1D–4D tensors with identical signatures across backends.
 
-# Full-tensor similarity
-sim = cos([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])  # -> 1.0
-
-# Passive mode: edge detection via sliding window self-similarity
-edges = cos_comparison_passive(
-    [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-    window_size=(2, 2), step=(1, 1), d=(1, 0),
-)
-
-# Active mode: template matching
-response = cos_comparison_active(
-    [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
-    kernel=[[1.0, 0.0], [0.0, 1.0]], step=(1, 1),
-)
-```
+→ See [Getting Started](docs/getting-started.md) for step-by-step usage, and the [API reference](docs/api/README.md) for full signatures.
 
 ---
 

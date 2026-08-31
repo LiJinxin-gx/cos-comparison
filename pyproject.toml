@@ -69,6 +69,7 @@ cos_comparison = [
 explore = [
     "*.pyw",
     "*.md",
+    "*.json",
 ]
 
 [tool.pytest.ini_options]

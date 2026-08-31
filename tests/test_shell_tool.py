@@ -1,4 +1,4 @@
-"""shell_tool tests: runpy directory plugin execution, imperative shell."""
+﻿"""shell_tool tests: runpy directory plugin execution, imperative shell."""
 import math
 import os
 import subprocess
@@ -238,8 +238,7 @@ class TestProjectNamespace(unittest.TestCase):
 
 
 class TestBuiltinsPreimport(unittest.TestCase):
-    """命令行预导入内置函数（__builtins__ 模块的函数/类型等）——直接可用，
-    不覆盖项目已有注册。"""
+    """CLI pre-imports built-in functions (functions/types from the __builtins__ module) — directly usable without overriding project-registered names."""
 
     def test_builtin_function_callable(self):
         r = SH.execute_call(*SH.parse_call("len (1 2 3)"))
@@ -260,7 +259,7 @@ class TestBuiltinsPreimport(unittest.TestCase):
         self.assertIn("int", ns)
 
     def test_builtins_do_not_override_project(self):
-        # 项目已有注册优先（setdefault 不覆盖）
+        # project-registered names take priority (setdefault does not overwrite)
         ns = SH.namespace()
         self.assertIs(ns["IF"], SH.IF)
         self.assertIsNotNone(ns.get("cos"))
@@ -275,8 +274,7 @@ class TestBuiltinsPreimport(unittest.TestCase):
 
 
 class TestIndexSyntax(unittest.TestCase):
-    """data[index] 索引语法（替代 data<N> 命名冲突形式）、% / %%
-    解包操作、let 函数式赋值。"""
+    """data[index] indexing syntax (replaces the data<N> name-collision form), % / %% unpack operations, and let functional assignment."""
 
     def test_data_index_syntax(self):
         from cos_comparison.shell_tool.batch import run_batch
@@ -426,13 +424,12 @@ class TestControlFunctions(unittest.TestCase):
 
 
 class TestImportAllModule(unittest.TestCase):
-    """import_all_module: from module import * 效果——所有公开对象附加到
-    指定命名空间（关键字 namespace，默认当前 shell 命名空间）。"""
+    """import_all_module: from module import * effect — all public objects are attached to the specified namespace (keyword namespace, defaults to the current shell namespace)."""
 
     def test_import_all_default_namespace(self):
         result = SH.import_all_module("operator")
         self.assertIn("imported operator", result)
-        # 所有公开对象（函数与数据）进入当前 funcs 命名空间
+        # all public objects (functions and data) enter the current funcs namespace
         ns = SH.namespace()
         self.assertIn("add", ns)
         self.assertIn("truth", ns)
@@ -478,7 +475,7 @@ class TestImportAllModule(unittest.TestCase):
         self.assertEqual(d.data_pool[1], 3)
 
     def test_linear_algebra_not_pre_registered(self):
-        # 撤销硬注册：la 函数不再直接出现在命名空间（按需 import_all_module）
+        # undo hard registration: la function no longer appears directly in namespace (import_all_module on demand)
         ns = SH.namespace()
         self.assertNotIn("dot", ns)
         result = SH.import_all_module(
@@ -641,7 +638,7 @@ class TestBatch(unittest.TestCase):
             "let x 5",
             "get x",
         ])
-        # 无 -> 的指令结果自动存入顺序位置（统一指令协议语义）
+        # instruction results without -> are automatically stored in sequential positions (unified instruction protocol semantics)
         self.assertEqual(data, {0: 4.0, 2: "5", 3: "5"})
         self.assertEqual(stats["run"], 4)
 
@@ -675,8 +672,8 @@ class TestBatch(unittest.TestCase):
         self.assertEqual(data, {0: 2.0})
 
     def test_batch_first_interrupt_continues(self):
-        # 第一次打断不终止子程序（子程序可能有自己的打断捕获）：
-        # 记录打断并继续执行剩余命令
+        # first interrupt does not terminate the subprogram (it may have its own interrupt handler):
+        # record the interrupt and continue executing the remaining commands
         from cos_comparison.shell_tool import shell as SH
         from cos_comparison.shell_tool.batch import run_batch
         def kb_cmd(*_a, **_k):
@@ -684,10 +681,10 @@ class TestBatch(unittest.TestCase):
         SH.register_callable("kb_cmd", kb_cmd)
         _data, stats = run_batch(["kb_cmd", "import_module math"])
         self.assertTrue(stats["interrupt"])
-        self.assertEqual(stats["run"], 1)  # math 命令继续执行
+        self.assertEqual(stats["run"], 1)  # math command continues executing
 
     def test_batch_second_consecutive_forced(self):
-        # 连续（窗口内）第二次打断 → 强制退出
+        # second consecutive interrupt (within window) -> forced exit
         from cos_comparison.shell_tool import shell as SH
         from cos_comparison.shell_tool.batch import run_batch
         def kb_cmd(*_a, **_k):
@@ -697,8 +694,8 @@ class TestBatch(unittest.TestCase):
             run_batch(["kb_cmd", "kb_cmd"])
 
     def test_batch_interrupt_not_accumulated(self):
-        # 打断不持续累计：窗口外（interrupt_window=0.0）重置——
-        # 每次打断都不构成"连续第二次"，永不强制退出
+        # interrupts do not accumulate persistently: outside the window (interrupt_window=0.0) they reset —
+        # each interrupt never counts as a "second consecutive", so forced exit never occurs
         from cos_comparison.shell_tool import shell as SH
         from cos_comparison.shell_tool.batch import run_batch
         def kb_cmd(*_a, **_k):
@@ -707,10 +704,10 @@ class TestBatch(unittest.TestCase):
         _data, stats = run_batch(["kb_cmd", "kb_cmd"],
                                  interrupt_window=0.0)
         self.assertTrue(stats["interrupt"])
-        self.assertEqual(stats["run"], 0)  # 两条都打断，但不强制
+        self.assertEqual(stats["run"], 0)  # both interrupted, but not forced
 
     def test_batch_idle_interrupt_two_exits(self):
-        # 没有运行子程序（行读取打断）：两次打断即退出
+        # no subprogram running (line-read interrupt): two interrupts cause exit
         from cos_comparison.shell_tool.batch import run_batch
         class IdleKb:
             def __init__(self):
@@ -727,9 +724,9 @@ class TestBatch(unittest.TestCase):
 
 
 class TestUnifiedInstructions(unittest.TestCase):
-    """统一指令文件协议：app / shell(run) / batch 读取同一格式，统一使用
-    函数式的指令式控制（IF/WHILE 指令函数 + 操作流函数调用）——
-    表现一致。"""
+    """Unified instruction-file protocol: app / shell(run) / batch read the same format and uniformly use
+    functional imperative control (IF/WHILE instruction functions + operation-flow function calls) —
+    behaviour is consistent."""
 
     TEXT = (
         "core.add_chain (0) -> 0\n"
@@ -799,8 +796,8 @@ class TestUnifiedInstructions(unittest.TestCase):
             os.unlink(path)
 
     def test_while_loop_interrupt(self):
-        # 循环末尾阻塞和打断：第一次打断让位（子程序可能捕获），
-        # 窗口内连续第二次强制退出——不误杀子程序
+        # blocking and interrupt at loop end: first interrupt yields (subprogram may catch),
+        # second consecutive within window forces exit — does not wrongly kill the subprogram
         n = {"v": 0}
 
         def kb_body():
@@ -812,7 +809,7 @@ class TestUnifiedInstructions(unittest.TestCase):
         try:
             with self.assertRaises(KeyboardInterrupt):
                 SH.execute_call(*SH.parse_call("WHILE always_true kb_body"))
-            self.assertEqual(n["v"], 2)  # 第一次让位（继续）；第二次强制
+            self.assertEqual(n["v"], 2)  # first yields (continues); second forces
         finally:
             SH.ns_delete(["always_true", "kb_body"])
 

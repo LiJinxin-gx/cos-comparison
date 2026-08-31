@@ -1,0 +1,13 @@
+include LICENSE.txt
+include README.md
+include pyproject.toml
+include setup.py
+include MANIFEST.in
+include core_base.txt
+include History.txt
+recursive-include cos_comparison *.c *.h
+recursive-include explore *.py *.pyw *.md *.json
+recursive-include tests *.py *.pyw *.md *.json
+recursive-include docs *.md
+global-exclude *.pyc
+global-exclude *.pyo

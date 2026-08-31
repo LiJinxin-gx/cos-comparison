@@ -11,8 +11,9 @@ in-memory data — no files, no network, no third-party dependencies.
 """
 import unittest
 
+from cos_comparison.core import cos
 from explore_data import (BinarySource, ImageSource, MnistSource, TextSource,
-                         WavSource, block_pool, cos_sim, flat, resize_grid)
+                          VideoSource, WavSource, block_pool, flat, resize_grid)
 import explore_text as AT
 import explore_vision as AV
 import explore_audio as AA
@@ -66,7 +67,7 @@ class TestSources(unittest.TestCase):
         self.assertEqual(resize_grid([[1, 2], [3, 4]], 1, 4),
                          [[1, 1, 2, 2]])
         self.assertEqual(block_pool([[1, 0], [0, 0]], 2), [1.0, 0, 0, 0])
-        self.assertAlmostEqual(cos_sim([1, 0], [1, 0]), 1.0)
+        self.assertAlmostEqual(cos([1, 0], [1, 0]), 1.0)
 
 
 class TestVisionAnalysis(unittest.TestCase):

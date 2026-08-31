@@ -1,0 +1,39 @@
+site_name: cos-comparison
+site_description: Local similarity comparison for feature extraction – biologically inspired, zero-training edge/pattern detection, multi-backend acceleration.
+site_author: Li Jinxin
+repo_url: https://github.com/LiJinxin-gx/cos-comparison
+repo_name: LiJinxin-gx/cos-comparison
+
+theme:
+  name: readthedocs
+  highlightjs: true
+
+nav:
+  - Home: README.md
+  - Getting Started: docs/getting-started.md
+  - Principles:
+      - Overview: docs/principles/README.md
+      - First Principle: docs/principles/first-principle.md
+      - Dual Mode: docs/principles/dual-mode.md
+      - Similarity Measures: docs/principles/similarity-measures.md
+  - Architecture:
+      - Overview: docs/architecture/README.md
+      - Modular Architecture: docs/architecture/modular-architecture.md
+      - Seven-Layer Model: docs/architecture/seven-layer.md
+      - Backend System: docs/architecture/backend-system.md
+  - API Reference:
+      - Overview: docs/api/README.md
+      - Core: docs/api/core.md
+      - Passive Mode: docs/api/passive-mode.md
+      - Active Mode: docs/api/active-mode.md
+      - Cognitive Layers: docs/api/cognitive-layers.md
+      - Statistics: docs/api/statistics.md
+  - Command Line: docs/command-line.md
+  - Build: docs/build.md
+  - Exploration: docs/exploration/README.md
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true

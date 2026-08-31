@@ -1,0 +1,40 @@
+# Virtual environments
+venv/
+venv_test/
+venv_test_t/
+.venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Explore directory (separate repository)
+explore/
+
+# Temporary files
+*.tmp
+*.bak
