@@ -1,0 +1,256 @@
+# core/__init__.py
+"""
+Backend loader for cos_comparison: loads the best available backend in
+priority order and forwards all attributes to it (high-frequency core APIs
+are hot-injected into the module namespace for runtime performance).
+"""
+
+import importlib
+import json
+import os.path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# -------------------------------------------------------------------
+# 1. Configuration
+# -------------------------------------------------------------------
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+# Default backends in priority order (package-relative names): pydll C builtin,
+# optional ctypes backend, pure Python last.
+_DEFAULT_BACKENDS = (
+    {"name": ".cos_comparison_pydll", "enabled": True},
+    {"name": ".cos_comparison_c", "enabled": True},
+    {"name": ".cos_comparison", "enabled": True},
+)
+
+_BACKEND_ORDER: Tuple[str, ...] = ()
+_BACKEND_NAMES: Tuple[str, ...] = ()
+
+
+def _load_config() -> None:
+    """Read config.json and build backend lists."""
+    global _BACKEND_ORDER, _BACKEND_NAMES
+    raw = _DEFAULT_BACKENDS
+    
+    # Fast path: skip file IO if config doesn't exist
+    if os.path.exists(_CONFIG_PATH):
+        try:
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                # New config format: {"backends": [...]}
+                if isinstance(config, dict) and "backends" in config:
+                    raw = config["backends"]
+                elif isinstance(config, list):
+                    raw = config
+        except Exception:
+            # Fall back to defaults if the config is missing or invalid
+            raw = _DEFAULT_BACKENDS
+
+    # Normalize: if list of strings, convert to list of dicts
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        raw = [{"name": item, "enabled": True} for item in raw]
+    elif not isinstance(raw, list):
+        raw = _DEFAULT_BACKENDS
+
+    # Normalize: ensure relative import (prepend dot if missing)
+    normalized = []
+    for item in raw:
+        if not isinstance(item, dict) or "name" not in item:
+            continue
+        name = item["name"]
+        if not name.startswith("."):
+            name = "." + name
+        normalized.append({**item, "name": name})
+
+    order_list = [item["name"] for item in normalized if item.get("enabled", True)]
+    names_list = [item["name"] for item in normalized]
+
+    # Ensure pure Python backend is always present as final fallback
+    if ".cos_comparison" not in order_list:
+        order_list.append(".cos_comparison")
+    if ".cos_comparison" not in names_list:
+        names_list.append(".cos_comparison")
+    
+    _BACKEND_ORDER = tuple(order_list)
+    _BACKEND_NAMES = tuple(names_list)
+
+
+_load_config()
+
+# -------------------------------------------------------------------
+# 2. Backend loading
+# -------------------------------------------------------------------
+_backend: Dict[str, Any] = {}
+_current_backend_name: Optional[str] = None
+_module_globals = globals()
+
+# Every backend public export is hot-injected into the module namespace
+# for zero-overhead access; __getattr__ remains the fallback.
+_HOT_API: Set[str] = set()   # names currently injected into module globals
+
+# Module-level API (backend exports are appended on load; private names
+# such as _cos are exported deliberately).
+__all__ = ["get_mode", "get_available_backends", "set_mode"]
+
+# Names owned by this module; never overwritten by backend injection.
+_SELF_NAMES = frozenset(("get_mode", "get_available_backends", "set_mode", "__all__"))
+
+
+def _load_backend(module_name: str) -> bool:
+    """Import a backend module and store its attributes."""
+    global _backend, _current_backend_name
+    try:
+        mod = importlib.import_module(module_name, package=__package__)
+        # Export the public API (__all__ if defined, else non-underscore names)
+        if hasattr(mod, '__all__'):
+            public_attrs = mod.__all__
+        else:
+            public_attrs = [name for name in dir(mod) if not name.startswith('_')]
+        
+        # Build new backend dict
+        new_backend = {}
+        for attr_name in public_attrs:
+            if attr_name.startswith("__") and attr_name.endswith("__"):
+                continue
+            # Skip __all__ entries missing from this backend (API differences)
+            attr = getattr(mod, attr_name, None)
+            if attr is None:
+                continue
+            new_backend[attr_name] = attr
+        
+        # Backfill missing public APIs from the pure Python backend so the
+        # external surface is identical across backends.
+        if module_name != ".cos_comparison":
+            try:
+                _pure_mod = importlib.import_module(".cos_comparison", package=__package__)
+                _pure_all = getattr(_pure_mod, "__all__", ())
+                for _fill in _pure_all:
+                    if _fill in new_backend:
+                        continue
+                    _fill_attr = getattr(_pure_mod, _fill, None)
+                    if _fill_attr is not None:
+                        new_backend[_fill] = _fill_attr
+            except Exception:
+                pass
+
+        # Normalize `no_done` across backends: the pydll C builtin rejects
+        # keyword args, so substitute the pure-Python placeholder for parity.
+        if "no_done" in new_backend:
+            try:
+                new_backend["no_done"](_parity_probe=0)
+            except TypeError:
+                try:
+                    _norm_no_done = getattr(importlib.import_module(
+                        ".cos_comparison", package=__package__), "no_done")
+                except Exception:
+                    _norm_no_done = None
+                if _norm_no_done is not None:
+                    new_backend["no_done"] = _norm_no_done
+
+        # Replace old backend state: remove old hot APIs first
+        for old_name in _HOT_API:
+            if old_name in _module_globals:
+                del _module_globals[old_name]
+        _HOT_API.clear()
+
+        _backend.clear()
+        _backend.update(new_backend)
+        # Hot-inject the full public surface (skip this module's own names)
+        for _name, _attr in new_backend.items():
+            if _name in _SELF_NAMES:
+                continue
+            _module_globals[_name] = _attr
+            _HOT_API.add(_name)
+            if _name not in __all__:
+                __all__.append(_name)
+        
+        _current_backend_name = module_name
+        return True
+    except Exception:
+        return False
+
+
+def _load_available_backend(forced_names: Optional[Tuple[str, ...]] = None) -> None:
+    """Load the first available backend from priority order."""
+    global _current_backend_name
+    old_backend = _backend.copy()
+    old_hot = {k: _module_globals[k] for k in _HOT_API if k in _module_globals}
+    old_name = _current_backend_name
+
+    candidates = forced_names if forced_names is not None else _BACKEND_ORDER
+    for name in candidates:
+        if _load_backend(name):
+            return
+    
+    # If all backends failed, restore old state
+    for old_name_hot in _HOT_API:
+        if old_name_hot in _module_globals:
+            del _module_globals[old_name_hot]
+    _backend.clear()
+    _backend.update(old_backend)
+    _module_globals.update(old_hot)
+    _current_backend_name = old_name
+
+    raise ImportError(
+        f"No available backend among {candidates}. "
+        "Ensure at least the pure Python backend is importable."
+    )
+
+
+# Auto-load the first available backend on import
+_load_available_backend()
+
+# -------------------------------------------------------------------
+# 3. Public API
+# -------------------------------------------------------------------
+def get_mode() -> Tuple[str, ...]:
+    """Return the currently enabled backends in priority order (immutable)."""
+    return _BACKEND_ORDER
+
+
+def get_available_backends() -> Tuple[str, ...]:
+    """Return all configured backends (including disabled ones, immutable)."""
+    return _BACKEND_NAMES
+
+
+def set_mode(backends):
+    """
+    Force usage of a specific backend or list of backends in order.
+
+    backends : str or list/tuple of str - names attempted in priority
+    order ('cos_comparison_pydll', 'cos_comparison_c', 'cos_comparison').
+    """
+    if isinstance(backends, str):
+        backends = (backends,)
+    elif not isinstance(backends, (list, tuple)):
+        raise TypeError("backends must be a str or list/tuple of str")
+
+    # Normalize names to relative imports
+    normalized = []
+    for b in backends:
+        if not isinstance(b, str):
+            raise TypeError(f"backend name must be str, got {type(b)}")
+        if not b.startswith("."):
+            b = "." + b
+        normalized.append(b)
+
+    _load_available_backend(forced_names=tuple(normalized))
+
+
+# -------------------------------------------------------------------
+# 4. Attribute proxy (fallback for non-hot APIs)
+# -------------------------------------------------------------------
+def __getattr__(name: str) -> Any:
+    """Forward missing attribute lookup to the loaded backend."""
+    try:
+        return _backend[name]
+    except KeyError:
+        raise AttributeError(
+            f"module '{__name__}' has no attribute '{name}'. "
+            f"Current backend: {_current_backend_name}"
+        ) from None
+
+
+def __dir__() -> List[str]:
+    """Include backend attributes in autocompletion."""
+    return sorted(set(_backend.keys()) | set(_module_globals.keys()))

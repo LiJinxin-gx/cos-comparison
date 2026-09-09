@@ -1,0 +1,16 @@
+{
+    "backends": [
+        {
+            "name": ".cos_comparison_pydll",
+            "enabled": true
+        },
+        {
+            "name": ".cos_comparison_c",
+            "enabled": true
+        },
+        {
+            "name": ".cos_comparison",
+            "enabled": true
+        }
+    ]
+}

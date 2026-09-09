@@ -1,0 +1,191 @@
+#ifndef CORE_H
+#define CORE_H
+
+#include "type_data.h"
+#include <Python.h>
+#include <math.h>
+
+/* Callback context for error handling and name space passing */
+typedef struct {
+    PyObject *local_error_callback;
+    PyObject *name_space;
+    PyObject *algorithm;  /* direct callable algorithm (works without a
+                             namespace - use_namespace=False) */
+} CallbackContext;
+
+static inline double cos_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
+    double c = a * b;
+    if (c) return ab / sqrt(c);
+    return (a == b) ? 1.0 : 0.0;
+}
+
+static inline double mod_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
+    (void)ab;
+    double c = a * b;
+    if (c) return 2 * sqrt(c) / (a + b);
+    return (a == b) ? 1.0 : 0.0;
+}
+
+static inline double cosmod_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
+    double c = a * b;
+    if (c) return 2 * ab / (a + b);
+    return (a == b) ? 1.0 : 0.0;
+}
+
+static inline double convolution_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)a; (void)b; (void)ctx;
+    return ab;
+}
+
+typedef double (*algo_fn)(double, double, double, CallbackContext*);
+
+static inline Data* compute_output_shape(int dim, const int num[],
+                                          const int output_start[], const int output_step[]) {
+    (void)output_start; /* output always starts at 0 when created by core */
+    int *out_shape = (int*)malloc((size_t)(dim) * sizeof(int));
+    if (!out_shape) return NULL;
+    for (int i = 0; i < dim; ++i) {
+        /* Guard against int overflow in shape computation (C99 6.5p5 UB) */
+        if (num[i] > 1 && output_step[i] > INT_MAX / (num[i] - 1)) {
+            free(out_shape);
+            return NULL;
+        }
+        out_shape[i] = (num[i] - 1) * output_step[i] + 1;
+    }
+    Data *out = Data_create(dim, out_shape);
+    free(out_shape);
+    return out;
+}
+
+/* Helper: write value to arbitrary nested Python object (iterative, no stack overflow, uses generic object protocol with __set_item__ fast path) */
+static inline void py_set_item_value(PyObject *obj, const int idx[], int dim, int depth, double value) {
+    (void)depth;
+    if (dim == 0) return;
+    /* Fast path: check for __set_item__ method (takes index tuple and value) */
+    PyObject *set_item_method = PyObject_GetAttrString(obj, "__set_item__");
+    if (set_item_method != NULL) {
+        PyObject *args = PyTuple_New(2);
+        if (!args) {
+            Py_DECREF(set_item_method);
+            PyErr_NoMemory();
+            return;
+        }
+        // First argument: index tuple
+        PyObject *idx_tuple = PyTuple_New(dim);
+        if (!idx_tuple) {
+            Py_DECREF(args);
+            Py_DECREF(set_item_method);
+            PyErr_NoMemory();
+            return;
+        }
+        for (int i = 0; i < dim; ++i) {
+            PyObject *idx_obj = PyLong_FromLong(idx[i]);
+            if (!idx_obj) {
+                for (int j = 0; j < i; ++j) {
+                    Py_DECREF(PyTuple_GET_ITEM(idx_tuple, j));
+                    PyTuple_SET_ITEM(idx_tuple, j, NULL); /* avoid double free in tuple dealloc */
+                }
+                Py_DECREF(idx_tuple);
+                Py_DECREF(args);
+                Py_DECREF(set_item_method);
+                return;
+            }
+            PyTuple_SET_ITEM(idx_tuple, i, idx_obj);
+        }
+        PyTuple_SET_ITEM(args, 0, idx_tuple);
+        // Second argument: value
+        PyObject *val_obj = PyFloat_FromDouble(value);
+        if (!val_obj) {
+            Py_DECREF(idx_tuple);
+            PyTuple_SET_ITEM(args, 0, NULL); /* idx_tuple already freed; avoid UAF */
+            Py_DECREF(args);
+            Py_DECREF(set_item_method);
+            return;
+        }
+        PyTuple_SET_ITEM(args, 1, val_obj);
+        PyObject *res = PyObject_CallObject(set_item_method, args);
+        Py_DECREF(args);
+        Py_DECREF(set_item_method);
+        if (res != NULL) {
+            Py_DECREF(res);
+            return;
+        }
+        PyErr_Clear();
+    }
+    PyErr_Clear();
+    /* Generic path: traverse indices one by one */
+    PyObject **stack = (PyObject**)malloc((size_t)(dim) * sizeof(PyObject*));
+    if (!stack) { PyErr_NoMemory(); return; }
+    PyObject *current = obj;
+    int i;
+    // Traverse from outer to inner, keeping references
+    for (i = 0; i < dim - 1; ++i) {
+        PyObject *py_idx = PyLong_FromLong(idx[i]);
+        PyObject *next = PyObject_GetItem(current, py_idx);
+        Py_DECREF(py_idx);
+        if (next == NULL) {
+            PyErr_Clear();
+            // Cleanup already acquired references
+            for (int j = 0; j < i; ++j) Py_DECREF(stack[j]);
+            free(stack);
+            return;
+        }
+        stack[i] = next;
+        current = next;
+    }
+    // Last dimension: set value
+    PyObject *val = PyFloat_FromDouble(value);
+    PyObject *py_last_idx = PyLong_FromLong(idx[dim-1]);
+    int ret = PyObject_SetItem(current, py_last_idx, val);
+    Py_DECREF(py_last_idx);
+    Py_DECREF(val);
+    if (ret < 0) {
+        PyErr_Clear();
+    }
+    // Release references from inner to outer
+    for (i = dim - 2; i >= 0; --i) {
+        Py_DECREF(stack[i]);
+    }
+    free(stack);
+}
+
+/* Core algorithms - same as ctypes version but with CallbackContext and output_obj */
+Data* cos_comparison_passive(const Data *data,
+                             const int window_size[],
+                             double w1, double w2, double b1, double b2,
+                             const int start[], const int end[],
+                             const int step[], const int d[],
+                             algo_fn algorithm,
+                             CallbackContext *ctx,
+                             const int output_start[], const int output_step[],
+                             PyObject *output_obj, Data *output);
+
+Data* cos_comparison_active(const Data *data, const Data *kernel,
+                            double w1, double w2, double b1, double b2,
+                            const int start[], const int end[],
+                            const int step[],
+                            algo_fn algorithm,
+                            CallbackContext *ctx,
+                            const int output_start[], const int output_step[],
+                            PyObject *output_obj, Data *output);
+
+double cos_full(const Data *a, const Data *b, algo_fn algorithm, CallbackContext *ctx);
+
+Data* cos_local_mean(const Data *data,
+                     const int window_size[],
+                     const int start[], const int end[],
+                     const int step[],
+                     const int output_start[], const int output_step[],
+                     PyObject *output_obj, Data *output, const double weights[]);
+
+Data* cos_local_variance(const Data *data,
+                         const int window_size[],
+                         const int start[], const int end[],
+                         const int step[],
+                         const int output_start[], const int output_step[],
+                         PyObject *output_obj, Data *output);
+
+#endif
