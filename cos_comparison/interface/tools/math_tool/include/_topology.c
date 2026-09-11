@@ -1062,14 +1062,25 @@ static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void
     int big = 0;
     PyObject *item;
     while ((item = PyIter_Next(iter))) {
-        if (Py_TYPE(item) != &PyLong_Type) {
+        /* integer protocol (PyNumber_Index); bool stays excluded */
+        PyObject *cell_obj = NULL;
+        if (PyBool_Check(item)) {
             Py_DECREF(item); Py_DECREF(iter);
             PyErr_SetString(PyExc_TypeError,
                             "Cell must be a positive integer.");
             return NULL;
         }
-        long long cell = PyLong_AsLongLong(item);
+        cell_obj = PyNumber_Index(item);
+        if (!cell_obj) {
+            Py_DECREF(item); Py_DECREF(iter);
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "Cell must be a positive integer.");
+            return NULL;
+        }
         Py_DECREF(item);
+        long long cell = PyLong_AsLongLong(cell_obj);
+        Py_DECREF(cell_obj);
         if (PyErr_Occurred()) {
             PyErr_Clear();
             big = 1;
@@ -1111,23 +1122,35 @@ static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void
         }
         PyObject *it;
         while ((it = PyIter_Next(new_iter))) {
-            if (Py_TYPE(it) != &PyLong_Type) {
+            PyObject *cell_obj = NULL;
+            if (PyBool_Check(it)) {
                 Py_DECREF(it);
                 Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
                 PyErr_SetString(PyExc_TypeError,
                                 "Cell must be a positive integer.");
                 return NULL;
             }
-            long long c = PyLong_AsLongLong(it);
+            cell_obj = PyNumber_Index(it);
+            if (!cell_obj) {
+                Py_DECREF(it);
+                Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
+                PyErr_Clear();
+                PyErr_SetString(PyExc_TypeError,
+                                "Cell must be a positive integer.");
+                return NULL;
+            }
+            long long c = PyLong_AsLongLong(cell_obj);
             if (PyErr_Occurred()) PyErr_Clear();
             else if (c <= 0) {
+                Py_DECREF(cell_obj);
                 Py_DECREF(it);
                 Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
                 PyErr_SetString(PyExc_ValueError,
                                 "Cell must be a positive integer.");
                 return NULL;
             }
-            PyObject *term = PyNumber_Multiply(it, f);
+            PyObject *term = PyNumber_Multiply(cell_obj, f);
+            Py_DECREF(cell_obj);
             PyObject *nr = PyNumber_Add(res, term);
             Py_XDECREF(term);
             Py_DECREF(res);
@@ -1295,36 +1318,45 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+static int module_exec(PyObject *m) {
+    if (PyType_Ready(&GraphType) < 0 || PyType_Ready(&DirectedGraphType) < 0)
+        return -1;
+    Py_INCREF(&GraphType);
+    if (PyModule_AddObject(m, "Graph", (PyObject*)&GraphType) < 0) {
+        Py_DECREF(&GraphType);
+        return -1;
+    }
+    Py_INCREF(&DirectedGraphType);
+    if (PyModule_AddObject(m, "DirectedGraph",
+                           (PyObject*)&DirectedGraphType) < 0) {
+        Py_DECREF(&DirectedGraphType);
+        return -1;
+    }
+    return 0;
+}
+
+static PyModuleDef_Slot module_slots[] = {
+    {Py_mod_exec, (void*)module_exec},
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_topology",
     "C99 optimized topology algorithms and graph types (math_tool).",
     0,
     methods,
-    NULL, NULL, NULL, NULL
+    module_slots,
+    NULL, NULL, NULL
 };
 
 PyMODINIT_FUNC PyInit__topology(void);
 
 PyMODINIT_FUNC PyInit__topology(void) {
-    if (PyType_Ready(&GraphType) < 0 || PyType_Ready(&DirectedGraphType) < 0)
-        return NULL;
-    PyObject *m = PyModule_Create(&moduledef);
-    if (!m) return NULL;
-    Py_INCREF(&GraphType);
-    if (PyModule_AddObject(m, "Graph", (PyObject*)&GraphType) < 0) {
-        Py_DECREF(&GraphType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    Py_INCREF(&DirectedGraphType);
-    if (PyModule_AddObject(m, "DirectedGraph",
-                           (PyObject*)&DirectedGraphType) < 0) {
-        Py_DECREF(&DirectedGraphType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    return m;
+    return PyModuleDef_Init(&moduledef);
 }
 
 #ifdef _MSC_VER

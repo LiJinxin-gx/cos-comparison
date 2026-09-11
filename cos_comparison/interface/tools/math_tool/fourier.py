@@ -7,6 +7,7 @@ Generic formula (real/imag split on floats):
 """
 
 import math
+import operator
 
 __all__ = (
     "dft",
@@ -17,12 +18,39 @@ __all__ = (
 )
 
 
+def _is_sequence(obj):
+    """Sequence protocol (duck): sized + indexable/iterable, text
+    excluded (numeric scalars that expose __getitem__ are not sized)."""
+    if isinstance(obj, (str, bytes)):
+        return False
+    try:
+        len(obj)
+    except TypeError:
+        return False
+    return hasattr(obj, "__getitem__") or hasattr(obj, "__iter__")
+
+
+def _broadcast(value, length, name, what="shape"):
+    """Scalar broadcast or a length-checked sequence (no numeric type
+    hard-coding)."""
+    if _is_sequence(value):
+        value = list(value)
+        if len(value) != length:
+            raise ValueError("%s length must match %s" % (name, what))
+        return value
+    return [value] * length
+
+
 def _split(value):
-    if isinstance(value, complex):
-        return value.real, value.imag
-    if isinstance(value, (tuple, list)):
+    """Complex pair via the numeric protocols: a two-element sequence, a
+    __complex__ value, or any __float__ scalar."""
+    if _is_sequence(value):
         return float(value[0]), float(value[1])
-    return float(value), 0.0
+    try:
+        return float(value), 0.0
+    except (TypeError, ValueError):
+        c = complex(value)
+        return c.real, c.imag
 
 
 def _transform_1d(re, im, inverse):
@@ -66,9 +94,9 @@ def _axes(shape, axis):
     dim = len(shape)
     if axis is None:
         return tuple(range(dim))
-    if isinstance(axis, int):
-        return (axis % dim,)
-    return tuple(a % dim for a in axis)
+    if _is_sequence(axis):
+        return tuple(operator.index(a) % dim for a in axis)
+    return (operator.index(axis) % dim,)
 
 
 def _idx(fixed, axis, k, dim):
@@ -140,14 +168,14 @@ def _mutable(data, shape):
 
 def _scale(data, factor):
     # explicit stack walk, no recursion
-    if not isinstance(data, list):
+    if not _is_sequence(data):
         return data * factor
     root = [None] * len(data)
     stack = [(data, root)]
     while stack:
         src, dst = stack.pop()
         for i, item in enumerate(src):
-            if isinstance(item, list):
+            if _is_sequence(item):
                 sub = [None] * len(item)
                 dst[i] = sub
                 stack.append((item, sub))
@@ -180,14 +208,14 @@ def power_spectrum(data, axis=None):
 
     def walk(obj):
         # explicit stack walk, no recursion
-        if not isinstance(obj, list):
+        if not _is_sequence(obj):
             return abs(obj) * abs(obj)
         root = [None] * len(obj)
         stack = [(obj, root)]
         while stack:
             src, dst = stack.pop()
             for i, item in enumerate(src):
-                if isinstance(item, list):
+                if _is_sequence(item):
                     sub = [None] * len(item)
                     dst[i] = sub
                     stack.append((item, sub))
@@ -219,33 +247,13 @@ def _dft_kernel(shape, frequencies, func, scales=1.0,
     for k, n in zip(frequencies, shape):
         if not (0 <= k < n):
             raise ValueError("frequencies entries must be within shape")
-    if isinstance(scales, (int, float)):
-        scales = [scales] * dim
-    else:
-        scales = list(scales)
-        if len(scales) != dim:
-            raise ValueError("scales length must match shape")
-    if isinstance(offsets, (int, float)):
-        offsets = [offsets] * dim
-    else:
-        offsets = list(offsets)
-        if len(offsets) != dim:
-            raise ValueError("offsets length must match shape")
+    scales = _broadcast(scales, dim, "scales")
+    offsets = _broadcast(offsets, dim, "offsets")
     total = 1
     for n in shape:
         total *= n
-    if isinstance(amplitudes, (int, float)):
-        amplitudes = [amplitudes] * total
-    else:
-        amplitudes = list(amplitudes)
-        if len(amplitudes) != total:
-            raise ValueError("amplitudes length must match element count")
-    if isinstance(biases, (int, float)):
-        biases = [biases] * total
-    else:
-        biases = list(biases)
-        if len(biases) != total:
-            raise ValueError("biases length must match element count")
+    amplitudes = _broadcast(amplitudes, total, "amplitudes", "element count")
+    biases = _broadcast(biases, total, "biases", "element count")
 
     def build(dims):
         # top-down explicit stack build, no recursion
@@ -285,9 +293,9 @@ def _dft_kernel(shape, frequencies, func, scales=1.0,
 
 
 def _dims(shape, frequencies):
-    if isinstance(shape, int):
-        return (shape,), (frequencies,)
-    return tuple(shape), tuple(frequencies)
+    if _is_sequence(shape):
+        return tuple(shape), tuple(frequencies)
+    return (operator.index(shape),), (operator.index(frequencies),)
 
 
 def dft_kernel_real(shape, frequencies, scales=1.0, offsets=0.0,

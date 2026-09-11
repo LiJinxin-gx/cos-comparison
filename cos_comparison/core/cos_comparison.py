@@ -937,7 +937,7 @@ class vector_map_as_tensor:
 #    ---------containers----------
 class func_name_space(Mapping):
     __slots__ = ("output", "output_start", "output_step", "window_size", "kernel",
-                 "linear", "start", "end", "d", "step", "algorithm", "num",
+                 "start", "end", "d", "step", "algorithm", "num",
                  "start_callback", "end_callback", "iter_a_callback", "iter_b_callback",
                  "global_error_callback", "local_error_callback", "return_callback",
                  "_extra")
@@ -1008,11 +1008,53 @@ private_dict = {
 
 #-------------------- core ----------------------------------
 #    ------------------ passive mode ------------------------
+def _passive_kernel(index, *, data, output, output_start, output_step,
+                    window_size, window_start, window_step, d, algorithm, name,
+                    global_error_callback, local_error_callback,
+                    transform1=None, transform2=None):
+    """One output element: aggregate the window offsets, apply the
+    algorithm, write the output."""
+    dimension = len(index)
+    try:
+        main = other = mu = 0
+        inner = [0] * dimension
+        inner_flag = dimension
+        while inner_flag:
+            if inner_flag == dimension:
+                main_place = tuple(window_start[i] + window_step[i] * index[i] + inner[i]
+                                   for i in range(dimension))
+                other_place = tuple(main_place[i] + d[i]
+                                    for i in range(dimension))
+                try:
+                    a = get_item(data, main_place)
+                    b = get_item(data, other_place)
+                    if transform1 is not None:
+                        a = transform1(a)
+                    if transform2 is not None:
+                        b = transform2(b)
+                    main += a * a
+                    other += b * b
+                    mu += a * b
+                except Exception as e:
+                    if local_error_callback:
+                        local_error_callback(e, name)
+            if inner[inner_flag - 1] + 1 < window_size[inner_flag - 1]:
+                inner[inner_flag - 1] += 1
+                inner_flag = dimension
+            else:
+                inner[inner_flag - 1] = 0
+                inner_flag -= 1
+        output_places = tuple(output_start[p] + output_step[p] * index[p]
+                              for p in range(dimension))
+        set_item(output, output_places, algorithm(main, other, mu, name))
+    except Exception as e:
+        if global_error_callback:
+            global_error_callback(e, name)
+
+
 def cos_comparison_passive(data,
                            *arg,
                            window_size=None,
-                           w1=1.0, w2=1.0,
-                           b1=0.0, b2=0.0,
                            start=None, end=None,
                            step=None, d=None,
                            algorithm=_default_algorithm,
@@ -1020,12 +1062,13 @@ def cos_comparison_passive(data,
                            output_start=None, output_step=None,
                            start_callback=None,
                            end_callback=None,
-                           iter_a_callback=None, iter_b_callback=None,
                            global_error_callback=None,
                            local_error_callback=None,
                            return_callback=None,
                            use_namespace=True,
                            namespace_hook=None,
+                           iterate=None,
+                           transform1=None, transform2=None,
                            **kwargs):
     if hasattr(data, "__cos_comparison_passive__"):
         dicts = locals()
@@ -1067,14 +1110,11 @@ def cos_comparison_passive(data,
         output=output,
         output_start=output_start, output_step=output_step,
         window_size=window_size,
-        linear=(w1, w2, b1, b2),
         start=start, end=end, step=step, d=d,
         algorithm=algorithm,
         num=num,
         start_callback=start_callback,
         end_callback=end_callback,
-        iter_a_callback=iter_a_callback,
-        iter_b_callback=iter_b_callback,
         global_error_callback=global_error_callback,
         local_error_callback=local_error_callback,
         return_callback=return_callback,
@@ -1084,6 +1124,20 @@ def cos_comparison_passive(data,
 
     if start_callback:
         start_callback(name)
+
+    if iterate is not None:
+        iterate(_passive_kernel, data_shape=tuple(num), data=data,
+                output=output, output_start=output_start,
+                output_step=output_step, window_size=window_size,
+                window_start=start, window_step=step, d=d, algorithm=algorithm,
+                name=name, global_error_callback=global_error_callback,
+                local_error_callback=local_error_callback,
+                transform1=transform1, transform2=transform2)
+        if end_callback:
+            end_callback(name)
+        if return_callback:
+            return return_callback(output, name)
+        return output
 
     flag = dimension  # start at innermost dimension
     num_list = [None] + [1 for _ in num]  # 1-based indices
@@ -1110,8 +1164,12 @@ def cos_comparison_passive(data,
                             other_place = tuple(
                                 main_place[i] + d[i] for i in range(dimension)
                             )
-                            a = w1 * get_item(data, main_place) + b1
-                            b = w2 * get_item(data, other_place) + b2
+                            a = get_item(data, main_place)
+                            b = get_item(data, other_place)
+                            if transform1 is not None:
+                                a = transform1(a)
+                            if transform2 is not None:
+                                b = transform2(b)
                             main += a * a
                             other += b * b
                             mu += a * b
@@ -1129,11 +1187,6 @@ def cos_comparison_passive(data,
 
                 output_places = tuple( ( output_start[p] + output_step[p] * (num_list[p + 1] - 1) for p in range(dimension) ) )
                 set_item(output,output_places,algorithm(main, other, mu, name))
-
-                if iter_a_callback:
-                    iter_a_callback(name)
-                if iter_b_callback:
-                    iter_b_callback(name)
 
             # Advance output position or carry left
             if num_list[flag] < num[flag - 1]:
@@ -1159,11 +1212,52 @@ cos_comparison_passive_3d=cos_comparison_passive
 cos_comparison_passive_4d=cos_comparison_passive
 
 # -------------------- active mode --------------------
+def _active_kernel(index, *, data, window_kernel, output, output_start, output_step,
+                   window_size, window_start, window_step, algorithm, name,
+                   global_error_callback, local_error_callback,
+                   transform1=None, transform2=None):
+    """One output element: aggregate the data window against the kernel
+    template, apply the algorithm, write the output."""
+    dimension = len(index)
+    try:
+        main = other = mu = 0
+        inner = [0] * dimension
+        inner_flag = dimension
+        while inner_flag:
+            if inner_flag == dimension:
+                data_place = tuple(window_start[i] + window_step[i] * index[i] + inner[i]
+                                   for i in range(dimension))
+                kern_place = tuple(inner[i] for i in range(dimension))
+                try:
+                    a = get_item(data, data_place)
+                    b = get_item(window_kernel, kern_place)
+                    if transform1 is not None:
+                        a = transform1(a)
+                    if transform2 is not None:
+                        b = transform2(b)
+                    main += a * a
+                    other += b * b
+                    mu += a * b
+                except Exception as e:
+                    if local_error_callback:
+                        local_error_callback(e, name)
+            if inner[inner_flag - 1] + 1 < window_size[inner_flag - 1]:
+                inner[inner_flag - 1] += 1
+                inner_flag = dimension
+            else:
+                inner[inner_flag - 1] = 0
+                inner_flag -= 1
+        output_places = tuple(output_start[p] + output_step[p] * index[p]
+                              for p in range(dimension))
+        set_item(output, output_places, algorithm(main, other, mu, name))
+    except Exception as e:
+        if global_error_callback:
+            global_error_callback(e, name)
+
+
 def cos_comparison_active(data,
                           *arg,
                           kernel=None,
-                          w1=1.0, w2=1.0,
-                          b1=0.0, b2=0.0,
                           start=None, end=None,
                           step=None,
                           algorithm=_default_algorithm,
@@ -1171,12 +1265,13 @@ def cos_comparison_active(data,
                           output_start=None, output_step=None,
                           start_callback=None,
                           end_callback=None,
-                          iter_a_callback=None, iter_b_callback=None,
                           global_error_callback=None,
                           local_error_callback=None,
                           return_callback=None,
-                           use_namespace=True,
-                           namespace_hook=None,
+                          use_namespace=True,
+                          namespace_hook=None,
+                          iterate=None,
+                          transform1=None, transform2=None,
                           **kwargs):
     if hasattr(data, "__cos_comparison_active__"):
         dicts = locals()
@@ -1231,14 +1326,11 @@ def cos_comparison_active(data,
         output_start=output_start, output_step=output_step,
         window_size=window_size,
         kernel=kernel,
-        linear=(w1, w2, b1, b2),
         start=start, end=end, step=step,
         algorithm=algorithm,
         num=num,
         start_callback=start_callback,
         end_callback=end_callback,
-        iter_a_callback=iter_a_callback,
-        iter_b_callback=iter_b_callback,
         global_error_callback=global_error_callback,
         local_error_callback=local_error_callback,
         return_callback=return_callback,
@@ -1248,6 +1340,20 @@ def cos_comparison_active(data,
 
     if start_callback:
         start_callback(name)
+
+    if iterate is not None:
+        iterate(_active_kernel, data_shape=tuple(num), data=data,
+                window_kernel=kernel, output=output, output_start=output_start,
+                output_step=output_step, window_size=window_size,
+                window_start=start, window_step=step, algorithm=algorithm,
+                name=name, global_error_callback=global_error_callback,
+                local_error_callback=local_error_callback,
+                transform1=transform1, transform2=transform2)
+        if end_callback:
+            end_callback(name)
+        if return_callback:
+            return return_callback(output, name)
+        return output
 
     flag = dimension  # start at innermost dimension
     num_list = [None] + [1 for _ in num]
@@ -1275,8 +1381,12 @@ def cos_comparison_active(data,
                             kern_place = tuple(
                                 inner_list[i + 1] - 1 for i in range(dimension)
                             )
-                            a = w1 * get_item(data, data_place) + b1
-                            b = w2 * get_item(kernel, kern_place) + b2
+                            a = get_item(data, data_place)
+                            b = get_item(kernel, kern_place)
+                            if transform1 is not None:
+                                a = transform1(a)
+                            if transform2 is not None:
+                                b = transform2(b)
                             main += a * a
                             other += b * b
                             mu += a * b
@@ -1294,11 +1404,6 @@ def cos_comparison_active(data,
 
                 output_places = tuple( ( output_start[p] + output_step[p] * (num_list[p + 1] - 1) for p in range(dimension) ) )
                 set_item(output,output_places,algorithm(main, other, mu, name))
-
-                if iter_a_callback:
-                    iter_a_callback(name)
-                if iter_b_callback:
-                    iter_b_callback(name)
 
             # Advance output position or carry left
             if num_list[flag] < num[flag - 1]:
@@ -1532,6 +1637,12 @@ def _region_spec(data, start, shape, step):
     data_shape = infer_shape(data)
     if data_shape is None:
         raise ValueError("cannot infer shape of data")
+    return _region_spec_by_shape(data_shape, start, shape, step)
+
+
+def _region_spec_by_shape(data_shape, start, shape, step):
+    """Same as _region_spec but takes the data shape directly (available
+    to custom iterators for resolving the position parameters)."""
     dimension = len(data_shape)
     if start is None:
         start = (0,) * dimension
@@ -1587,13 +1698,116 @@ def _region_walk(effective):
             idx[i] = 0
 
 
+# ---------------------------------------------------------------------------
+# Element kernels for the optional iterate path (module-level, private, not
+# exported): kernel(index, **upper-layer keyword parameters).  The default
+# path (iterate=None) keeps the original inline skeleton; these kernels are
+# used only when a custom iterator is injected.  Kernel logic matches the
+# inline skeleton (kept equivalent by the paired tests).
+# ---------------------------------------------------------------------------
+
+def _data_mapping_kernel(index, *, data, callback, out, r_start, r_step,
+                         out_start, out_step, out_shape):
+    """data_mapping principle: index -> read -> callback -> write."""
+    dimension = len(index)
+    read = tuple(r_start[i] + index[i] * r_step[i]
+                 for i in range(dimension))
+    value = get_item(data, read)
+    try:
+        mapped = callback(value)
+    except Exception:
+        return
+    write = tuple(out_start[i] + index[i] * out_step[i]
+                  for i in range(dimension))
+    if all(write[i] < out_shape[i] for i in range(dimension)):
+        set_item(out, write, mapped)
+
+
+def _data_filter_kernel(index, *, data, callback, hits, r_start, r_step,
+                        origin, basis):
+    """data_filter principle: index -> read -> predicate -> collect."""
+    dimension = len(index)
+    read = tuple(r_start[i] + index[i] * r_step[i]
+                 for i in range(dimension))
+    value = get_item(data, read)
+    try:
+        hit = callback(value)
+    except Exception:
+        return
+    if hit:
+        hits.append(tuple(origin[i] + basis[i] * index[i]
+                          for i in range(dimension)))
+
+
+def _elementwise_kernel(index, *, tensors, func, output):
+    """elementwise principle: index -> multi-read -> func -> write."""
+    vals = tuple(get_item(t, index) for t in tensors)
+    value = func(*vals)
+    if not isinstance(value, (int, float)):
+        raise TypeError("elementwise func must return a number")
+    set_item(output, index, value)
+
+
+def _position_map_kernel(index, *, output, callback, r_start, r_step,
+                         origin, scale, status):
+    """position_map principle: index -> logical -> callback -> write."""
+    if status[0]:
+        return
+    dimension = len(index)
+    real = tuple(r_start[i] + index[i] * r_step[i]
+                 for i in range(dimension))
+    logical = _position_transform(real, origin, scale)
+    try:
+        value = callback(logical)
+    except Exception:
+        return
+    try:
+        set_item(output, real, value)
+    except Exception:
+        status[0] = 1
+
+
+def _elementwise_position_kernel(index, *, output, tensors, callback,
+                                 r_start, r_step, origin, scale, status):
+    """elementwise_position principle: index -> multi-read + logical ->
+    callback -> write."""
+    if status[0]:
+        return
+    dimension = len(index)
+    real = tuple(r_start[i] + index[i] * r_step[i]
+                 for i in range(dimension))
+    logical = _position_transform(real, origin, scale)
+    elements = []
+    for tensor in tensors:
+        try:
+            elements.append(get_item(tensor, real))
+        except Exception:
+            status[0] = 1
+            return
+    try:
+        value = callback(elements, logical)
+    except Exception:
+        return
+    try:
+        set_item(output, real, value)
+    except Exception:
+        status[0] = 1
+
+
 def data_filter(data, callback, *, start=None, shape=None, step=None,
-                origin=None, basis=None):
+                origin=None, basis=None, iterate=None):
     """Yield the position (multi-dimensional index) of every element whose
     callback(value) is truthy, over a sampled read region (start/shape/step,
     clipped like load_data's source side). Reported position:
     origin + basis * local (defaults origin=start, basis=step). Callback
-    errors are silently skipped; iterative, callback is stateless."""
+    errors are silently skipped; iterative, callback is stateless.
+
+    iterate: optional custom iterator - a callable
+    ``iterate(kernel, **index_info)`` that resolves the position parameters
+    (data_shape/start/shape/step) and hands the index plus the remaining
+    keyword parameters to ``kernel(index, **params)``.  When given, the
+    element work runs through ``_data_filter_kernel``; when None (default)
+    the original inline skeleton runs unchanged."""
     effective, r_start, r_step = _region_spec(data, start, shape, step)
     dimension = len(effective)
     if origin is None:
@@ -1608,6 +1822,15 @@ def data_filter(data, callback, *, start=None, shape=None, step=None,
         basis = tuple(basis)
         if len(basis) != dimension:
             raise ValueError("basis length does not match data dimension")
+    if iterate is not None:
+        hits = []
+        iterate(_data_filter_kernel, data_shape=infer_shape(data),
+                start=r_start, shape=shape, step=r_step, data=data,
+                callback=callback, hits=hits, r_start=r_start,
+                r_step=r_step, origin=origin, basis=basis)
+        for position in hits:
+            yield position
+        return
     for local in _region_walk(effective):
         read = tuple(r_start[i] + local[i] * r_step[i] for i in range(dimension))
         value = get_item(data, read)
@@ -1619,7 +1842,7 @@ def data_filter(data, callback, *, start=None, shape=None, step=None,
             yield tuple(origin[i] + basis[i] * local[i] for i in range(dimension))
 
 
-def elementwise(*tensors, func=None, output=None):
+def elementwise(*tensors, func=None, output=None, iterate=None):
     """Element-wise operation over tensors (duck typing):
     elementwise(t1, t2, func=f, output=o) -> 0 on success.
 
@@ -1627,7 +1850,10 @@ def elementwise(*tensors, func=None, output=None):
     f(x1, x2, ...). Tensors only need get_item / set_item / infer_shape
     (no concrete types); shapes must match exactly. The result is written
     into `output` (same shape). Callback errors propagate and the callback
-    must return a number. Iterative, never recursive."""
+    must return a number. Iterative, never recursive.
+
+    iterate: optional custom iterator (see data_filter); the element work
+    then runs through ``_elementwise_kernel``."""
     if func is None:
         raise TypeError("func is required")
     if not tensors:
@@ -1642,6 +1868,10 @@ def elementwise(*tensors, func=None, output=None):
             raise ValueError("the shape of two tensors are not same.")
     if infer_shape(output) != shape:
         raise ValueError("output shape does not match input")
+    if iterate is not None:
+        iterate(_elementwise_kernel, data_shape=shape, tensors=tensors,
+                func=func, output=output)
+        return 0
     dimension = len(shape)
     total = 1
     for s in shape:
@@ -1662,12 +1892,18 @@ def elementwise(*tensors, func=None, output=None):
 
 
 def data_mapping(data, callback, *, start=None, shape=None, step=None,
-                 out=None, out_start=None, out_step=None):
+                 out=None, out_start=None, out_step=None, iterate=None):
     """Map each element of the sampled read region through callback(value)
     and write the result to the output; callback errors are silently
     skipped. Output: pre-allocated via `out` (default: a fresh tensor shaped
     like the read region); write position = out_start + out_step * local
-    (clipped like load_data's target side). Returns the output tensor."""
+    (clipped like load_data's target side). Returns the output tensor.
+
+    iterate: optional custom iterator (see data_filter); the element work
+    then runs through ``_data_mapping_kernel``."""
+    data_shape = infer_shape(data)
+    if data_shape is None:
+        raise ValueError("cannot infer shape of data")
     effective, r_start, r_step = _region_spec(data, start, shape, step)
     dimension = len(effective)
     if out is None:
@@ -1695,6 +1931,13 @@ def data_mapping(data, callback, *, start=None, shape=None, step=None,
         for v in out_step:
             if v <= 0:
                 raise ValueError("out_step entries must be positive")
+    if iterate is not None:
+        iterate(_data_mapping_kernel, data_shape=data_shape, start=r_start,
+                shape=shape, step=r_step, data=data, callback=callback,
+                out=out, r_start=r_start, r_step=r_step,
+                out_start=out_start, out_step=out_step,
+                out_shape=out_shape)
+        return out
     for local in _region_walk(effective):
         read = tuple(r_start[i] + local[i] * r_step[i] for i in range(dimension))
         value = get_item(data, read)
@@ -1748,7 +1991,7 @@ def _position_region(output, start, shape, step, origin, scale):
 
 
 def position_map(output, callback, *, start=None, shape=None, step=None,
-                 origin=None, scale=None):
+                 origin=None, scale=None, iterate=None):
     """Position-driven element callback: for every real position of the
     read region (start/shape/step), output[real] = callback(logical).
     The logical coordinate passed to the callback is the real index
@@ -1756,9 +1999,19 @@ def position_map(output, callback, *, start=None, shape=None, step=None,
     (logical_i = (real_i - origin_i) / scale_i); the traversal and the
     write stay on the real region (set_item protocol).  Callback errors
     are silently skipped; a write failure stops with status 1.
-    Returns a status code (0 success)."""
+    Returns a status code (0 success).
+
+    iterate: optional custom iterator (see data_filter); the element work
+    then runs through ``_position_map_kernel``."""
     effective, r_start, r_step, origin, scale = _position_region(
         output, start, shape, step, origin, scale)
+    if iterate is not None:
+        status = [0]
+        iterate(_position_map_kernel, data_shape=infer_shape(output),
+                start=r_start, shape=shape, step=r_step, output=output,
+                callback=callback, r_start=r_start, r_step=r_step,
+                origin=origin, scale=scale, status=status)
+        return status[0]
     for local in _region_walk(effective):
         real = tuple(r_start[i] + local[i] * r_step[i]
                      for i in range(len(effective)))
@@ -1776,17 +2029,28 @@ def position_map(output, callback, *, start=None, shape=None, step=None,
 
 def elementwise_position(output, *tensors, callback=None,
                          start=None, shape=None, step=None,
-                         origin=None, scale=None):
+                         origin=None, scale=None, iterate=None):
     """Multi-tensor element callback by position:
     output[real] = callback([t[real] for t in tensors], logical), where
     each tensor is read at the same real position and logical is the
     origin/scale-redirected coordinate.  Callback errors are silently
     skipped; a read or write failure stops with status 1.
-    Returns a status code (0 success)."""
+    Returns a status code (0 success).
+
+    iterate: optional custom iterator (see data_filter); the element work
+    then runs through ``_elementwise_position_kernel``."""
     if callback is None:
         raise TypeError("callback is required")
     effective, r_start, r_step, origin, scale = _position_region(
         output, start, shape, step, origin, scale)
+    if iterate is not None:
+        status = [0]
+        iterate(_elementwise_position_kernel,
+                data_shape=infer_shape(output), start=r_start, shape=shape,
+                step=r_step, output=output, tensors=tensors,
+                callback=callback, r_start=r_start, r_step=r_step,
+                origin=origin, scale=scale, status=status)
+        return status[0]
     for local in _region_walk(effective):
         real = tuple(r_start[i] + local[i] * r_step[i]
                      for i in range(len(effective)))

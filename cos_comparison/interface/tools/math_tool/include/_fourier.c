@@ -61,6 +61,15 @@ static void dft_1d(double *re, double *im, Py_ssize_t n, double sign) {
  * Nested list helpers (list fast path, sequence fallback)
  * ================================================================== */
 
+/* Sequence protocol: sized + sequence, text excluded (numeric scalars
+ * are not sized and fall through). */
+static int is_seq_proto(PyObject *obj) {
+    if (PyUnicode_Check(obj) || PyBytes_Check(obj)) return 0;
+    if (!PySequence_Check(obj)) return 0;
+    if (PyObject_Length(obj) < 0) { PyErr_Clear(); return 0; }
+    return 1;
+}
+
 static PyObject *get_nested(PyObject *data, const long *idx, int dim) {
     PyObject *obj = data;
     for (int i = 0; i < dim; ++i) {
@@ -81,13 +90,7 @@ static PyObject *get_nested(PyObject *data, const long *idx, int dim) {
 }
 
 static PyObject *split(PyObject *value, double *re, double *im) {
-    if (PyComplex_Check(value)) {
-        *re = PyComplex_RealAsDouble(value);
-        *im = PyComplex_ImagAsDouble(value);
-        return PyErr_Occurred() ? NULL : value;
-    }
-    if (PySequence_Check(value) && !PyBytes_Check(value) &&
-        !PyUnicode_Check(value)) {
+    if (is_seq_proto(value)) {
         PyObject *a = PySequence_GetItem(value, 0);
         PyObject *b = PySequence_GetItem(value, 1);
         if (!a || !b) { Py_XDECREF(a); Py_XDECREF(b); return NULL; }
@@ -96,8 +99,15 @@ static PyObject *split(PyObject *value, double *re, double *im) {
         Py_DECREF(a); Py_DECREF(b);
         return PyErr_Occurred() ? NULL : value;
     }
+    /* float protocol first, complex protocol as fallback (duck numeric) */
     *re = PyFloat_AsDouble(value);
-    *im = 0.0;
+    if (!PyErr_Occurred()) {
+        *im = 0.0;
+        return value;
+    }
+    PyErr_Clear();
+    *re = PyComplex_RealAsDouble(value);
+    *im = PyComplex_ImagAsDouble(value);
     return PyErr_Occurred() ? NULL : value;
 }
 
@@ -140,8 +150,10 @@ static PyObject *resolve_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *
             }
         return axes;
     }
-    if (PyLong_Check(axis)) {
-        Py_ssize_t a = PyLong_AsSsize_t(axis);
+    PyObject *axis_idx = PyNumber_Index(axis);
+    if (axis_idx) {
+        Py_ssize_t a = PyLong_AsSsize_t(axis_idx);
+        Py_DECREF(axis_idx);
         if (PyErr_Occurred()) { Py_DECREF(axes); return NULL; }
         a %= dim;
         if (a < 0) a += dim;
@@ -151,6 +163,7 @@ static PyObject *resolve_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *
         }
         return axes;
     }
+    PyErr_Clear();
     PyObject *it = PyObject_GetIter(axis);
     if (!it) { Py_DECREF(axes); return NULL; }
     PyObject *item;
@@ -286,7 +299,7 @@ static int axes_transform_one(PyObject *data, PyObject *shape_list,
     return 0;
 }
 
-/* deep mutable copy of data by shape (iterative, no recursion) */
+/* deep mutable copy of data by shape (iterative) */
 static PyObject *deep_mutable(PyObject *data, PyObject *shape_list) {
     Py_ssize_t dim = PyList_GET_SIZE(shape_list);
     if (dim == 0) {
@@ -348,22 +361,27 @@ static PyObject *deep_mutable(PyObject *data, PyObject *shape_list) {
     return root;
 }
 
-/* scale every leaf by factor (iterative) */
+/* scale every leaf by factor (iterative; sequence protocol) */
 static PyObject *scale(PyObject *data, double factor) {
-    if (!PyList_Check(data)) {
+    if (!is_seq_proto(data)) {
         return PyFloat_FromDouble(PyFloat_AsDouble(data) * factor);
     }
-    Py_ssize_t n = PyList_GET_SIZE(data);
+    PyObject *work = PyList_Check(data) ? (Py_INCREF(data), data)
+                                        : PySequence_List(data);
+    if (!work) return NULL;
+    Py_ssize_t n = PyList_GET_SIZE(work);
     PyObject *root = PyList_New(n);
-    if (!root) return NULL;
+    if (!root) { Py_DECREF(work); return NULL; }
     PyObject *stack = PyList_New(0);
-    if (!stack) { Py_DECREF(root); return NULL; }
-    PyObject *init = PyTuple_Pack(2, data, root);
+    if (!stack) { Py_DECREF(work); Py_DECREF(root); return NULL; }
+    PyObject *init = PyTuple_Pack(2, work, root);
     if (!init || PyList_Append(stack, init) < 0) {
-        Py_XDECREF(init); Py_DECREF(root); Py_DECREF(stack);
+        Py_XDECREF(init); Py_DECREF(work);
+        Py_DECREF(root); Py_DECREF(stack);
         return NULL;
     }
     Py_DECREF(init);
+    Py_DECREF(work);   /* the frame holds the reference now */
     while (PyList_GET_SIZE(stack) > 0) {
         PyObject *top = PyList_GET_ITEM(stack, PyList_GET_SIZE(stack) - 1);
         Py_INCREF(top);
@@ -375,11 +393,18 @@ static PyObject *scale(PyObject *data, double factor) {
         Py_ssize_t m = PyList_GET_SIZE(src);
         for (Py_ssize_t i = 0; i < m; ++i) {
             PyObject *item = PyList_GET_ITEM(src, i);
-            if (PyList_Check(item)) {
-                PyObject *sub = PyList_New(PyList_GET_SIZE(item));
-                if (!sub) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+            if (is_seq_proto(item)) {
+                PyObject *sub_src = PyList_Check(item)
+                    ? (Py_INCREF(item), item) : PySequence_List(item);
+                if (!sub_src) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+                PyObject *sub = PyList_New(PyList_GET_SIZE(sub_src));
+                if (!sub) {
+                    Py_DECREF(sub_src); Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
                 PyList_SET_ITEM(dst, i, sub);
-                PyObject *frame = PyTuple_Pack(2, item, sub);
+                PyObject *frame = PyTuple_Pack(2, sub_src, sub);
+                Py_DECREF(sub_src);
                 if (!frame || PyList_Append(stack, frame) < 0) {
                     Py_XDECREF(frame); Py_DECREF(root); Py_DECREF(stack);
                     return NULL;
@@ -398,24 +423,47 @@ static PyObject *scale(PyObject *data, double factor) {
     return root;
 }
 
-/* walk every leaf -> |x|^2 (iterative) */
-static PyObject *spectrum_walk(PyObject *obj) {
-    if (!PyList_Check(obj)) {
-        double v = PyFloat_AsDouble(obj);
-        if (PyErr_Occurred()) return NULL;
-        return PyFloat_FromDouble(v * v);
+/* |leaf|^2 through the float / complex protocols */
+static int leaf_power(PyObject *obj, double *out) {
+    PyObject *f = PyNumber_Float(obj);
+    if (f) {
+        double v = PyFloat_AsDouble(f);
+        Py_DECREF(f);
+        if (PyErr_Occurred()) return -1;
+        *out = v * v;
+        return 0;
     }
-    Py_ssize_t n = PyList_GET_SIZE(obj);
+    PyErr_Clear();
+    double r = PyComplex_RealAsDouble(obj);
+    double i = PyComplex_ImagAsDouble(obj);
+    if (PyErr_Occurred()) return -1;
+    *out = r * r + i * i;
+    return 0;
+}
+
+/* walk every leaf -> |x|^2 (iterative; sequence + complex protocols) */
+static PyObject *spectrum_walk(PyObject *obj) {
+    if (!is_seq_proto(obj)) {
+        double v;
+        if (leaf_power(obj, &v) < 0) return NULL;
+        return PyFloat_FromDouble(v);
+    }
+    PyObject *work = PyList_Check(obj) ? (Py_INCREF(obj), obj)
+                                       : PySequence_List(obj);
+    if (!work) return NULL;
+    Py_ssize_t n = PyList_GET_SIZE(work);
     PyObject *root = PyList_New(n);
-    if (!root) return NULL;
+    if (!root) { Py_DECREF(work); return NULL; }
     PyObject *stack = PyList_New(0);
-    if (!stack) { Py_DECREF(root); return NULL; }
-    PyObject *init = PyTuple_Pack(2, obj, root);
+    if (!stack) { Py_DECREF(work); Py_DECREF(root); return NULL; }
+    PyObject *init = PyTuple_Pack(2, work, root);
     if (!init || PyList_Append(stack, init) < 0) {
-        Py_XDECREF(init); Py_DECREF(root); Py_DECREF(stack);
+        Py_XDECREF(init); Py_DECREF(work);
+        Py_DECREF(root); Py_DECREF(stack);
         return NULL;
     }
     Py_DECREF(init);
+    Py_DECREF(work);   /* the frame holds the reference now */
     while (PyList_GET_SIZE(stack) > 0) {
         PyObject *top = PyList_GET_ITEM(stack, PyList_GET_SIZE(stack) - 1);
         Py_INCREF(top);
@@ -427,20 +475,30 @@ static PyObject *spectrum_walk(PyObject *obj) {
         Py_ssize_t m = PyList_GET_SIZE(src);
         for (Py_ssize_t i = 0; i < m; ++i) {
             PyObject *item = PyList_GET_ITEM(src, i);
-            if (PyList_Check(item)) {
-                PyObject *sub = PyList_New(PyList_GET_SIZE(item));
-                if (!sub) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+            if (is_seq_proto(item)) {
+                PyObject *sub_src = PyList_Check(item)
+                    ? (Py_INCREF(item), item) : PySequence_List(item);
+                if (!sub_src) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+                PyObject *sub = PyList_New(PyList_GET_SIZE(sub_src));
+                if (!sub) {
+                    Py_DECREF(sub_src); Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
                 PyList_SET_ITEM(dst, i, sub);
-                PyObject *frame = PyTuple_Pack(2, item, sub);
+                PyObject *frame = PyTuple_Pack(2, sub_src, sub);
+                Py_DECREF(sub_src);
                 if (!frame || PyList_Append(stack, frame) < 0) {
                     Py_XDECREF(frame); Py_DECREF(root); Py_DECREF(stack);
                     return NULL;
                 }
                 Py_DECREF(frame);
             } else {
-                double v = PyFloat_AsDouble(item);
-                if (PyErr_Occurred()) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
-                PyObject *sq = PyFloat_FromDouble(v * v);
+                double v;
+                if (leaf_power(item, &v) < 0) {
+                    Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
+                PyObject *sq = PyFloat_FromDouble(v);
                 if (!sq) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
                 PyList_SET_ITEM(dst, i, sq);
             }
@@ -531,7 +589,7 @@ static int axis_param(PyObject *obj, double **out, Py_ssize_t dim, double dflt) 
         for (Py_ssize_t i = 0; i < dim; ++i) (*out)[i] = dflt;
         return 0;
     }
-    if (PyNumber_Check(obj)) {
+    if (!is_seq_proto(obj) && PyNumber_Check(obj)) {
         double v = PyFloat_AsDouble(obj);
         if (PyErr_Occurred()) return -1;
         *out = (double*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(double));
@@ -577,7 +635,7 @@ static int element_param(PyObject *obj, double **out, long long total, double df
         for (long long i = 0; i < total; ++i) (*out)[i] = dflt;
         return 0;
     }
-    if (PyNumber_Check(obj)) {
+    if (!is_seq_proto(obj) && PyNumber_Check(obj)) {
         double v = PyFloat_AsDouble(obj);
         if (PyErr_Occurred()) return -1;
         *out = (double*)malloc((size_t)total * sizeof(double));
@@ -616,20 +674,23 @@ static PyObject *kernel_impl(PyObject *shape_arg, PyObject *freq_arg,
                               int use_cos, PyObject *scales,
                               PyObject *offsets, PyObject *amplitudes,
                               PyObject *biases) {
-    /* normalize shape / frequencies */
+    /* normalize shape / frequencies (integer protocol first) */
     PyObject *shape_list;
-    PyObject *freq_list;    if (PyLong_Check(shape_arg)) {
+    PyObject *freq_list;
+    PyObject *shape_idx = PyNumber_Index(shape_arg);
+    if (shape_idx) {
         shape_list = PyList_New(1);
         freq_list = PyList_New(1);
         if (!shape_list || !freq_list) {
+            Py_XDECREF(shape_idx);
             Py_XDECREF(shape_list); Py_XDECREF(freq_list);
             return NULL;
         }
-        Py_INCREF(shape_arg);
-        PyList_SET_ITEM(shape_list, 0, shape_arg);
+        PyList_SET_ITEM(shape_list, 0, shape_idx);
         Py_INCREF(freq_arg);
         PyList_SET_ITEM(freq_list, 0, freq_arg);
     } else {
+        PyErr_Clear();
         shape_list = PySequence_List(shape_arg);
         freq_list = PySequence_List(freq_arg);
     }    if (!shape_list || !freq_list) {
@@ -890,13 +951,21 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+static PyModuleDef_Slot module_slots[] = {
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_fourier",
     "C99 optimized Fourier transforms and DFT kernels (math_tool).",
     0,
     methods,
-    NULL, NULL, NULL, NULL
+    module_slots,
+    NULL, NULL, NULL
 };
 
 PyMODINIT_FUNC PyInit__fourier(void);

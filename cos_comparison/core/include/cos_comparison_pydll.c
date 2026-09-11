@@ -48,7 +48,7 @@ static PyObject* get_nested_item(PyObject *obj, int *indices, int dim) {
 }
 
 /* ------------------------------------------------------------------
-Helper: flatten nested list to flat array (iterative, no recursion)
+Helper: flatten nested data to a flat double array (iterative)
 ------------------------------------------------------------------ */
 static int flatten_list(PyObject *obj, double *out, int *idx, int dim, const int *shape) {
     /* Degenerate shape (any dimension <= 0): nothing to flatten. */
@@ -913,7 +913,7 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
 load_data: copy a sub-region from source to target with independent
 start/step for each side.  Tries PyBuffer fast path first, falls back
 to get_item/set_item on any failure.  Returns the number of elements
-actually copied.  Iterative, no recursion.
+actually copied.  Iterative.
 ------------------------------------------------------------------ */
 static PyObject* py_get_item(PyObject *self, PyObject *args);
 static PyObject* py_set_item(PyObject *self, PyObject *args);
@@ -1134,7 +1134,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         }
     }
 
-    /* ---- copy loop (iterative carry, no recursion) ---- */
+    /* ---- copy loop (iterative carry) ---- */
     int *num = (int*)calloc((size_t)dim, sizeof(int));
     if (!num) {
         Py_XDECREF(src_mv); Py_XDECREF(tgt_mv);
@@ -1955,13 +1955,36 @@ Python wrapper functions (full implementations)
 ------------------------------------------------------------------ */
 
 /* Passive mode Python wrapper */
+/* Derive "<pkg>.core.cos_comparison" from this module's own name (never
+ * hard-code the package name) - used to delegate the iterate path of the
+ * passive/active functions to the pure Python reference implementation. */
+static PyObject* _import_pure_core(PyObject *self) {
+    const char *full = PyModule_GetName(self);
+    if (!full) return NULL;
+    const char *dot = strrchr(full, '.');
+    if (!dot) {
+        PyErr_SetString(PyExc_ImportError,
+                        "cannot derive the package name");
+        return NULL;
+    }
+    size_t len = (size_t)(dot - full);
+    char *buf = (char*)malloc(len + sizeof(".cos_comparison"));
+    if (!buf) { PyErr_NoMemory(); return NULL; }
+    memcpy(buf, full, len);
+    memcpy(buf + len, ".cos_comparison", sizeof(".cos_comparison"));
+    PyObject *mod = PyImport_ImportModule(buf);
+    free(buf);
+    return mod;
+}
+
 static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     (void)self;
     PyObject *data_obj, *window_size_obj = NULL, *start_obj = NULL, *end_obj = NULL,
              *step_obj = NULL, *d_obj = NULL, *algo_name = NULL, *output_obj = NULL,
              *output_start_obj = NULL, *output_step_obj = NULL, *start_callback = NULL,
              *end_callback = NULL, *global_error_callback = NULL, *local_error_callback = NULL,
-             *return_callback = NULL;
+             *return_callback = NULL, *iterate_obj = NULL,
+             *transform1_obj = NULL, *transform2_obj = NULL;
     int use_ns = 1;
     PyObject *hook_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
@@ -1972,9 +1995,9 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
         "return_callback",
-        "use_namespace", "namespace_hook", NULL
+        "use_namespace", "namespace_hook", "iterate", "transform1", "transform2", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOOpO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOOpOOOO", kwlist,
                                      &data_obj, &window_size_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj, &d_obj,
@@ -1982,7 +2005,8 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback, &use_ns, &hook_obj))
+                                     &return_callback, &use_ns, &hook_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
     if (PyObject_HasAttrString(data_obj, "__cos_comparison_passive__")) {
@@ -2002,6 +2026,22 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             return result;
         }
         PyErr_Clear();
+    }
+
+    /* iterate/transform paths: delegate to the pure Python reference
+     * implementation (the iterate mechanism, kernels and transforms live
+     * there; the C core keeps the plain fast path when neither is given). */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "cos_comparison_passive");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
     }
 
     Data *data = pyobj_to_data(data_obj);
@@ -2077,12 +2117,6 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyObject *ws_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(window_size[i]));
             PyDict_SetItemString(fill, "window_size", ws_tuple); Py_DECREF(ws_tuple);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyDict_SetItemString(fill, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyDict_SetItemString(fill, "start", start_tuple); Py_DECREF(start_tuple);
@@ -2265,7 +2299,8 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
              *step_obj = NULL, *algo_name = NULL, *output_obj = NULL,
              *output_start_obj = NULL, *output_step_obj = NULL, *start_callback = NULL,
              *end_callback = NULL, *global_error_callback = NULL, *local_error_callback = NULL,
-             *return_callback = NULL;
+             *return_callback = NULL, *iterate_obj = NULL,
+             *transform1_obj = NULL, *transform2_obj = NULL;
     int use_ns = 1;
     PyObject *hook_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
@@ -2276,9 +2311,9 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
         "return_callback",
-        "use_namespace", "namespace_hook", NULL
+        "use_namespace", "namespace_hook", "iterate", "transform1", "transform2", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOpO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOpOOOO", kwlist,
                                      &data_obj, &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
@@ -2286,7 +2321,8 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback, &use_ns, &hook_obj))
+                                     &return_callback, &use_ns, &hook_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
     /* Match pure Python signature cos_comparison_active(data, *arg, kernel=None):
@@ -2317,6 +2353,20 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             return result;
         }
         PyErr_Clear();
+    }
+
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "cos_comparison_active");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
     }
 
     Data *data = pyobj_to_data(data_obj);
@@ -2388,12 +2438,6 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(kernel->shape[i]));
             PyDict_SetItemString(fill, "window_size", ws_tuple); Py_DECREF(ws_tuple);
             Py_INCREF(kernel_obj); PyDict_SetItemString(fill, "kernel", kernel_obj);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyDict_SetItemString(fill, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyDict_SetItemString(fill, "start", start_tuple); Py_DECREF(start_tuple);
@@ -2631,12 +2675,28 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     (void)self;
     PyObject *data_obj, *local_size_obj = NULL, *step_obj = NULL,
              *weight_obj = NULL,
-             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL;
-        static char *kwlist[] = {"data", "local_size", "step", "weight", "output", "output_start", "output_step", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOO", kwlist,
+             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL,
+             *iterate_obj = NULL, *transform1_obj = NULL, *transform2_obj = NULL;
+        static char *kwlist[] = {"data", "local_size", "step", "weight", "output", "output_start", "output_step", "iterate", "transform1", "transform2", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOOOOO", kwlist,
                                      &data_obj, &local_size_obj, &step_obj, &weight_obj,
-                                     &output_obj, &output_start_obj, &output_step_obj))
+                                     &output_obj, &output_start_obj, &output_step_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
+
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "mean_local");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
 
     Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
@@ -2833,12 +2893,28 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
 static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwargs) {
     (void)self;
     PyObject *data_obj, *local_size_obj = NULL, *step_obj = NULL,
-             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL;
-        static char *kwlist[] = {"data", "local_size", "step", "output", "output_start", "output_step", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOO", kwlist,
+             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL,
+             *iterate_obj = NULL, *transform1_obj = NULL, *transform2_obj = NULL;
+        static char *kwlist[] = {"data", "local_size", "step", "output", "output_start", "output_step", "iterate", "transform1", "transform2", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOOOO", kwlist,
                                      &data_obj, &local_size_obj, &step_obj,
-                                     &output_obj, &output_start_obj, &output_step_obj))
+                                     &output_obj, &output_start_obj, &output_step_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
+
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "local_variance");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
 
     Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
@@ -3030,7 +3106,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         "return_callback",
         "use_namespace", "namespace_hook", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OddddOOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OddddOOOOOOOOOOOOOpO", kwlist,
                                      &window_size_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj, &d_obj,
@@ -3130,12 +3206,6 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             PyObject *ws_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(window_size[i]));
             PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
@@ -3335,7 +3405,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         "return_callback",
         "use_namespace", "namespace_hook", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|ddddOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|ddddOOOOOOOOOOOOpO", kwlist,
                                      &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
@@ -3429,12 +3499,6 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(kernel->shape[i]));
             PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
             Py_INCREF(kernel_obj); PyObject_SetAttrString(name_space, "kernel", kernel_obj);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
@@ -3789,14 +3853,464 @@ static int resolve_read_region(PyObject *start, PyObject *shape_obj,
     return 0;
 }
 
+/* ==================================================================
+ * Optional iterate path: a module-level C kernel (PyObject* in /
+ * PyObject* out) handed to custom iterators.  One implementation with a
+ * mode selector carried on the PyCFunction self argument; the five
+ * PyMethodDef entries below name the per-function kernels - they are
+ * NOT registered in the module method table.
+ * ================================================================== */
+
+static PyObject *g_module = NULL;   /* module object for internal calls */
+
+static PyObject* _ints_to_tuple(const int *values, int dimension) {
+    PyObject *tuple = PyTuple_New(dimension);
+    if (tuple == NULL) return NULL;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PyLong_FromLong(values[i]);
+        if (item == NULL) { Py_DECREF(tuple); return NULL; }
+        PyTuple_SET_ITEM(tuple, i, item);
+    }
+    return tuple;
+}
+
+static PyObject* _dbls_to_tuple(const double *values, int dimension) {
+    PyObject *tuple = PyTuple_New(dimension);
+    if (tuple == NULL) return NULL;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PyFloat_FromDouble(values[i]);
+        if (item == NULL) { Py_DECREF(tuple); return NULL; }
+        PyTuple_SET_ITEM(tuple, i, item);
+    }
+    return tuple;
+}
+
+static int _parse_int_tuple(PyObject *obj, int **out, int dimension) {
+    if (obj == NULL || !PySequence_Check(obj)) return -1;
+    if (PySequence_Size(obj) != dimension) return -1;
+    int *values = (int*)malloc(sizeof(int) *
+                               (size_t)(dimension > 0 ? dimension : 1));
+    if (values == NULL) return -1;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (item == NULL) { free(values); return -1; }
+        long v = PyLong_AsLong(item);
+        Py_DECREF(item);
+        if (v == -1 && PyErr_Occurred()) { free(values); return -1; }
+        values[i] = (int)v;
+    }
+    *out = values;
+    return 0;
+}
+
+static int _parse_dbl_tuple(PyObject *obj, double **out, int dimension) {
+    if (obj == NULL || !PySequence_Check(obj)) return -1;
+    if (PySequence_Size(obj) != dimension) return -1;
+    double *values = (double*)malloc(sizeof(double) *
+                                     (size_t)(dimension > 0 ? dimension : 1));
+    if (values == NULL) return -1;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (item == NULL) { free(values); return -1; }
+        double v = PyFloat_AsDouble(item);
+        Py_DECREF(item);
+        if (v == -1.0 && PyErr_Occurred()) { free(values); return -1; }
+        values[i] = v;
+    }
+    *out = values;
+    return 0;
+}
+
+static PyObject* _make_kernel(PyMethodDef *def, long mode) {
+    PyObject *mode_obj = PyLong_FromLong(mode);
+    if (mode_obj == NULL) return NULL;
+    PyObject *kernel = PyCFunction_New(def, mode_obj);
+    Py_DECREF(mode_obj);
+    return kernel;
+}
+
+/* mode: 0 data_mapping, 1 data_filter, 2 elementwise,
+ *       3 position_map, 4 elementwise_position */
+static PyObject* _iterate_kernel(PyObject *self, PyObject *args,
+                                 PyObject *kwargs) {
+    long mode = PyLong_AsLong(self);
+    if (mode == -1 && PyErr_Occurred()) return NULL;
+    PyObject *index_obj = NULL;
+    if (!PyArg_ParseTuple(args, "O", &index_obj)) return NULL;
+    Py_ssize_t dim_ss = PySequence_Size(index_obj);
+    if (dim_ss < 0) {
+        PyErr_Clear();
+        PyErr_SetString(PyExc_TypeError, "index must be a sequence");
+        return NULL;
+    }
+    int dimension = (int)dim_ss;
+    int *index = NULL;
+    if (_parse_int_tuple(index_obj, &index, dimension) < 0) {
+        PyErr_Clear();
+        PyErr_SetString(PyExc_TypeError, "index must be an int sequence");
+        return NULL;
+    }
+
+    if (mode == 0) {
+        /* data_mapping */
+        PyObject *data = PyDict_GetItemString(kwargs, "data");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *out = PyDict_GetItemString(kwargs, "out");
+        int *r_start = NULL, *r_step = NULL;
+        int *w_start = NULL, *w_step = NULL, *out_shape = NULL;
+        int ok = (data != NULL && callback != NULL && out != NULL
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+                                &r_start, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+                                &r_step, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_start"),
+                                &w_start, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_step"),
+                                &w_step, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_shape"),
+                                &out_shape, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "data_mapping kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(w_start); free(w_step); free(out_shape);
+            return NULL;
+        }
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+            PyTuple_SET_ITEM(read, i, PyLong_FromLong(
+                (long long)r_start[i] + (long long)index[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = get_args ? py_get_item(g_module, get_args) : NULL;
+        Py_XDECREF(get_args);
+        if (value == NULL) {
+            free(index); free(r_start); free(r_step);
+            free(w_start); free(w_step); free(out_shape);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int in_bounds = 1;
+            for (int i = 0; i < dimension; ++i) {
+                long w = (long long)w_start[i]
+                         + (long long)index[i] * w_step[i];
+                if (w >= out_shape[i]) { in_bounds = 0; break; }
+            }
+            if (in_bounds) {
+                PyObject *write = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                    PyTuple_SET_ITEM(write, i, PyLong_FromLong(
+                        (long long)w_start[i]
+                        + (long long)index[i] * w_step[i]));
+                PyObject *set_args = PyTuple_Pack(3, out, write, cb_res);
+                Py_DECREF(write);
+                PyObject *r = set_args ? py_set_item(g_module, set_args)
+                                       : NULL;
+                Py_XDECREF(set_args);
+                Py_DECREF(cb_res);
+                if (r == NULL) {
+                    free(index); free(r_start); free(r_step);
+                    free(w_start); free(w_step); free(out_shape);
+                    return NULL;
+                }
+                Py_DECREF(r);
+            } else {
+                Py_DECREF(cb_res);
+            }
+        }
+        free(index); free(r_start); free(r_step);
+        free(w_start); free(w_step); free(out_shape);
+        Py_RETURN_NONE;
+    } else if (mode == 1) {
+        /* data_filter */
+        PyObject *data = PyDict_GetItemString(kwargs, "data");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *hits = PyDict_GetItemString(kwargs, "hits");
+        int *r_start = NULL, *r_step = NULL;
+        int *origin = NULL, *basis = NULL;
+        int ok = (data != NULL && callback != NULL && hits != NULL
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+                                &r_start, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+                                &r_step, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "origin"),
+                                &origin, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "basis"),
+                                &basis, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "data_filter kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin); free(basis);
+            return NULL;
+        }
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+            PyTuple_SET_ITEM(read, i, PyLong_FromLong(
+                (long long)r_start[i] + (long long)index[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = get_args ? py_get_item(g_module, get_args) : NULL;
+        Py_XDECREF(get_args);
+        if (value == NULL) {
+            free(index); free(r_start); free(r_step);
+            free(origin); free(basis);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int truthy = PyObject_IsTrue(cb_res);
+            Py_DECREF(cb_res);
+            if (truthy < 0) {
+                PyErr_Clear();
+                truthy = 0;
+            }
+            if (truthy) {
+                PyObject *pos = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                    PyTuple_SET_ITEM(pos, i, PyLong_FromLong(
+                        (long long)origin[i]
+                        + (long long)basis[i] * index[i]));
+                int app = PyList_Append(hits, pos);
+                Py_DECREF(pos);
+                if (app < 0) {
+                    free(index); free(r_start); free(r_step);
+                    free(origin); free(basis);
+                    return NULL;
+                }
+            }
+        }
+        free(index); free(r_start); free(r_step);
+        free(origin); free(basis);
+        Py_RETURN_NONE;
+    } else if (mode == 2) {
+        /* elementwise */
+        PyObject *tensors = PyDict_GetItemString(kwargs, "tensors");
+        PyObject *func = PyDict_GetItemString(kwargs, "func");
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        if (tensors == NULL || func == NULL || output == NULL) {
+            PyErr_SetString(PyExc_TypeError,
+                            "elementwise kernel: bad arguments");
+            free(index);
+            return NULL;
+        }
+        Py_ssize_t nt = PyTuple_Size(tensors);
+        PyObject *vals = PyTuple_New(nt);
+        if (vals == NULL) { free(index); return NULL; }
+        for (Py_ssize_t t = 0; t < nt; ++t) {
+            PyObject *get_args = PyTuple_Pack(
+                2, PyTuple_GET_ITEM(tensors, t), index_obj);
+            PyObject *v = get_args ? py_get_item(g_module, get_args) : NULL;
+            Py_XDECREF(get_args);
+            if (v == NULL) {
+                Py_DECREF(vals); free(index);
+                return NULL;
+            }
+            PyTuple_SET_ITEM(vals, t, v);
+        }
+        PyObject *value = PyObject_Call(func, vals, NULL);
+        Py_DECREF(vals);
+        if (value == NULL) { free(index); return NULL; }
+        if (!PyNumber_Check(value)) {
+            Py_DECREF(value);
+            PyErr_SetString(PyExc_TypeError,
+                            "elementwise func must return a number");
+            free(index);
+            return NULL;
+        }
+        PyObject *set_args = PyTuple_Pack(3, output, index_obj, value);
+        Py_DECREF(value);
+        PyObject *r = set_args ? py_set_item(g_module, set_args) : NULL;
+        Py_XDECREF(set_args);
+        if (r == NULL) { free(index); return NULL; }
+        Py_DECREF(r);
+        free(index);
+        Py_RETURN_NONE;
+    } else if (mode == 3) {
+        /* position_map */
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *status = PyDict_GetItemString(kwargs, "status");
+        int *r_start = NULL, *r_step = NULL;
+        double *origin_d = NULL, *scale_d = NULL;
+        int ok = (output != NULL && callback != NULL && status != NULL
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+                                &r_start, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+                                &r_step, dimension) == 0
+            && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "origin"),
+                                &origin_d, dimension) == 0
+            && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "scale"),
+                                &scale_d, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "position_map kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin_d); free(scale_d);
+            return NULL;
+        }
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+                                 + (long long)index[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong((long long)rr));
+            double logical_val = rr * scale_d[i] - origin_d[i];
+            long long li = (long long)logical_val;
+            if ((double)li == logical_val)
+                PyTuple_SET_ITEM(logical, i, PyLong_FromLongLong(li));
+            else
+                PyTuple_SET_ITEM(logical, i, PyFloat_FromDouble(logical_val));
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, logical,
+                                                        NULL);
+        Py_DECREF(logical);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, cb_res);
+            Py_DECREF(cb_res);
+            PyObject *r = set_args ? py_set_item(g_module, set_args) : NULL;
+            Py_XDECREF(set_args);
+            if (r == NULL) {
+                PyErr_Clear();
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                Py_DECREF(real);
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        free(index); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        Py_RETURN_NONE;
+    } else {
+        /* elementwise_position */
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        PyObject *tensors = PyDict_GetItemString(kwargs, "tensors");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *status = PyDict_GetItemString(kwargs, "status");
+        int *r_start = NULL, *r_step = NULL;
+        double *origin_d = NULL, *scale_d = NULL;
+        int ok = (output != NULL && tensors != NULL && callback != NULL
+            && status != NULL
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+                                &r_start, dimension) == 0
+            && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+                                &r_step, dimension) == 0
+            && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "origin"),
+                                &origin_d, dimension) == 0
+            && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "scale"),
+                                &scale_d, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "elementwise_position kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin_d); free(scale_d);
+            return NULL;
+        }
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+                                 + (long long)index[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong((long long)rr));
+            double logical_val = rr * scale_d[i] - origin_d[i];
+            long long li = (long long)logical_val;
+            if ((double)li == logical_val)
+                PyTuple_SET_ITEM(logical, i, PyLong_FromLongLong(li));
+            else
+                PyTuple_SET_ITEM(logical, i, PyFloat_FromDouble(logical_val));
+        }
+        Py_ssize_t nt = PyTuple_Size(tensors);
+        PyObject *elements = PyTuple_New(nt);
+        for (Py_ssize_t t = 0; t < nt; ++t) {
+            PyObject *get_args = PyTuple_Pack(
+                2, PyTuple_GET_ITEM(tensors, t), real);
+            PyObject *v = get_args ? py_get_item(g_module, get_args) : NULL;
+            Py_XDECREF(get_args);
+            if (v == NULL) {
+                PyErr_Clear();
+                Py_DECREF(elements); Py_DECREF(logical); Py_DECREF(real);
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            PyTuple_SET_ITEM(elements, t, v);
+        }
+        PyObject *value = PyObject_CallFunctionObjArgs(callback, elements,
+                                                       logical, NULL);
+        Py_DECREF(elements);
+        Py_DECREF(logical);
+        if (value == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, value);
+            Py_DECREF(value);
+            PyObject *r = set_args ? py_set_item(g_module, set_args) : NULL;
+            Py_XDECREF(set_args);
+            if (r == NULL) {
+                PyErr_Clear();
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                Py_DECREF(real);
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        free(index); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        Py_RETURN_NONE;
+    }
+}
+
+static PyMethodDef _kernel_def_mapping = {
+    "_data_mapping_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_filter = {
+    "_data_filter_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_elementwise = {
+    "_elementwise_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_position = {
+    "_position_map_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_elementwise_position = {
+    "_elementwise_position_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+
 static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"data", "callback", "start", "shape", "step",
-                             "origin", "basis", NULL};
+                             "origin", "basis", "iterate", NULL};
     PyObject *data, *callback;
     PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
     PyObject *origin = NULL, *basis = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
-            &data, &callback, &start, &shape_obj, &step, &origin, &basis))
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOO", kwlist,
+            &data, &callback, &start, &shape_obj, &step, &origin, &basis,
+            &iterate))
         return NULL;
 
     /* Match pure Python: None input cannot be shaped. */
@@ -3845,6 +4359,49 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
         return NULL;
     }
 
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_filter, 1);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+            ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+            ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+            ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+            ? _ints_to_tuple(r_origin, dimension) : NULL;
+        PyObject *basis_t = origin_t
+            ? _ints_to_tuple(r_basis, dimension) : NULL;
+        if (basis_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+                                 (shape_obj && shape_obj != Py_None)
+                                     ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "data", data);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "hits", result);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "basis", basis_t);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(basis_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(r_origin); free(r_basis); free(effective);
+        free(r_start); free(r_step); free(data_shape);
+        if (res == NULL) { Py_DECREF(result); return NULL; }
+        Py_DECREF(res);
+        return result;
+    }
+
     int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
     if (!local) {
         Py_DECREF(result); free(data_shape); free(r_start); free(r_step);
@@ -3856,7 +4413,7 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
     for (long long k = 0; k < total; ++k) {
         PyObject *read = PyTuple_New(dimension);
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
+            PyTuple_SET_ITEM(read, i, PyLong_FromLongLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
         PyObject *get_args = PyTuple_Pack(2, data, read);
         Py_DECREF(read);
         PyObject *value = py_get_item(self, get_args);
@@ -3880,7 +4437,7 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
             if (truthy) {
                 PyObject *pos = PyTuple_New(dimension);
                 for (int i = 0; i < dimension; ++i)
-                    PyTuple_SET_ITEM(pos, i, PyLong_FromLong((long long)r_origin[i] + (long long)r_basis[i] * local[i]));
+                    PyTuple_SET_ITEM(pos, i, PyLong_FromLongLong((long long)r_origin[i] + (long long)r_basis[i] * local[i]));
                 int app = PyList_Append(result, pos);
                 Py_DECREF(pos);
                 if (app < 0) {
@@ -3903,12 +4460,14 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
 
 static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"data", "callback", "start", "shape", "step",
-                             "out", "out_start", "out_step", NULL};
+                             "out", "out_start", "out_step", "iterate", NULL};
     PyObject *data, *callback;
     PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
     PyObject *out = NULL, *out_start = NULL, *out_step = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
-            &data, &callback, &start, &shape_obj, &step, &out, &out_start, &out_step))
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOOO", kwlist,
+            &data, &callback, &start, &shape_obj, &step, &out, &out_start,
+            &out_step, &iterate))
         return NULL;
 
     /* Match pure Python: None input cannot be shaped. */
@@ -3983,6 +4542,53 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
         }
     }
 
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_mapping, 0);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+            ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+            ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+            ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *w_start_t = r_step_t
+            ? _ints_to_tuple(w_start, dimension) : NULL;
+        PyObject *w_step_t = w_start_t
+            ? _ints_to_tuple(w_step, dimension) : NULL;
+        PyObject *out_shape_t = w_step_t
+            ? _ints_to_tuple(out_shape, dimension) : NULL;
+        if (out_shape_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+                                 (shape_obj && shape_obj != Py_None)
+                                     ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "data", data);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "out", out);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "out_start", w_start_t);
+            PyDict_SetItemString(call_kwargs, "out_step", w_step_t);
+            PyDict_SetItemString(call_kwargs, "out_shape", out_shape_t);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(w_start_t);
+        Py_XDECREF(w_step_t); Py_XDECREF(out_shape_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(out_shape); free(w_start); free(w_step);
+        free(effective); free(r_start); free(r_step); free(data_shape);
+        if (res == NULL) { Py_DECREF(out); return NULL; }
+        Py_DECREF(res);
+        return out;
+    }
+
     int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
     if (!local) {
         Py_DECREF(out); free(out_shape); free(w_start); free(w_step);
@@ -3994,7 +4600,7 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
     for (long long k = 0; k < total; ++k) {
         PyObject *read = PyTuple_New(dimension);
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
+            PyTuple_SET_ITEM(read, i, PyLong_FromLongLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
         PyObject *get_args = PyTuple_Pack(2, data, read);
         Py_DECREF(read);
         PyObject *value = py_get_item(self, get_args);
@@ -4017,7 +4623,7 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
             if (in_bounds) {
                 PyObject *write = PyTuple_New(dimension);
                 for (int i = 0; i < dimension; ++i)
-                    PyTuple_SET_ITEM(write, i, PyLong_FromLong((long long)w_start[i] + (long long)local[i] * w_step[i]));
+                    PyTuple_SET_ITEM(write, i, PyLong_FromLongLong((long long)w_start[i] + (long long)local[i] * w_step[i]));
                 PyObject *set_args = PyTuple_Pack(3, out, write, cb_res);
                 Py_DECREF(write);
                 PyObject *r = py_set_item(self, set_args);
@@ -4119,12 +4725,14 @@ static int parse_opt_dbl_seq(PyObject *obj, double **arr, int dim,
 static PyObject* py_position_map(PyObject *self, PyObject *args,
                                  PyObject *kwargs) {
     static char *kwlist[] = {"output", "callback", "start", "shape", "step",
-                             "origin", "scale", NULL};
+                             "origin", "scale", "iterate", NULL};
     PyObject *output, *callback;
     PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
     PyObject *origin = NULL, *scale = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
-            &output, &callback, &start, &shape_obj, &step, &origin, &scale))
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOO", kwlist,
+            &output, &callback, &start, &shape_obj, &step, &origin, &scale,
+            &iterate))
         return NULL;
     if (output == Py_None) {
         PyErr_SetString(PyExc_ValueError, "cannot infer shape of output");
@@ -4155,6 +4763,62 @@ static PyObject* py_position_map(PyObject *self, PyObject *args,
         free(data_shape); free(effective); free(r_start); free(r_step);
         free(origin_d); free(scale_d);
         return NULL;
+    }
+
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        long status_val = 0;
+        PyObject *res = NULL;
+        PyObject *status = PyList_New(1);
+        if (status != NULL) PyList_SET_ITEM(status, 0, PyLong_FromLong(0));
+        PyObject *kernel = status ? _make_kernel(&_kernel_def_position, 3)
+                                  : NULL;
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+            ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+            ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+            ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+            ? _dbls_to_tuple(origin_d, dimension) : NULL;
+        PyObject *scale_t = origin_t
+            ? _dbls_to_tuple(scale_d, dimension) : NULL;
+        if (scale_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+                                 (shape_obj && shape_obj != Py_None)
+                                     ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "scale", scale_t);
+            PyDict_SetItemString(call_kwargs, "status", status);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(scale_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        if (res == NULL) { Py_XDECREF(status); return NULL; }
+        Py_DECREF(res);
+        if (status != NULL) {
+            PyObject *sv = PyList_GET_ITEM(status, 0);
+            status_val = PyLong_AsLong(sv);
+            if (status_val == -1 && PyErr_Occurred()) {
+                PyErr_Clear();
+                status_val = 0;
+            }
+            Py_DECREF(status);
+        }
+        return PyLong_FromLong(status_val);
     }
 
     int *local = (int *)calloc((size_t)(dimension > 0 ? dimension : 1),
@@ -4245,6 +4909,8 @@ static PyObject* py_elementwise_position(PyObject *self, PyObject *args,
     PyObject *step = kwargs ? PyDict_GetItemString(kwargs, "step") : NULL;
     PyObject *origin = kwargs ? PyDict_GetItemString(kwargs, "origin") : NULL;
     PyObject *scale = kwargs ? PyDict_GetItemString(kwargs, "scale") : NULL;
+    PyObject *iterate = kwargs ? PyDict_GetItemString(kwargs, "iterate")
+                               : NULL;
     if (output == Py_None) {
         PyErr_SetString(PyExc_ValueError, "cannot infer shape of output");
         return NULL;
@@ -4274,6 +4940,65 @@ static PyObject* py_elementwise_position(PyObject *self, PyObject *args,
         free(data_shape); free(effective); free(r_start); free(r_step);
         free(origin_d); free(scale_d);
         return NULL;
+    }
+
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        long status_val = 0;
+        PyObject *res = NULL;
+        PyObject *status = PyList_New(1);
+        if (status != NULL) PyList_SET_ITEM(status, 0, PyLong_FromLong(0));
+        PyObject *tensors = PyTuple_GetSlice(args, 1, n);
+        PyObject *kernel = (status && tensors)
+            ? _make_kernel(&_kernel_def_elementwise_position, 4) : NULL;
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+            ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+            ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+            ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+            ? _dbls_to_tuple(origin_d, dimension) : NULL;
+        PyObject *scale_t = origin_t
+            ? _dbls_to_tuple(scale_d, dimension) : NULL;
+        if (scale_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+                                 (shape_obj && shape_obj != Py_None)
+                                     ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            PyDict_SetItemString(call_kwargs, "tensors", tensors);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "scale", scale_t);
+            PyDict_SetItemString(call_kwargs, "status", status);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(scale_t);
+        Py_XDECREF(tensors);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        if (res == NULL) { Py_XDECREF(status); return NULL; }
+        Py_DECREF(res);
+        if (status != NULL) {
+            PyObject *sv = PyList_GET_ITEM(status, 0);
+            status_val = PyLong_AsLong(sv);
+            if (status_val == -1 && PyErr_Occurred()) {
+                PyErr_Clear();
+                status_val = 0;
+            }
+            Py_DECREF(status);
+        }
+        return PyLong_FromLong(status_val);
     }
 
     int *local = (int *)calloc((size_t)(dimension > 0 ? dimension : 1),
@@ -4385,6 +5110,8 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
         PyErr_SetString(PyExc_ValueError, "output is required");
         return NULL;
     }
+    PyObject *iterate = kwargs ? PyDict_GetItemString(kwargs, "iterate")
+                               : NULL;
 
     int *shape = NULL;
     int dimension = 0;
@@ -4421,6 +5148,29 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
             return NULL;
         }
         free(out_shape);
+    }
+
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_elementwise, 2);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *shape_t = call_kwargs
+            ? _ints_to_tuple(shape, dimension) : NULL;
+        if (shape_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", shape_t);
+            PyDict_SetItemString(call_kwargs, "tensors", args);
+            PyDict_SetItemString(call_kwargs, "func", func);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(shape_t); Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(shape);
+        if (res == NULL) return NULL;
+        Py_DECREF(res);
+        return PyLong_FromLong(0);
     }
 
     long long total_ll = 1;
@@ -4596,6 +5346,7 @@ static PyMethodDef methods[] = {
 Module definition (multi-phase: safe re-init, free-threaded ready)
 ------------------------------------------------------------------ */
 static int module_exec(PyObject *module) {
+    g_module = module;   /* module object for the iterate kernels */
     if (Add_Object(module)) {
         return -1;
     }

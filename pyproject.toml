@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cos-comparison"
-version = "0.4.5"
+version = "0.5.0"
 description = "Local similarity comparison for feature extraction – biologically inspired, zero‑training edge/pattern detection, multi-backend acceleration."
 readme = "README.md"
 license = "MIT"
@@ -49,15 +49,9 @@ cos_comparison = [
     # Core configuration
     "core/config.json",
     # C source files (for reference / manual compilation)
-    "core/cos_comparison_c/include/*.c",
-    "core/cos_comparison_c/include/*.h",
     "core/include/*.c",
     "core/include/*.h",
-    # Compiled shared libraries (ctypes)
-    "core/cos_comparison_c/*.dll",
-    "core/cos_comparison_c/*.so",
-    "core/cos_comparison_c/*.dylib",
-    # Compiled Python extensions (pydll)
+    # Compiled Python extensions (C backend)
     "core/*.pyd",
     "core/*.so",
     "core/*.dylib",

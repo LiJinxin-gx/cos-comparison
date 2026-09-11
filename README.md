@@ -1,4 +1,4 @@
-# Cos Comparison
+﻿# Cos Comparison
 
 [![PyPI version](https://badge.fury.io/py/cos-comparison.svg)](https://pypi.org/project/cos-comparison/)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -31,7 +31,8 @@ Three similarity measures, selected via the `algorithm` parameter:
 - **No training, no labels, no backpropagation** — biologically plausible AGI direction
 - Works on **1D–4D** data (audio, images, video, volumetric data)
 - **Passive** (reflexive boundary detection) and **active** (template matching) modes
-- Three high-performance backends with automatic fallback: C extension, ctypes C, pure Python
+- Two high-performance backends with automatic fallback: C extension, pure Python
+- Free-threaded (no-GIL) C extensions on Python 3.13+ (core backend and math_tool), with a reliable fallback on older interpreters
 - Cross-platform (Windows, Linux, macOS) and **zero external dependencies**
 - Callback system for progress tracking and custom I/O; flexible output into pre-allocated tensors
 - Duck-typed indices: any `__index__`-capable object accepted
@@ -44,53 +45,28 @@ Three similarity measures, selected via the `algorithm` parameter:
 
 ## What's New
 
-### v0.4.5 — Unified Instruction Protocol, Memory & Extension Primitives
+### v0.5.0 — Backend Consolidation, Iterate / Transform Extension Points
 
-**Instruction Protocol & Execution:**
-- Unified instruction file protocol (shell / batch / app): `data[index]` references, `%` / `%%` unpacking, `let`, IF / WHILE control-flow blocks, region parameters, pre-imported built-ins, `import_all_module`, interrupt handling
-- External command execution `sh` plugin: interactive / captured modes; `subdocker` synchronous child-Docker delegation
-- Docker suspend/resume: cooperative step-boundary `suspend()` returns a `SuspendSnapshot`; `resume()` continues from the recorded cursor (each step runs exactly once)
+**Backend consolidation (maintainability):**
+- The ctypes backend is retired to keep a **single compiled C path** — one C source to maintain, one build stage, one warning-clean target; the compiled C extension IS the C backend, and the retired call names keep working through a **compatibility mapping** in `config.json` (`.cos_comparison_c` → `.cos_comparison_pydll`), so existing code needs no changes; `config.json` becomes an ordered list of call-name → module mappings and the build system drops the shared-library stage
 
-**Sense / Generate:**
-- Sense primitives: `threshold_map` / `threshold_match` position iterators; `elementwise_extract` read→map→write regions
-- Generate: `transform_self` self-modifying element-wise transform
+**Free-threaded support:**
+- All C extensions (the core backend and the math_tool extensions) declare `Py_MOD_GIL_NOT_USED` under `#if PY_VERSION_HEX >= 0x030D0000`: free-threaded builds (cp314t) run without the GIL, older interpreters simply skip the slot (reliable fallback); strict-mode portability verified with MSVC `/Wall /WX`, MinGW-w64 GCC and Linux GCC
 
-**Core:**
-- Position callbacks: `position_map` / `elementwise_position` — region walk reporting logical coordinates `logical = real × scale − origin` (scale=0 legal; integral values → int; py/ctypes/pydll identical)
+**Core extensibility (the core module was restructured around it):**
+- **`iterate` slot** — element-wise (A-class) and B-class functions accept an external engine (`iterate=engine`); with `None` (default) the original inline skeleton runs unchanged; the C extension delegates the iterator path to the pure Python reference, so external GPU / parallel engines plug in without touching the package
+- **`transform1` / `transform2`** — extensible per-value maps replace the retired linear transform (`w1`/`w2`/`b1`/`b2`); `None` = identity (bit-identical default), any callable works (nonlinear, thresholds, lookups)
+- **B-class interface cleanup** — `iter_a_callback`/`iter_b_callback` and the `linear` name-space field removed; legacy keyword arguments are still accepted silently
 
-**Memory & Tools:**
-- IO-stream memory: `IOStreamMemory` — `IOFile` / `IOMemory` as the memory carrier; delegating slots with working defaults provide MapMemory-style key/value storage (transactional commit, lazy restore, arbitrary hashable literal keys round-trip)
-- Linear algebra module (duck-typed ops, Python/C parity); time tools; `PluginPool` proactive plugin aggregation; Database abstraction (`DatabaseMemory`)
-- Reflex feedback hub: `Feedback` — Trigger-style paired (feedback object, function) registrations with a non-blocking receive trigger and delegating hub functions
+**Tooling:**
+- Operator tools / unified value grammar (shell / batch / app): Python-style literals, infix expressions, nested functional calls, zero recursion
 
-**Parallel & GPU:**
-- Super-parallel framework: `SuperParallel` (grid-style layered parallel — `sp[1,2,3]` scale setup / `sp.grid(dim)` coordinates / `sp(*args)` invocation / `getIdx()` layer hierarchy) with `DefaultParallel` (process-thread model); external GPU engines plug in via the executor protocol; verified on Intel Arc (OpenCL — ~6–9× pure-compute speedup)
-- Unit mapper: `UnitMap` — variable-length symbol runs fold to fixed-length real flags (tensor-ready); atomic-scale `probe_dim`, fully iterative, recurrence-style appending, count statistics (`total`/`count`/`runs`/`most_common`/`count_vector`)
+**Quality:**
+- **math_tool protocol-style refactor** — duck-typed sequence / mapping / set / index / numeric protocols replace the hard-coded container and numeric types across `fourier` / `topology` / `unit_map` (Python reference and the C extensions): numpy scalars, custom containers and subclasses now work through both implementations, with protocol behaviour verified against both
+- **Recursion removal** — a package-wide scan (AST call graph + C brace matching) reports zero real recursion: the value-grammar prefix compiler and the shell / app control-flow executors (IF/WHILE) run on explicit frame stacks with the original condition / interrupt / result semantics; the scanner reports zero real recursion across the package
 
-### v0.4.4 — Exploration Test Suite & Behavior-Driven Frameworks
-
-- Exploration test suite: face/digits/captcha/image tasks, NLP clustering, data generation, autonomous Agent, GUI viewers
-- Video abstraction & generation: L0–L3 hierarchy, prototypes and contrast points in SQLite; +20.2% generation improvement
-- Agent web-search knowledge base: 118 chemical elements and 188 ISO 639 languages stored with provenance
-- Behavior-composition memory Agent: von Neumann structure — behaviors as data in DB, fetch→decode→reflect-execute→write-back
-- Generic executor: atomic instructions stored in DB, fixed code runs multi-logic; `$N` result references; plugin-style reflection
-- Element-wise filter/mapping API (all three backends): `data_filter`, `data_mapping`, `threshold_filter` / `threshold_map`
-- Logic layers: `event_context` delegated slots, relative-probability axiom system (A1–A5), `EventBinds` protocol container
-- Fourier module: generic `dft` / `idft` / `power_spectrum`, multi-dimensional, recursion-free
-- Nested control flow: flat `Sequence` / `Branch` / `Loop`; `ControlFlatten` iterative expansion
-- Action layer async execution: `ExecuterDriver.call_all` on delegated background worker
-
-### Earlier Versions
-
-| Version | Theme | Key Highlights |
-|---------|-------|----------------|
-| **v0.4.3** | Robustness, Protocol-Style Delegation | C core hardening (18 fixes), element-wise API C99-strict, upper-layer fixes, relative-probability axioms, sense layer `data_match` |
-| **v0.4.2** | Portability & Robustness | ARM/piwheels C99 fixes, empty-input consistency, 12 memory leaks fixed, duck typing, free-threaded 3.14t verified, zero-copy buffer protocol |
-| **v0.4.1** | Architecture Upgrade | Stride+offset indexing, `infer_shape` / `__shape__` protocol, `load_data` bulk-copy, PyBuffer zero-copy, SIMD hints, free-threaded dual binaries |
-| **v0.3.9** | Indexing architecture | Stride+offset fancy indexing, zero-copy views, 100% recursion-free |
-| **v0.3.0** | Multi-backend release | C extension + ctypes, three-backend fallback, operator overloading |
-| **v0.2.0** | Tensor system | N-dimensional tensor view, sliding window, cos/mod/cosmod metrics |
-| **v0.1.0** | Initial release | Core cosine similarity, centre-surround antagonism, pure Python |
+**Benchmark (v0.5.0):**
+- An external OpenCL engine on Intel Arc: passive window aggregation up to ~7300× the pure Python reference and 257× the C fast path (end-to-end); both backends drive the same engine with identical results (see [Backend Management](docs/architecture/backend-system.md#benchmark-v050))
 
 > Full changelog available in `History.txt`.
 
@@ -104,7 +80,7 @@ Biologically inspired design mimicking mammalian brain structure. Only the core 
 
 | # | Layer | Directory | Brain Structure | Maturity | Core Function |
 |---|-------|-----------|-----------------|----------|---------------|
-| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, three-backend acceleration, free-thread support, element-wise filter/mapping |
+| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, two-backend acceleration, free-thread support, element-wise filter/mapping |
 | 2 | Sense | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception, raw feature extraction, data matching |
 | 3 | Memory | `memory_layer` | Hippocampus | 🟡 Early | Short/long-term storage, IO-stream memory, database-backed persistence |
 | 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟡 Early | Relative-probability logic (A1–A5 axioms), symbol logic, nested control flow, reflex feedback/monitor/trigger, context mapping |
@@ -133,7 +109,6 @@ Three-flow logical decoupling (data / operation / control) with clear ownership 
 
 ```bash
 pip install cos-comparison          # core package (C compilation attempted automatically)
-pip install cos-comparison[test]    # with test dependencies
 ```
 
 If no C compiler is available, installation succeeds with the pure Python backend only.
@@ -143,6 +118,8 @@ If no C compiler is available, installation succeeds with the pure Python backen
 | Python | 3.8+ (3.13+ for free-threaded builds) |
 | C compiler | Optional (auto-fallback to pure Python) |
 | Runtime deps | None |
+
+The test suite is stdlib-only (`unittest`) — no test dependencies to install.
 
 To recompile after source changes: `python setup.py build_ext --inplace`
 
@@ -177,15 +154,37 @@ All exploration uses the same core local-comparison engine — no deep learning,
 
 ### Performance
 
-Benchmarked on a 322×424×3 RGB image with 3×3 window (WSL Ubuntu x64, Python 3.14.4, gcc -O2):
+**Test platform:** Intel Core Ultra 5 125H (14C/18T, 3.6 GHz) + Intel Arc
+Graphics (112 CUs, driver 31.0.101.5382); Windows 11 x64; Python 3.14.6
+(CPython); numpy 2.5.2; pyopencl 2026.1.4.
 
-| Backend | Time | Speedup | Free-thread |
-|---------|------|---------|-------------|
-| C Extension | 0.0001s | ~35× | ✅ Full (no GIL) |
-| ctypes C | 0.0004s | ~9× | ✅ Full |
-| Pure Python | 0.0035s | 1× | ✅ Full |
+**Test suite:** the benchmark harness (numpy + pyopencl) is kept in the
+experiment area and is not shipped with the package; it measures the
+default backends against an external OpenCL engine injected through
+`iterate=` over float32 square grids, sizes 64²–4096², 3×3 window,
+d=(1,1); element-wise mapping applies `v*2+1`.  Timing is the minimum of
+repeated runs (best-of-3 up to 512², single run above); the GPU figures
+are end-to-end and include host↔device transfers and buffer setup.
 
-On 1000×1000 passive 3×3: C extension 0.08s (~112×) vs pure Python 8.98s.
+passive window aggregation (ms):
+
+| Size | Pure Python | C Extension | GPU engine | C/GPU |
+|------|-------------|-------------|------------|-------|
+| 64² | 62.5 | 2.13 | 0.27 | 7.8× |
+| 512² | 4554 | 161 | 0.66 | 244× |
+| 4096² | — | 10519 | 40.9 | 257× |
+
+data_mapping (element-wise, v*2+1, ms): 512² — pure Python 563, C extension
+272, GPU 0.56 (490× over C); 4096² — C extension 17721, GPU 29.3 (605×).
+The C path is callback-bound on the element-wise ops (it still calls the
+Python callback per element); the GPU engine moves the whole loop to the
+device.
+
+The GPU engine is an **external module** injected via `iterate=` (see
+[Backend Management](docs/architecture/backend-system.md#benchmark-v050)):
+the package stays stdlib-only, and both backends drive the same engine with
+identical results and identical device timing (the C extension delegates the
+iterator path to the pure Python reference).
 
 **Memory:** zero-copy PyBuffer protocol (no data duplication on read), view-based slicing (stride+offset, no copy). C extension static memory footprint < 64 KB.
 
@@ -196,11 +195,11 @@ On 1000×1000 passive 3×3: C extension 0.08s (~112×) vs pure Python 8.98s.
 ## Testing
 
 ```bash
-python -m pytest tests/                           # full suite
-python -m pytest tests/test_core_algorithms.py -v # core algorithms only
+python -m unittest discover -s tests              # full suite (stdlib only)
+python -m unittest tests.test_core_algorithms -v  # core algorithms only
 ```
 
-The suite covers core algorithms, tensor ops, backend parity, empty/edge cases, upper layers, and import hygiene. Tests run on both traditional and free-threaded interpreters.
+The suite covers core algorithms, tensor ops, backend parity, empty/edge cases, upper layers, and import hygiene; it uses only the standard library (`unittest`; pytest works too but is not required). Tests run on both traditional and free-threaded interpreters.
 
 ---
 

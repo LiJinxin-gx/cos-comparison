@@ -1,4 +1,4 @@
-# Exploration Tests (v0.4.5)
+﻿# Exploration Tests (v0.5.0)
 
 Exploratory testing summary — a general method (local comparison + hierarchical
 isolation + threshold mapping + parallelism) validated across image, audio and
@@ -6,13 +6,16 @@ text tasks, plus learning mechanisms, Agent frameworks and field web-automation
 experiments.
 
 The exploration modules live in the `explore/` directory at the project root:
-core modules (`atomic_feature.py`, `contrast_match.py`,
-`hierarchical_match.py`, `text_encoder.py`, `behavior_agent.py`) and demo
+core module (`group_hierarchical.py`) and demo
 scripts (`demo_speech.py`, `demo_text.py`, `demo_image.py`). They are
 distributed as exploration examples in the source distribution (they are NOT
 installed as a package — the wheel carries no `explore` module; run them from
 the source tree). See [atomic_contrast_matching.md](atomic_contrast_matching.md)
 for the latest atomic contrast point matching results.
+
+> Test platform: Intel Core Ultra 5 125H (14C/18T) + Intel Arc Graphics
+> (112 CUs, driver 31.0.101.5382); Windows 11 x64; Python 3.14.6; numpy
+> 2.5.2; pyopencl 2026.1.4.  CPU-only experiments exclude the GPU.
 
 ## General Method
 
@@ -41,8 +44,7 @@ tables and methodology.
 | Atomic Jaccard KNN | 500 | 42.9% |
 | **Multi-scale + Hierarchical** | **500** | **47.1%** |
 
-Core modules in `explore/`: `atomic_feature.py`, `contrast_match.py`,
-`hierarchical_match.py`, `text_encoder.py`, `behavior_agent.py`.
+Core module in `explore/`: `group_hierarchical.py`.
 
 ## Core Algorithm Validation
 
@@ -166,7 +168,7 @@ fetch (behavior from DB) -> decode (defaults merge)
      -> write back (runs history + statistics)
 ```
 
-Formal module `explore/behavior_agent.py` (pure stdlib + cos_comparison):
+Formal framework (historical, now in experiment area) (pure stdlib + cos_comparison):
 
 - `BehaviorMemory`: DatabaseMemory with injected DatabaseToolWrap
   (check_same_thread=False) - single shared connection + write lock,
@@ -186,7 +188,7 @@ Formal module `explore/behavior_agent.py` (pure stdlib + cos_comparison):
 
 ### Generic Executor (atomic instruction triples)
 
-Formal evolution in `explore/behavior_agent.py` — fixed code runs any
+Formal evolution (historical, now in experiment area) — fixed code runs any
 logic encoded in the DB as instruction triples:
 
 ```
@@ -362,7 +364,7 @@ Paths below use placeholders: `<data-dir>` = local dataset root,
 Web-automation script names are generalized to avoid identifying specific
 target platforms; local filenames may differ.
 
-- Datasets: `<data-dir>/` (mnist / 20newsgroups / captcha*);
+- Datasets: `<data-dir>/` (MNIST / 20 Newsgroups / captcha*);
   `<data-dir>/video/` (7 CPU/OS MP4, 142.6 MB);
   `<data-dir>/video_dl/` (3 downloaded public samples:
   Big Buck Bunny / Jellyfish / Sintel, Blender CC movies)
@@ -377,7 +379,7 @@ target platforms; local filenames may differ.
 - Behavior Agent experiments: `<experiment-dir>/behavior_agent_v1.py`,
   `behavior_agent_v2.py`, `agent_behaviors.py` (output:
   `<experiment-dir>/behavior_output/`, `<experiment-dir>/behavior_output_v2/`);
-  formal framework: `explore/behavior_agent.py` (explicit interface, no config files)
+  formal framework (historical, now in experiment area) (explicit interface, no config files)
 - Surf tasks (feedback / reflex / hier / platform): `von_surf_engine.py`,
   `agent_surf.py`, `agent_surf_behaviors.py`, `von_hier_engine.py`,
   `agent_hier_behaviors.py`, `agent_platform_behaviors.py`,
@@ -428,9 +430,10 @@ target platforms; local filenames may differ.
 
 ## External Research Assessment (Summary)
 
-External research (kept outside the official tree; benchmark objects are
-generalized here to avoid identifying specific datasets or task setups)
-stress-tested the general method — perception (passive difference sensing /
+External research (kept outside the official tree; widely used public open
+datasets are named for reproducibility, while specific third-party platforms
+and task setups are generalized) stress-tested the general method — perception
+(passive difference sensing /
 active template matching) + hierarchical memory + lazy similarity-based
 decision — across standard public benchmarks and internal synthetic tasks
 in the image, text, retrieval and generation domains.
@@ -492,6 +495,10 @@ memory, 4 GiB max single allocation, 1024 max work-group) - the
 SuperParallel element-space model maps directly onto OpenCL work items
 (one kernel invocation per configured element; data/hardware transfer
 stays a data-layer concern).
+
+Test platform: Intel Core Ultra 5 125H (14C/18T) + Intel Arc Graphics
+(112 CUs, driver 31.0.101.5382); Windows 11 x64; Python 3.14.6; numpy
+2.5.2; pyopencl 2026.1.4.
 
 ### Saxpy benchmark (y = a*x + y, float32)
 

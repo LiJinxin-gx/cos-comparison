@@ -88,7 +88,8 @@ The passive/active philosophy extends vertically:
 - Dimension-agnostic stride-based `vector_map_as_tensor` with fancy indexing, zero-copy views, negative indices, dimension collapse
 - `__shape__` protocol / `infer_shape`, `load_as_default_data`, `load_data`, `vector_chain_compute`
 - Similarity algorithms (cos, mod, cosmod) and callback system
-- Three backends (C extension / ctypes / pure Python) with automatic fallback; free-threaded 3.13+ support; duck-typing for NumPy/PyTorch arrays
+- Two backends (C extension / pure Python) with automatic fallback; free-threaded 3.13+ support; duck-typing for NumPy/PyTorch arrays
+- Recursion-free execution throughout - explicit-stack iteration for indexing, tensor walks, value compilation, and shell / app control-flow execution (verified by `explore/recursion_check.py`)
 
 → [Core Module API](../api/core.md)
 
@@ -166,7 +167,7 @@ The passive/active philosophy extends vertically:
 - Dual-mode philosophy provides conceptual coherence
 - Memory layer has functional backends (map/table/database) with transaction support
 - Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system
-- Three backends fully API-aligned with zero-warning C code; v0.4.3 adds memory-safety fixes, protocol-style logic layers, and default dict-protocol implementations
+- Two backends fully API-aligned with zero-warning C code; v0.5.0 adds the iterate/transform extension points and the B-class interface cleanup
 
 ### Gaps
 

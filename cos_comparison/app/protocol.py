@@ -360,25 +360,87 @@ def _prepare_control(fn, args, docker):
 
 
 def _items_runner(docker, items):
-    """Wrap a branch's item list as a runnable closure: a brain-layer
-    Sequence flattened at run time, each step executed against the docker
-    (nested control-flow items wrapped the same way); returns the last
-    step result."""
+    """Wrap a branch's item list as a runnable closure on an explicit
+    frame stack: the brain-layer Sequence flattens at run time, nested
+    IF/WHILE items expand onto the stack, each step runs against the
+    docker; returns the last step result."""
     flow = Sequence(items)
     env = _docker_env(docker)
+    frames = []
+
+    def wrap_cond(cond):
+        if isinstance(cond, tuple) and len(cond) == 3 \
+                or isinstance(cond, ValueCode):
+            return _control_closure(docker, cond)
+        return cond
+
+    def finish_pending(parent, result):
+        pending = parent[-1]
+        if pending is None:
+            return
+        parent[-1] = None
+        _set_data(docker.data_pool, pending[0], result)
+        parent[-2] = result
+
+    def handle(item):
+        fn, args, kwargs, pos = _unpack(item)
+        frame = frames[-1]
+        if fn is IF:
+            cond = wrap_cond(args[0])
+            _cond, true_items, false_items = args
+            branch = true_items if bool(cond()) else false_items
+            if not branch:
+                _set_data(docker.data_pool, pos, None)
+                frame[-2] = None
+                return None
+            frame[-1] = (pos,)
+            return ["items", ControlFlatten()(Sequence(branch)), None, None]
+        if fn is WHILE:
+            cond = wrap_cond(args[0])
+            _cond, body_items = args
+            frame[-1] = (pos,)
+            return ["while", cond, body_items, None, 0, None, None]
+        rargs, rkwargs = _prepare_args(args, kwargs, docker.data_pool, env)
+        result = _apply_unpacked(fn, rargs, rkwargs, docker)
+        _set_data(docker.data_pool, pos, result)
+        frame[-2] = result
+        return None
 
     def run():
+        frames[:] = [["items", ControlFlatten()(flow), None, None]]
         last = None
-        for item in ControlFlatten()(flow):
-            if item is None:
-                continue
-            fn, args, kwargs, pos = _unpack(item)
-            args = _prepare_control(fn, args, docker)
-            args, kwargs = _prepare_args(
-                args, kwargs, docker.data_pool, env)
-            result = _apply_unpacked(fn, args, kwargs, docker)
-            _set_data(docker.data_pool, pos, result)
-            last = result
+        while frames:
+            frame = frames[-1]
+            if frame[0] == "while":
+                if frame[3] is None:
+                    if not bool(frame[1]()):
+                        frames.pop()
+                        if frames:
+                            finish_pending(frames[-1], frame[4])
+                        continue
+                    frame[3] = ControlFlatten()(Sequence(frame[2]))
+                try:
+                    item = next(frame[3])
+                except StopIteration:
+                    frame[3] = None
+                    frame[4] += 1
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
+            else:
+                try:
+                    item = next(frame[1])
+                except StopIteration:
+                    frames.pop()
+                    if frames:
+                        finish_pending(frames[-1], frame[2])
+                    else:
+                        last = frame[2]
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
         return last
 
     return run

@@ -1,6 +1,6 @@
 # Core Module
 
-`cos_comparison.core` provides all core functionality regardless of backend. Current version: **0.4.5**
+`cos_comparison.core` provides all core functionality regardless of backend. Current version: **0.5.0**
 
 ```python
 from cos_comparison import core as cc
@@ -99,13 +99,14 @@ protocol: `**ns` unpacking, `dict(ns)`, `keys()`, `len`, iteration
 - **`elementwise(*tensors, func, output)`** applies `func(x1, x2, ...)` at every position across all tensors, writing into `output` (same shape required). `func` and `output` are both required; shapes must match exactly; callback errors propagate. Supports any duck-typed tensor with `get_item`/`set_item`/`infer_shape`. Iterative, never recursive. Returns status code `0` on success.
 - **`elementwise_position(output, *tensors, callback, start=None, shape=None, step=None, origin=None, scale=None)`** is the position-aware variant: `callback([t[real] for t in tensors], logical)` where `logical = (real - origin) / scale`. Useful for coordinate-dependent transforms (e.g. spatial filtering, position-based weighting). Callback errors silently skipped. Returns status code `0`.
 - **`position_map(output, callback, start=None, shape=None, step=None, origin=None, scale=None)`** writes `output[real] = callback(logical)` for every position in the read region. Single-tensor position mapping; useful for generating coordinate patterns (grids, radial masks, positional encodings). Returns status code `0`.
+- **`iterate` (v0.5.0)** — the element-wise functions (`data_filter`, `data_mapping`, `elementwise`, `elementwise_position`, `position_map`, `threshold_*`) and the B-class functions accept an optional external-engine slot: `iterate(engine_kernel, **index_info)` resolves the position parameters and calls `kernel(index, **params)`; with `None` (default) the original inline skeleton runs. See [Common Parameters](#common-parameters) and [External Engines](../architecture/backend-system.md#external-engines-iterate-injection-v050).
 
 ### Backend Management
 
 | Function | Description |
 |----------|-------------|
 | `get_mode()` | Enabled backends in priority order (immutable tuple) |
-| `get_available_backends()` | All configured backends including disabled |
+| `get_available_backends()` | All configured call names |
 | `set_mode(backend)` | Force specific backend(s) |
 
 > `cos_comparison.core` hot-injects the full public API of the active
@@ -135,14 +136,23 @@ protocol: `**ns` unpacking, `dict(ns)`, `keys()`, `len`, iteration
 | `step` | tuple of ints | all ones | Sliding-window step; larger = fewer points = faster |
 | `d` | tuple of ints | `(1,0,0,...)` | Passive only: displacement between comparison windows |
 | `algorithm` | function | `_cosmod` | Similarity function; custom signature `def algo(a, b, ab, name)` |
-| `w1`/`w2`/`b1`/`b2` | number | 1/1/0/0 | Linear transform: `w*value + b` for each comparison region |
 | `output` | tensor | `None` | Pre-allocated output container (creates new if `None`) |
 | `output_start` / `output_step` | tuple of ints | 0 / 1 | Output region placement |
+| `iterate` | callable | `None` | Optional external engine `engine(kernel, **index_info)` (v0.5.0): resolves the position parameters and hands the index plus the kernel parameters to `kernel(index, **params)`; with `None` the original inline skeleton runs (zero regression) |
+| `transform1` / `transform2` | callable | `None` | Per-value maps replacing the retired linear transform: `transform1(value) → new_value` applied to each read of the first comparison window (passive `main` / active data window), `transform2(...)` to the second (passive `other = main + d` / active kernel template); `None` = identity (bit-identical default) |
 | `start_callback` | function | `None` | Called before computation: `callback(name_space)` |
 | `end_callback` | function | `None` | Called after computation: `callback(name_space)` |
 | `global_error_callback` | function | `None` | Called on outer-loop errors: `callback(error, name_space)` |
 | `local_error_callback` | function | `None` | Called on inner-loop errors: `callback(error, name_space)`; may impact performance |
 | `return_callback` | function | identity | Wraps return value: `callback(output, name_space) → wrapped` |
+
+> **v0.5.0 interface cleanup:** the historical `w1`/`w2`/`b1`/`b2`
+> parameters and the `iter_a_callback`/`iter_b_callback` hooks were
+> removed; legacy keyword arguments are still accepted silently (absorbed
+> by the pure Python side, parsed and ignored by the C side).  The
+> linear transform is replaced by the extensible `transform1`/
+> `transform2` callables (not limited to `w*x+b`), and the `name_space`
+> no longer carries a `linear` field.
 
 ---
 
@@ -200,7 +210,7 @@ t[0] = 99.0       # buf[0] becomes 99.0 (shared storage)
 
 Namespace container for function parameters passed to callbacks and custom algorithms.
 
-**Slots:** `output`, `output_start`, `output_step`, `window_size`, `kernel`, `linear`, `start`, `end`, `d`, `step`, `algorithm`, `num`
+**Slots:** `output`, `output_start`, `output_step`, `window_size`, `kernel`, `start`, `end`, `d`, `step`, `algorithm`, `num`
 
 ### default_contain
 
@@ -219,7 +229,7 @@ c[5]        # 2.0
 
 ```python
 import cos_comparison
-cos_comparison.__version__  # "0.4.5"
+cos_comparison.__version__  # "0.5.0"
 ```
 
 > `cos_comparison.core` does not define `__version__`; read from the top-level package.

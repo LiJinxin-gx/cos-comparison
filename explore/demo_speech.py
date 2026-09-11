@@ -1,218 +1,181 @@
 """
-Speech Recognition Demo using Atomic Contrast Point Matching.
+Speech Classification Demo: spectrogram + hierarchical pooling.
 
-Demonstrates the full pipeline:
-1. Audio -> spectrogram (2D tensor)
-2. Atomic feature extraction (passive boundary + pooling)
-3. Binarization (contrast point sets)
-4. Hierarchical matching (coarse boundary -> fine combined)
+Demonstrates cross-modal generality:
+1. Audio -> 1D amplitude envelope (pure Python)
+2. Amplitude -> 2D spectrogram-like tensor (time vs frequency bands)
+3. 3-level hierarchical pooling + active cosine matching
 
-This is a self-contained demo. Data loading is separate from training.
-Training only receives tensors.
+Data loading separated from processing:
+- load_audio(): file -> 1D sample array
+- audio_to_spectrogram(): 1D -> 2D tensor
+- GroupHierarchicalClassifier: tensor -> classification
 
-Pure standard library + cos_comparison for core logic.
-scipy/Pillow are optional (only for audio loading).
+Pure standard library only. No numpy/scipy required.
 """
 import os
 import sys
+import wave
+import struct
 
-# Add explore directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from atomic_feature import extract_grouped, binarize
-from hierarchical_match import HierarchicalMatcher
-from contrast_match import ContrastMatcher
+from group_hierarchical import GroupHierarchicalClassifier
 
 
-def audio_to_spectrogram(audio, sr=16000, nperseg=256, size=64):
+def load_wav(path):
+    """Load WAV file as 1D amplitude array (normalized -1..1)."""
+    with wave.open(path, 'rb') as wf:
+        nframes = wf.getnframes()
+        nchannels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        raw = wf.readframes(nframes)
+
+    samples = []
+    if sampwidth == 2:
+        for i in range(0, len(raw), 2 * nchannels):
+            val = struct.unpack('<h', raw[i:i+2])[0]
+            samples.append(val / 32768.0)
+    elif sampwidth == 1:
+        for i in range(0, len(raw), nchannels):
+            samples.append((raw[i] - 128) / 128.0)
+    else:
+        # Fallback: treat as float
+        for i in range(0, len(raw), 4):
+            samples.append(struct.unpack('<f', raw[i:i+4])[0])
+
+    return samples
+
+
+def audio_to_spectrogram(samples, n_bands=8, n_time=28):
     """
-    Convert 1D audio array to 2D spectrogram tensor.
-    Simple STFT using pure Python (no numpy/scipy required for core).
-    This is the ONLY data-loading function; training receives tensors.
+    Convert 1D audio to 2D spectrogram-like tensor.
+    Simple band-pass filtering via amplitude in sub-windows.
+
+    Returns: (n_bands, n_time) 2D tensor.
     """
-    import math
-    n = len(audio)
-    hop = nperseg // 2
-    n_frames = max(1, (n - nperseg) // hop + 1)
-    n_freqs = nperseg // 2 + 1
+    n = len(samples)
+    if n == 0:
+        return [[0.0] * n_time for _ in range(n_bands)]
 
-    # Simple DFT per frame (pure Python)
-    spec = []
-    for i in range(n_frames):
-        start = i * hop
-        frame = audio[start:start + nperseg]
-        if len(frame) < nperseg:
-            frame = frame + [0.0] * (nperseg - len(frame))
-        # Apply Hann window
-        windowed = [frame[j] * (0.5 - 0.5 * math.cos(2 * math.pi * j / nperseg))
-                    for j in range(nperseg)]
-        # DFT magnitudes (first n_freqs bins)
-        magnitudes = []
-        for k in range(n_freqs):
-            real = sum(windowed[j] * math.cos(2 * math.pi * k * j / nperseg)
-                       for j in range(nperseg))
-            imag = sum(-windowed[j] * math.sin(2 * math.pi * k * j / nperseg)
-                       for j in range(nperseg))
-            magnitudes.append(math.log1p(math.sqrt(real * real + imag * imag)))
-        spec.append(magnitudes)
+    # Divide into time windows
+    win_size = max(1, n // n_time)
+    result = [[0.0] * n_time for _ in range(n_bands)]
 
-    # Resize to size x size using nearest-neighbor
-    if not spec:
-        return [[0.0] * size for _ in range(size)]
-    result = [[0.0] * size for _ in range(size)]
-    max_val = max(max(row) for row in spec) + 1e-10
-    for i in range(size):
-        src_i = min(int(i * n_freqs / size), n_freqs - 1)
-        for j in range(size):
-            src_j = min(int(j * n_frames / size), n_frames - 1)
-            result[i][j] = spec[src_j][src_i] / max_val * 255.0
+    for t in range(n_time):
+        start = t * win_size
+        end = min(start + win_size, n)
+        if start >= end:
+            continue
+        window = samples[start:end]
+        wn = len(window)
+
+        # Simple frequency bands via short-time variance
+        # Low band: first quarter, Mid: half, High: last quarter
+        quarter = wn // 4
+        low = sum(abs(x) for x in window[:quarter]) / max(1, quarter)
+        mid = sum(abs(x) for x in window[quarter:3*quarter]) / max(1, 2*quarter)
+        high = sum(abs(x) for x in window[3*quarter:]) / max(1, wn - 3*quarter)
+
+        # Fill bands with energy distribution
+        for b in range(n_bands):
+            frac = b / n_bands
+            if frac < 0.3:
+                result[b][t] = low * (1.0 - frac * 3)
+            elif frac < 0.7:
+                result[b][t] = mid * (1.0 - abs(frac - 0.5) * 2)
+            else:
+                result[b][t] = high * (frac - 0.7) / 0.3
+
     return result
 
 
-def load_wav(path, target_len=16000):
-    """Load WAV file to 1D list of floats using standard library wave module."""
-    import wave
-    import struct
-    try:
-        with wave.open(path, 'rb') as wf:
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            framerate = wf.getframerate()
-            n_frames = wf.getnframes()
-            raw = wf.readframes(n_frames)
-    except Exception as e:
-        print(f"Failed to load {path}: {e}")
-        return None
-
-    # Decode samples based on sample width
-    if sampwidth == 2:
-        fmt = f'<{n_frames * n_channels}h'
-        samples = struct.unpack(fmt, raw)
-    elif sampwidth == 1:
-        samples = [b - 128 for b in raw]
-    else:
-        print(f"Unsupported sample width: {sampwidth}")
-        return None
-
-    # Take first channel and normalize to [-1, 1]
-    data = [float(samples[i]) / 32768.0 for i in range(0, len(samples), n_channels)]
-
-    # Resample to 16000 Hz if needed
-    if framerate != 16000:
-        ratio = 16000 / framerate
-        new_len = int(len(data) * ratio)
-        data = [data[min(int(i / ratio), len(data) - 1)] for i in range(new_len)]
-
-    if len(data) < target_len:
-        data = data + [0.0] * (target_len - len(data))
-    else:
-        data = data[:target_len]
-    return data
-
-
-def prepare_dataset(data_dir, n_per_class=50, test_ratio=0.3):
+def load_speech_dataset(data_dir, n_per_class=20):
     """
-    Load audio files from directory structure:
+    Load speech dataset from directory:
         data_dir/
-            class1/
-                file1.wav
-                file2.wav
-            class2/
+            word1/
+                audio1.wav
                 ...
-
-    Returns train/test tensors and labels.
+            word2/
+                ...
     """
-    classes = sorted([d for d in os.listdir(data_dir)
-                      if os.path.isdir(os.path.join(data_dir, d))])
-    print(f"Found {len(classes)} classes: {classes}")
+    classes = sorted(d for d in os.listdir(data_dir)
+                     if os.path.isdir(os.path.join(data_dir, d)))
+    print(f"Found {len(classes)} classes")
 
-    train_specs, train_labels = [], []
-    test_specs, test_labels = [], []
+    train_spects, train_labels = [], []
+    test_spects, test_labels = [], []
 
     for cls in classes:
         cls_dir = os.path.join(data_dir, cls)
-        files = sorted([f for f in os.listdir(cls_dir) if f.endswith('.wav')])[:n_per_class]
-        n_test = int(len(files) * test_ratio)
-        train_files = files[n_test:]
-        test_files = files[:n_test]
+        files = sorted(f for f in os.listdir(cls_dir) if f.endswith('.wav'))[:n_per_class]
+        n_test = max(1, len(files) // 3)
+        for f in files[n_test:]:
+            samples = load_wav(os.path.join(cls_dir, f))
+            spect = audio_to_spectrogram(samples)
+            train_spects.append(spect)
+            train_labels.append(cls)
+        for f in files[:n_test]:
+            samples = load_wav(os.path.join(cls_dir, f))
+            spect = audio_to_spectrogram(samples)
+            test_spects.append(spect)
+            test_labels.append(cls)
 
-        for f in train_files:
-            audio = load_wav(os.path.join(cls_dir, f))
-            if audio is not None:
-                spec = audio_to_spectrogram(audio)
-                if spec is not None:
-                    train_specs.append(spec)
-                    train_labels.append(cls)
-
-        for f in test_files:
-            audio = load_wav(os.path.join(cls_dir, f))
-            if audio is not None:
-                spec = audio_to_spectrogram(audio)
-                if spec is not None:
-                    test_specs.append(spec)
-                    test_labels.append(cls)
-
-    print(f"Train: {len(train_specs)}, Test: {len(test_specs)}")
-    return train_specs, train_labels, test_specs, test_labels
-
-
-def extract_features(specs, boundary_thresh=10, raw_thresh=10):
-    """
-    Extract grouped features and binarize.
-    Training only receives tensors (specs), outputs binary sets.
-    """
-    boundary_feats, raw_feats = [], []
-    for spec in specs:
-        b, r = extract_grouped(spec)
-        boundary_feats.append(binarize(b, top_percent=boundary_thresh))
-        raw_feats.append(binarize(r, top_percent=raw_thresh))
-    return boundary_feats, raw_feats
+    print(f"Train: {len(train_spects)}, Test: {len(test_spects)}")
+    return train_spects, train_labels, test_spects, test_labels
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python demo_speech.py <data_dir> [n_per_class]")
-        print("Example: python demo_speech.py /mnt/d/testdata/speech_commands 100")
-        # Run with synthetic data demo
+        print("Usage: python demo_speech.py <data_dir>")
         print("\nRunning synthetic demo...")
         import random
         random.seed(42)
-        n_train, n_test = 100, 30
-        train_specs = [[[random.random() for _ in range(64)] for _ in range(64)]
-                       for _ in range(n_train)]
-        train_labels = [f"class_{i % 5}" for i in range(n_train)]
-        test_specs = [[[random.random() for _ in range(64)] for _ in range(64)]
-                      for _ in range(n_test)]
-        test_labels = [f"class_{i % 5}" for i in range(n_test)]
+
+        def make_word_spect(word, n_time=28, n_bands=8):
+            """Create synthetic spectrogram-like patterns."""
+            spect = [[0.0] * n_time for _ in range(n_bands)]
+            if word == "hello":
+                # Low frequency vowel
+                for t in range(n_time):
+                    for b in range(n_bands):
+                        spect[b][t] = 0.5 * (1.0 - abs(b - 2) / n_bands)
+            elif word == "world":
+                # Mid frequency
+                for t in range(n_time):
+                    for b in range(n_bands):
+                        spect[b][t] = 0.5 * (1.0 - abs(b - 4) / n_bands)
+            else:
+                # High frequency
+                for t in range(n_time):
+                    for b in range(n_bands):
+                        spect[b][t] = 0.5 * (1.0 - abs(b - 6) / n_bands)
+            # Add noise
+            for b in range(n_bands):
+                for t in range(n_time):
+                    spect[b][t] += random.gauss(0, 0.02)
+            return spect
+
+        train_spects = [make_word_spect(i % 3) for i in range(120)]
+        train_labels = [f"word_{i % 3}" for i in range(120)]
+        test_spects = [make_word_spect(i % 3) for i in range(36)]
+        test_labels = [f"word_{i % 3}" for i in range(36)]
     else:
         data_dir = sys.argv[1]
-        n_per_class = int(sys.argv[2]) if len(sys.argv) > 2 else 50
-        train_specs, train_labels, test_specs, test_labels = prepare_dataset(
-            data_dir, n_per_class=n_per_class)
+        train_spects, train_labels, test_spects, test_labels = load_speech_dataset(data_dir)
 
-    # Extract features (tensors in -> binary sets out)
-    print("\nExtracting features...")
-    train_b, train_r = extract_features(train_specs)
-    test_b, test_r = extract_features(test_specs)
-    print(f"Boundary dim: {len(train_b[0])}, Raw dim: {len(train_r[0])}")
+    print("\nTraining speech classifier...")
+    clf = GroupHierarchicalClassifier(
+        pool_factors=[1, 2, 4],
+        use_passive=False
+    )
+    clf.fit(train_spects, train_labels)
 
-    # Method 1: Flat contrast matching
-    print("\n=== Flat Contrast Matching (K=1) ===")
-    train_combined = [b + r for b, r in zip(train_b, train_r)]
-    test_combined = [b + r for b, r in zip(test_b, test_r)]
-    matcher = ContrastMatcher()
-    matcher.fit(train_combined, train_labels)
-    acc_flat = matcher.accuracy(test_combined, test_labels, k=1)
-    print(f"Accuracy: {acc_flat*100:.1f}%")
-
-    # Method 2: Hierarchical matching
-    print("\n=== Hierarchical Matching (coarse boundary -> fine combined) ===")
-    hmatcher = HierarchicalMatcher()
-    hmatcher.fit(train_b, train_r, train_labels)
-    acc_hier = hmatcher.accuracy(test_b, test_r, test_labels, coarse_n=10)
-    print(f"Accuracy: {acc_hier*100:.1f}%")
-
-    print(f"\nBest: {max(acc_flat, acc_hier)*100:.1f}%")
+    print("Evaluating...")
+    acc = clf.accuracy(test_spects, test_labels)
+    print(f"\nAccuracy: {acc * 100:.1f}%")
+    print(f"Principle: spectrogram + 3-level pooling + active cosine")
 
 
 if __name__ == '__main__':

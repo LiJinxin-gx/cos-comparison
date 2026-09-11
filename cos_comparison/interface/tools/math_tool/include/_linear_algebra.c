@@ -69,7 +69,7 @@ static inline int la_convert(PyObject *obj, double *out)
 }
 
 /* flatten any-dimension data into a PyList of leaf values
- * (explicit iterator stack - no recursion); NULL on failure */
+ * (explicit iterator stack); NULL on failure */
 static PyObject *la_flatten(PyObject *data)
 {
     PyObject *values = PyList_New(0);
@@ -832,13 +832,20 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+static PyModuleDef_Slot module_slots[] = {
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_linear_algebra",
     "Dimension-generic linear algebra (duck typing, output keyword).",
-    -1,
+    0,
     methods,
-    NULL,  /* m_slots */
+    module_slots,
     NULL,  /* m_traverse */
     NULL,  /* m_clear */
     NULL,  /* m_free */
@@ -846,7 +853,7 @@ static struct PyModuleDef moduledef = {
 
 PyMODINIT_FUNC PyInit__linear_algebra(void)
 {
-    return PyModule_Create(&moduledef);
+    return PyModuleDef_Init(&moduledef);
 }
 
 #ifdef _MSC_VER

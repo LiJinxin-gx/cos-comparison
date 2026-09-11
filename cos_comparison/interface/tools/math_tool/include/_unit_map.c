@@ -63,11 +63,9 @@ static int um_hashable(PyObject *obj)
 }
 
 
-/* Folded content signature of a container: a bounded 61-bit integer,
- * computed with an ITERATIVE post-order walk (no recursion; children are
- * folded before their parents).  Deterministic; order-insensitive for
- * dicts (pairs folded sorted by key hash).  Collisions are resolved by
- * the iterative deep equality inside the record buckets. */
+/* Bounded 61-bit container signature: iterative post-order fold
+ * (children before parents); order-insensitive for mappings (pairs
+ * sorted by key hash); collisions resolved by deep equality. */
 #define UM_SIG_MASK 0x1FFFFFFFFFFFFFFFLL
 #define UM_SIG_MUL  1000003LL
 
@@ -153,15 +151,51 @@ static int um_push_frame(PyObject ***nodes, int **phases, size_t *cap,
     return 0;
 }
 
-/* Children of a container, in a stable order for the expand phase
- * (dict children are pushed as [k, v, k, v, ...]; the collapse phase
- * re-sorts by key hash).  Returns the child count (0 for atoms). */
+/* Protocol helpers: duck sequence / mapping / set (text excluded,
+ * mappings are never sequences). */
+static int um_is_mapping_proto(PyObject *obj)
+{
+    if (!PyObject_HasAttrString(obj, "keys")) return 0;
+    return PyObject_HasAttrString(obj, "__getitem__");
+}
+
+static int um_is_seq_proto(PyObject *obj)
+{
+    if (PyUnicode_Check(obj) || PyBytes_Check(obj)) return 0;
+    if (um_is_mapping_proto(obj)) return 0;
+    if (!PySequence_Check(obj)) return 0;
+    if (PyObject_Length(obj) < 0) { PyErr_Clear(); return 0; }
+    return 1;
+}
+
+static int um_is_set_proto(PyObject *obj)
+{
+    if (PyUnicode_Check(obj) || PyBytes_Check(obj)) return 0;
+    if (um_is_mapping_proto(obj)) return 0;
+    if (PyObject_HasAttrString(obj, "__getitem__")) return 0;
+    if (!PyObject_HasAttrString(obj, "__contains__")) return 0;
+    return PyObject_HasAttrString(obj, "__iter__");
+}
+
+/* Structural labels: 1 = mutable (list/set-like), 2 = immutable. */
+static int um_seq_label(PyObject *obj)
+{
+    return PyObject_HasAttrString(obj, "__setitem__") ? 1 : 2;
+}
+
+static int um_set_label(PyObject *obj)
+{
+    return PyObject_HasAttrString(obj, "add") ? 1 : 2;
+}
+
+/* Children of a container (stable order); mapping children are pushed
+ * as [k, v, ...].  Returns the child count (0 for atoms). */
 static Py_ssize_t um_children(PyObject *node, PyObject ***out)
 {
     Py_ssize_t n;
     Py_ssize_t i;
     PyObject **kids;
-    if (PyList_Check(node) || PyTuple_Check(node)) {
+    if (um_is_seq_proto(node)) {
         n = PySequence_Size(node);
         if (n < 0) {
             return -1;
@@ -186,60 +220,60 @@ static Py_ssize_t um_children(PyObject *node, PyObject ***out)
         *out = kids;
         return n;
     }
-    if (PyDict_Check(node)) {
-        n = PyDict_Size(node);
+    if (um_is_mapping_proto(node)) {
+        PyObject *keys = PyObject_CallMethod(node, "keys", NULL);
+        PyObject *keys_list = keys != NULL ? PySequence_List(keys) : NULL;
+        Py_XDECREF(keys);
+        if (keys_list == NULL) {
+            return -1;
+        }
+        n = PyList_GET_SIZE(keys_list);
         kids = (PyObject **)PyMem_Malloc(
             (size_t)(n > 0 ? n * 2 : 2) * sizeof(PyObject *));
         if (kids == NULL) {
+            Py_DECREF(keys_list);
             PyErr_NoMemory();
             return -1;
         }
-        i = 0;
-        {
-            PyObject *k;
-            PyObject *v;
-            Py_ssize_t pos = 0;
-            while (PyDict_Next(node, &pos, &k, &v)) {
-                Py_INCREF(k);
-                kids[i] = k;
-                Py_INCREF(v);
-                kids[i + 1] = v;
-                i += 2;
-            }
-        }
-        *out = kids;
-        return n * 2;
-    }
-    if (PySet_Check(node) && !PyFrozenSet_Check(node)) {
-        n = PySet_Size(node);
-        kids = (PyObject **)PyMem_Malloc(
-            (size_t)(n > 0 ? n : 1) * sizeof(PyObject *));
-        if (kids == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        i = 0;
-        {
-            PyObject *iter = PyObject_GetIter(node);
-            PyObject *item;
-            if (iter == NULL) {
-                PyMem_Free(kids);
-                return -1;
-            }
-            while ((item = PyIter_Next(iter)) != NULL) {
-                kids[i] = item;
-                i += 1;
-            }
-            Py_DECREF(iter);
-            if (PyErr_Occurred()) {
+        for (i = 0; i < n; ++i) {
+            PyObject *k = PyList_GET_ITEM(keys_list, i);
+            PyObject *v = PyObject_GetItem(node, k);
+            if (v == NULL) {
                 Py_ssize_t j;
-                for (j = 0; j < i; ++j) {
+                for (j = 0; j < i * 2; ++j) {
                     Py_DECREF(kids[j]);
                 }
                 PyMem_Free(kids);
+                Py_DECREF(keys_list);
                 return -1;
             }
+            Py_INCREF(k);
+            kids[i * 2] = k;
+            kids[i * 2 + 1] = v;
         }
+        Py_DECREF(keys_list);
+        *out = kids;
+        return n * 2;
+    }
+    if (um_is_set_proto(node)) {
+        PyObject *items = PySequence_List(node);
+        if (items == NULL) {
+            return -1;
+        }
+        n = PyList_GET_SIZE(items);
+        kids = (PyObject **)PyMem_Malloc(
+            (size_t)(n > 0 ? n : 1) * sizeof(PyObject *));
+        if (kids == NULL) {
+            Py_DECREF(items);
+            PyErr_NoMemory();
+            return -1;
+        }
+        for (i = 0; i < n; ++i) {
+            PyObject *item = PyList_GET_ITEM(items, i);
+            Py_INCREF(item);
+            kids[i] = item;
+        }
+        Py_DECREF(items);
         *out = kids;
         return n;
     }
@@ -354,12 +388,12 @@ static PyObject *um_sig(PyObject *obj, int depth)
                     goto done;
                 }
             }
-            if (PyList_Check(node) || PyTuple_Check(node)) {
-                acc = PyList_Check(node) ? 1 : 2;
+            if (um_is_seq_proto(node)) {
+                acc = um_seq_label(node);
                 for (j = 0; j < nk; ++j) {
                     acc = (acc * UM_SIG_MUL + vals[j]) & UM_SIG_MASK;
                 }
-            } else if (PyDict_Check(node)) {
+            } else if (um_is_mapping_proto(node)) {
                 /* pairs sorted by key hash (order-insensitive) */
                 acc = 3;
                 {
@@ -387,7 +421,7 @@ static PyObject *um_sig(PyObject *obj, int depth)
                             & UM_SIG_MASK;
                     }
                 }
-            } else {  /* set / frozenset */
+            } else {  /* set-like */
                 acc = 4;
                 for (j = 0; j < nk; ++j) {
                     acc = (acc * UM_SIG_MUL + vals[j]) & UM_SIG_MASK;
@@ -441,9 +475,9 @@ static int um_push_frame_ab(PyObject ***sa, PyObject ***sb, size_t *cap,
     return 0;
 }
 
-/* Iterative deep equality (no recursion): list/tuple compare in order,
- * dict by key match + recursive values, sets by membership (hashable
- * members - shallow ==), atomic leaves with their own ==. */
+/* Iterative deep equality: containers compare through the sequence /
+ * mapping / set protocols (structure labels keep list != tuple and
+ * set != frozenset); leaves use their own ==. */
 static int um_deep_eq(PyObject *a, PyObject *b)
 {
     PyObject **sa = NULL;
@@ -464,72 +498,113 @@ static int um_deep_eq(PyObject *a, PyObject *b)
         if (x == y) {
             continue;
         }
-        if (PyList_Check(x) && PyList_Check(y)) {
-            Py_ssize_t n = PyList_GET_SIZE(x);
+        if (um_is_seq_proto(x)) {
+            Py_ssize_t n;
             Py_ssize_t i;
-            if (PyList_GET_SIZE(y) != n) {
+            if (!um_is_seq_proto(y) ||
+                um_seq_label(x) != um_seq_label(y)) {
+                result = 0;
+                goto done;
+            }
+            n = PySequence_Size(x);
+            if (n < 0) {
+                result = -1;
+                goto done;
+            }
+            if (PySequence_Size(y) != n) {
                 result = 0;
                 goto done;
             }
             for (i = n - 1; i >= 0; --i) {
-                if (um_push_frame_ab(&sa, &sb, &cap, &len,
-                                     PyList_GET_ITEM(x, i),
-                                     PyList_GET_ITEM(y, i)) < 0) {
+                PyObject *xi = PySequence_GetItem(x, i);
+                PyObject *yi = PySequence_GetItem(y, i);
+                if (xi == NULL || yi == NULL) {
+                    Py_XDECREF(xi); Py_XDECREF(yi);
+                    result = -1;
+                    goto done;
+                }
+                if (um_push_frame_ab(&sa, &sb, &cap, &len, xi, yi) < 0) {
+                    Py_DECREF(xi); Py_DECREF(yi);
                     PyErr_NoMemory();
                     result = -1;
                     goto done;
                 }
+                /* the containers keep the children alive */
+                Py_DECREF(xi);
+                Py_DECREF(yi);
             }
             continue;
         }
-        if (PyTuple_Check(x) && PyTuple_Check(y)) {
-            Py_ssize_t n = PyTuple_GET_SIZE(x);
-            Py_ssize_t i;
-            if (PyTuple_GET_SIZE(y) != n) {
-                result = 0;
-                goto done;
-            }
-            for (i = n - 1; i >= 0; --i) {
-                if (um_push_frame_ab(&sa, &sb, &cap, &len,
-                                     PyTuple_GET_ITEM(x, i),
-                                     PyTuple_GET_ITEM(y, i)) < 0) {
-                    PyErr_NoMemory();
-                    result = -1;
-                    goto done;
-                }
-            }
-            continue;
-        }
-        if (PyDict_Check(x) && PyDict_Check(y)) {
-            Py_ssize_t n = PyDict_Size(x);
+        if (um_is_mapping_proto(x)) {
+            PyObject *kx;
+            PyObject *ky;
+            PyObject *iter;
             PyObject *k;
-            PyObject *v;
-            Py_ssize_t pos = 0;
-            if (PyDict_Size(y) != n) {
+            int eq;
+            if (!um_is_mapping_proto(y)) {
                 result = 0;
                 goto done;
             }
-            while (PyDict_Next(x, &pos, &k, &v)) {
-                PyObject *yv = PyDict_GetItemWithError(y, k);
-                if (yv == NULL) {
-                    if (PyErr_Occurred()) {
-                        result = -1;
-                        goto done;
-                    }
-                    result = 0;
+            kx = PyObject_CallMethod(x, "keys", NULL);
+            ky = PyObject_CallMethod(y, "keys", NULL);
+            if (kx == NULL || ky == NULL) {
+                Py_XDECREF(kx); Py_XDECREF(ky);
+                result = -1;
+                goto done;
+            }
+            eq = PyObject_RichCompareBool(kx, ky, Py_EQ);
+            Py_DECREF(ky);
+            if (eq < 0) {
+                Py_DECREF(kx);
+                result = -1;
+                goto done;
+            }
+            if (!eq) {
+                Py_DECREF(kx);
+                result = 0;
+                goto done;
+            }
+            iter = PyObject_GetIter(kx);
+            Py_DECREF(kx);
+            if (iter == NULL) {
+                result = -1;
+                goto done;
+            }
+            while ((k = PyIter_Next(iter)) != NULL) {
+                PyObject *xv = PyObject_GetItem(x, k);
+                PyObject *yv = PyObject_GetItem(y, k);
+                if (xv == NULL || yv == NULL) {
+                    Py_XDECREF(xv); Py_XDECREF(yv);
+                    Py_DECREF(k); Py_DECREF(iter);
+                    result = -1;
                     goto done;
                 }
-                if (um_push_frame_ab(&sa, &sb, &cap, &len, v, yv) < 0) {
+                if (um_push_frame_ab(&sa, &sb, &cap, &len, xv, yv) < 0) {
+                    Py_DECREF(xv); Py_DECREF(yv);
+                    Py_DECREF(k); Py_DECREF(iter);
                     PyErr_NoMemory();
                     result = -1;
                     goto done;
                 }
+                Py_DECREF(xv);
+                Py_DECREF(yv);
+                Py_DECREF(k);
+            }
+            Py_DECREF(iter);
+            if (PyErr_Occurred()) {
+                result = -1;
+                goto done;
             }
             continue;
         }
-        if ((PySet_Check(x) && PySet_Check(y)) &&
-            (PyFrozenSet_Check(x) == PyFrozenSet_Check(y))) {
-            int eq = PyObject_RichCompareBool(x, y, Py_EQ);
+        if (um_is_set_proto(x)) {
+            int eq;
+            if (!um_is_set_proto(y) ||
+                um_set_label(x) != um_set_label(y)) {
+                result = 0;
+                goto done;
+            }
+            eq = PyObject_RichCompareBool(x, y, Py_EQ);
             if (eq < 0) {
                 result = -1;
                 goto done;
@@ -1081,54 +1156,72 @@ fail:
     return NULL;
 }
 
+/* State-field lookup through the mapping protocol (absent -> NULL). */
+static PyObject *um_state_get(PyObject *st, const char *key)
+{
+    PyObject *k = PyUnicode_FromString(key);
+    PyObject *v;
+    if (k == NULL) return NULL;
+    v = PyObject_GetItem(st, k);
+    Py_DECREF(k);
+    if (v == NULL && PyErr_ExceptionMatches(PyExc_KeyError)) {
+        PyErr_Clear();
+        return NULL;
+    }
+    return v;
+}
+
 static PyObject *um_set_state(UnitMapObject *self, PyObject *arg)
 {
     PyObject *st;
     PyObject *v;
-    if (!PyDict_Check(arg)) {
+    if (!um_is_mapping_proto(arg)) {
         PyErr_SetString(PyExc_TypeError,
                         "set_state expects a state dict");
         return NULL;
     }
     st = arg;
-    if ((v = PyDict_GetItemString(st, "start")) != NULL) {
+    if ((v = um_state_get(st, "start")) != NULL) {
         self->start = PyFloat_AsDouble(v);
+        Py_DECREF(v);
     }
-    if ((v = PyDict_GetItemString(st, "step")) != NULL) {
+    if ((v = um_state_get(st, "step")) != NULL) {
         self->step = PyFloat_AsDouble(v);
+        Py_DECREF(v);
     }
-    if ((v = PyDict_GetItemString(st, "table")) != NULL) {
-        Py_INCREF(v);
+    if ((v = um_state_get(st, "table")) != NULL) {
         Py_SETREF(self->table, v);
     }
-    if ((v = PyDict_GetItemString(st, "plain_sig")) != NULL) {
-        Py_INCREF(v);
+    if ((v = um_state_get(st, "plain_sig")) != NULL) {
         Py_SETREF(self->plain_sig, v);
     }
-    if ((v = PyDict_GetItemString(st, "flags")) != NULL) {
-        Py_INCREF(v);
+    if ((v = um_state_get(st, "flags")) != NULL) {
         Py_SETREF(self->flags, v);
     }
-    if ((v = PyDict_GetItemString(st, "counts")) != NULL) {
-        Py_INCREF(v);
+    if ((v = um_state_get(st, "counts")) != NULL) {
         Py_SETREF(self->counts, v);
     }
-    if ((v = PyDict_GetItemString(st, "pending")) != NULL) {
-        Py_INCREF(v);
-        Py_XSETREF(self->pending, v == Py_None ? NULL : v);
+    if ((v = um_state_get(st, "pending")) != NULL) {
+        if (v == Py_None) {
+            Py_DECREF(v);
+            Py_CLEAR(self->pending);
+        } else {
+            Py_SETREF(self->pending, v);
+        }
     }
-    if ((v = PyDict_GetItemString(st, "queued")) != NULL) {
-        Py_INCREF(v);
+    if ((v = um_state_get(st, "queued")) != NULL) {
         Py_SETREF(self->queued, v);
     }
-    if ((v = PyDict_GetItemString(st, "out_pos")) != NULL) {
+    if ((v = um_state_get(st, "out_pos")) != NULL) {
         self->out_pos = PyLong_AsSsize_t(v);
+        Py_DECREF(v);
         if (PyErr_Occurred()) {
             return NULL;
         }
     }
-    if ((v = PyDict_GetItemString(st, "n")) != NULL) {
+    if ((v = um_state_get(st, "n")) != NULL) {
         self->nunique = PyLong_AsLong(v);
+        Py_DECREF(v);
         if (PyErr_Occurred()) {
             return NULL;
         }
@@ -1700,7 +1793,7 @@ static PyTypeObject UnitMapType = {
 
 
 /* ------------------------------------------------------------------ */
-/* module-level helpers (N-D windows, iterative - no recursion)         */
+/* module-level helpers (N-D windows, iterative)                        */
 /* ------------------------------------------------------------------ */
 
 #define UM_MAXDIM 16
@@ -2215,13 +2308,33 @@ static PyMethodDef module_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+static int module_exec(PyObject *m) {
+    if (PyType_Ready(&UnitMapType) < 0) {
+        return -1;
+    }
+    Py_INCREF(&UnitMapType);
+    if (PyModule_AddObject(m, "UnitMap", (PyObject *)&UnitMapType) < 0) {
+        Py_DECREF(&UnitMapType);
+        return -1;
+    }
+    return 0;
+}
+
+static PyModuleDef_Slot module_slots[] = {
+    {Py_mod_exec, (void*)module_exec},
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_unit_map",
     "Run-folding unit mapper (duck units -> real flags).",
-    -1,
+    0,
     module_methods,
-    NULL,
+    module_slots,
     NULL,
     NULL,
     NULL,
@@ -2229,21 +2342,7 @@ static struct PyModuleDef moduledef = {
 
 PyMODINIT_FUNC PyInit__unit_map(void)
 {
-    PyObject *m;
-    if (PyType_Ready(&UnitMapType) < 0) {
-        return NULL;
-    }
-    m = PyModule_Create(&moduledef);
-    if (m == NULL) {
-        return NULL;
-    }
-    Py_INCREF(&UnitMapType);
-    if (PyModule_AddObject(m, "UnitMap", (PyObject *)&UnitMapType) < 0) {
-        Py_DECREF(&UnitMapType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    return m;
+    return PyModuleDef_Init(&moduledef);
 }
 
 #ifdef _MSC_VER

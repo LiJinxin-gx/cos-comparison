@@ -28,7 +28,7 @@ mean_local(data, *, local_size=None, step=None, weight=None,
 | `step` | `(1,1,...)` | Sliding step |
 | `weight` | `None` | Custom kernel replacing uniform ones (should match `local_size`) |
 | `output` / `output_start` / `output_step` | `None` / 0 / 1 | Pre-allocated output and placement |
-| `**kwarg` | — | Forwarded to `cos_comparison_active` (e.g. `start`, `end`, callbacks) |
+| `**kwarg` | — | Forwarded to `cos_comparison_active` (e.g. `start`, `end`, callbacks, `transform1`/`transform2`, `iterate`) |
 
 **Output size:** `((data_size - local_size) // step) + 1`. Raises `ValueError("effectless args.")` if window doesn't fit.
 

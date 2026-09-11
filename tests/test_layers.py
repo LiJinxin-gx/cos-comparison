@@ -1001,8 +1001,7 @@ class TestNoDoneSource(unittest.TestCase):
         from cos_comparison import core
         initial = core.get_mode()
         try:
-            for b in ("cos_comparison_pydll", "cos_comparison_c",
-                      "cos_comparison"):
+            for b in ("c", "py"):
                 core.set_mode(b)
                 self.assertIsNone(core.no_done(a=3, b=2))
                 self.assertIsNone(core.no_done(1, 2))

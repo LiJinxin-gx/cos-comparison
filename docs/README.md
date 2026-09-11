@@ -83,7 +83,7 @@ Exploration Tests (see what the project can do across domains)
 | Tensor creation | `vector_map_as_tensor(vector=..., shape=...)` | [Core](api/core.md) |
 | Shape inference | `infer_shape(data)` | [Core](api/core.md) |
 | Bulk data loading | `load_data(src, dst, ...)` | [Core](api/core.md) |
-| Backend switching | `set_mode(['cos_comparison_c', 'cos_comparison'])` | [Backend System](architecture/backend-system.md) |
+| Backend switching | `set_mode(['c', 'py'])` | [Backend System](architecture/backend-system.md) |
 
 ### Common Patterns
 
@@ -99,7 +99,7 @@ cos_comparison_active(image, kernel=template, step=(1, 1), output=output)
 
 # 3. Switch to fastest available backend
 from cos_comparison.core import set_mode
-set_mode(['cos_comparison_pydll', 'cos_comparison_c', 'cos_comparison'])
+set_mode(['c', 'py'])
 
 # 4. Threshold filter: find positions where value > 0.5
 from cos_comparison.core import data_filter
@@ -112,16 +112,20 @@ t = vector_map_as_tensor(vector=flat_data, shape=(3, 4), strides=(4, 1))
 
 ### Backend Selection
 
-| Backend | Import Name | Speed | Requires |
-|---------|-------------|-------|----------|
-| C Extension | `cos_comparison_pydll` | ~130× | C compiler at install time |
-| ctypes C | `cos_comparison_c` | ~70× | Pre-compiled DLL / SO |
-| Pure Python | `cos_comparison` | 1× | Nothing (always available) |
+| Backend | Call name | Import module | Speed | Requires |
+|---------|-----------|---------------|-------|----------|
+| C Extension | `c` | `cos_comparison_pydll` | 28–150× | C compiler at install time |
+| Pure Python | `py` | `cos_comparison` | 1× | Nothing (always available) |
+
+> Speed range from the v0.5.0 benchmark (see
+> [Backend Management](architecture/backend-system.md#benchmark-v050)):
+> window aggregation is ~28× the reference; callback-bound element-wise
+> paths narrow to ~2×.
 
 ```python
 from cos_comparison import core
 print(core.get_mode())  # shows currently active backends
-core.set_mode(['cos_comparison_c', 'cos_comparison'])  # prefer ctypes, fallback to pure
+core.set_mode(['c', 'py'])  # prefer the C extension, fall back to pure Python
 ```
 
 ---
@@ -129,7 +133,7 @@ core.set_mode(['cos_comparison_c', 'cos_comparison'])  # prefer ctypes, fallback
 ## 📌 Conventions
 
 - **Code blocks** are tested patterns, not pseudocode.
-- **Backend parity**: all three backends (C extension / ctypes / pure Python) expose the same API and produce bit-identical results unless a known divergence is documented.
+- **Backend parity**: both backends (C extension / pure Python) expose the same API and produce bit-identical results unless a known divergence is documented.
 - **Versioning**: non-core layers are under active development; the core module follows semantic versioning.
 - **Zero dependencies**: the core package requires no third-party libraries at runtime.
 - **Dimension aliases**: `cos_comparison_passive_1d` / `_2d` / `_3d` / `_4d` are aliases for the dimension-generic `cos_comparison_passive` — use whichever reads clearer.

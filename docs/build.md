@@ -1,13 +1,13 @@
 # Building cos-comparison
 
-Build instructions for the three backends, dual-compiler strict-mode
+Build instructions for the C extension backend, dual-compiler strict-mode
 checking, and the free-threaded (cp314t) build.
 
 ## Contents
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
-- [Build the C Backends](#build-the-c-backends)
+- [Build the C Backend](#build-the-c-backend)
 - [Install](#install)
 - [Dual-Compiler Strict-Mode Checking](#dual-compiler-strict-mode-checking)
 - [Free-Threaded (cp314t) Build](#free-threaded-cp314t-build)
@@ -19,16 +19,16 @@ checking, and the free-threaded (cp314t) build.
 
 ## Overview
 
-The core ships three interchangeable backends (auto-fallback in priority
+The core ships two interchangeable backends (auto-fallback in priority
 order):
 
 | Backend | Implementation | Notes |
 |---------|----------------|-------|
-| **pydll** | C extension (`cos_comparison_pydll`, built by `setup.py`) | Fastest; declares `Py_MOD_GIL_NOT_USED` (free-threaded compatible) |
-| **ctypes** | Pure C shared library (`core.dll` / `core.so` / `core.dylib`) | C99, no Python C API; loadable by any interpreter |
+| **C extension** | `cos_comparison_pydll`, built by `setup.py` | Fastest; declares `Py_MOD_GIL_NOT_USED` (free-threaded compatible) |
 | **pure Python** | `cos_comparison/core/cos_comparison.py` | Zero dependencies; always the final fallback |
 
-`setup.py` compiles the pydll extension and the ctypes shared library.
+`setup.py` compiles the C extension (and the `math_tool` C extensions:
+`_topology` / `_fourier` / `_linear_algebra` / `_unit_map`).
 If compilation fails, the package gracefully falls back to pure Python.
 
 ---
@@ -46,20 +46,19 @@ If compilation fails, the package gracefully falls back to pure Python.
 
 ---
 
-## Build the C Backends
+## Build the C Backend
 
-In-place build (writes the extension and the shared library into the
-source tree, e.g. for development):
+In-place build (writes the extension into the source tree, e.g. for
+development):
 
 ```bash
 python setup.py build_ext -f --inplace
 ```
 
-Expected artifacts:
+Expected artifact:
 
 ```
-cos_comparison/core/cos_comparison_pydll.cp3XX-*.pyd   # pydll backend
-cos_comparison/core/cos_comparison_c/core.dll           # ctypes backend
+cos_comparison/core/cos_comparison_pydll.cp3XX-*.pyd   # C extension backend
 ```
 
 ---
@@ -91,67 +90,62 @@ print(cc.get_available_backends())
 
 ## Dual-Compiler Strict-Mode Checking
 
-The C sources are checked with both MSVC (via `setup.py build_ext`) and
-a strict-mode GCC (e.g. the MinGW-w64 toolchain from RedPanda C++).
-The GCC checks below use `-std=c99 -Wall -Wextra -pedantic`.
+The C sources are checked with three compilers: MSVC (`/Wall /WX`), a
+strict-mode MinGW-w64 GCC (e.g. the toolchain from RedPanda C++) and a
+strict-mode Linux GCC (e.g. WSL Ubuntu).  The GCC checks below use
+`-std=c99 -Wall -Wextra -Wpedantic -Werror`.
 
-### pydll extension (syntax check; needs the CPython headers)
+### C extensions (syntax check; needs the CPython headers)
 
 ```bash
-gcc -std=c99 -Wall -Wextra -pedantic \
+gcc -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Wno-unused-parameter -Wno-cast-function-type \
+    -Wno-missing-field-initializers -Wno-error=pedantic \
     -fsyntax-only \
     -I <python-include-dir> \
     -I cos_comparison/core/include \
     cos_comparison/core/include/cos_comparison_pydll.c
-```
-
-### ctypes shared library (full compile)
-
-```bash
-gcc -std=c99 -Wall -Wextra -pedantic \
-    -Wno-unused-parameter -Wno-cast-function-type \
-    -shared -O2 \
-    -I cos_comparison/core/cos_comparison_c/include \
-    cos_comparison/core/cos_comparison_c/include/core.c \
-    -o core_check.dll
+# math_tool extensions: same flags with
+#   -I cos_comparison/interface/tools/math_tool/include
 ```
 
 Notes:
 
 - `-Wno-unused-parameter` / `-Wno-cast-function-type` suppress CPython
   extension idioms (getter signatures, `(PyCFunction)` method-table
-  casts); with them, strict mode reports zero warnings.
-- The `PyModuleDef_Slot` function-pointer cast is a CPython API
-  requirement and cannot be removed.
-- The MSVC build is the primary one on Windows; both compilers must pass.
+  casts).
+- Two CPython API patterns are inherently non-ISO and are downgraded:
+  the `PyModuleDef_Slot` function-pointer cast (`(void*)module_exec`,
+  a PEP 573 requirement — `-Wno-error=pedantic`) and partial
+  `PyTypeObject` initializers (`-Wno-missing-field-initializers`).
+  Every other warning is an error.
+- The MSVC build is the primary one on Windows; all three compilers
+  must pass.
 
 ---
 
 ## Free-Threaded (cp314t) Build
 
-The free-threaded interpreter (no GIL, e.g. Python 3.14t) requires the
-extension to carry the `t` ABI tag (`cp314t`). Build with the
-free-threaded interpreter itself — its `Python.h` defines
-`Py_GIL_DISABLED` automatically:
+All C extensions (the core backend and the math_tool extensions) declare
+`Py_MOD_GIL_NOT_USED` under `#if PY_VERSION_HEX >= 0x030D0000`: they run
+without the GIL on free-threaded builds, while older interpreters
+(< 3.13) simply skip the slot (reliable fallback).  Only the build tag
+changes:
 
 ```bash
 <python3.14t> -m pip install setuptools        # if missing
 <python3.14t> setup.py build_ext -f --inplace
 ```
 
-Expected artifact:
+Expected artifacts:
 
 ```
 cos_comparison/core/cos_comparison_pydll.cp314t-*.pyd
+cos_comparison/interface/tools/math_tool/*.cp314t-*.pyd
 ```
 
-The pydll backend declares `Py_MOD_GIL_NOT_USED`, so the code is
-free-threaded compatible; only the build tag changes. The ctypes shared
-library has no ABI tag (pure C) and is loadable by any interpreter.
-
-> A regular (`cp314`) pydll cannot be loaded by the free-threaded
-> interpreter; the core then falls back to ctypes / pure Python.
+> A regular (`cp314`) extension cannot be loaded by the free-threaded
+> interpreter; the package then falls back to pure Python.
 
 ---
 
@@ -164,8 +158,8 @@ runtime:
 
 ```python
 import cos_comparison
-print(cos_comparison.__version__)      # e.g. 0.4.4
-print(cos_comparison.version_tuple)    # (0, 4, 4)
+print(cos_comparison.__version__)      # e.g. 0.5.0
+print(cos_comparison.version_tuple)    # (0, 5, 0)
 ```
 
 ---
@@ -205,8 +199,8 @@ Notes:
 | Symptom | Cause / Fix |
 |---------|-------------|
 | `ImportError: no backend available` | Installation failed; `python -m pip install .` again, or rely on pure Python |
-| `get_mode()` shows only `.cos_comparison` | Compilation failed and the package fell back; check the compiler output |
-| Free-threaded interpreter cannot load pydll | The regular (`cp314`) tag is not loadable; build the cp314t variant |
+| `get_mode()` shows only the pure Python fallback | Compilation failed and the package fell back; check the compiler output |
+| Free-threaded interpreter cannot load the C extension | The regular (`cp314`) tag is not loadable; build the cp314t variant |
 | `test_imports` fails with "run with the venv_test interpreter and `-E`, away from the source tree" | Run it from a neutral directory against the installed package |
 | Subprocess tests behave like an old build | Reinstall with `--force-reinstall --no-deps .` |
 

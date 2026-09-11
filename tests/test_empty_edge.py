@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Degenerate / empty / edge inputs across all three backends.
+"""Degenerate / empty / edge inputs across all backends.
 
 Each case runs in a fresh subprocess (a segfault cannot kill the suite)
 with a sanitised environment and a neutral cwd (see testutil.py).
 
 Invariants per case:
   * no backend crashes (exit code never negative / killed);
-  * the outcome class (OK vs RAISED) is identical on all three backends.
+  * the outcome class (OK vs RAISED) is identical on all backends.
 """
 
 import unittest
@@ -15,8 +15,7 @@ import testutil
 
 BACKEND_IMPORTS = [
     ("py", "from cos_comparison.core import cos_comparison as m"),
-    ("pydll", "from cos_comparison.core import cos_comparison_pydll as m"),
-    ("ctypes", "import cos_comparison.core.cos_comparison_c as m"),
+    ("c", "import cos_comparison.core.cos_comparison_pydll as m"),
 ]
 
 CASES = [

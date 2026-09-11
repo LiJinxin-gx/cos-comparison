@@ -344,7 +344,7 @@ class EventBinds(dict):
     class methods injected into the slots (no separate engine instance)."""
 
     def __bool__(self):
-        return True  # never dropped by legacy truthiness substitution
+        return True  # always truthy: never dropped by truthiness substitution
 
     def __init__(self, *args, strict=False, **kwargs):
         super().__init__(*args, **kwargs)

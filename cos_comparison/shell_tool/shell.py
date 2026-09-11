@@ -4,11 +4,10 @@ Run via: python -m <package> shell func arg1 -kw value
 
 Syntax (no outer parentheses): func arg1 arg2 -kw value; quoted strings
 kept verbatim.  Values use the unified literal grammar (see value.py):
-Python-style containers ((1, 2), [1, 2], {1: "a"}), infix expressions
-(data[0]+1), nested calls ((func arg1 arg2)) and built-in operator
-symbols (+ - * / ...) as function names.  The shared mapping injected
-by __main__ as __ns__ is used as plugin, otherwise a fresh one is
-created.  Namespace operations: import_module, let, get, delete.
+Python-style containers, infix expressions, nested calls and built-in
+operator symbols as function names.  The shared mapping injected by
+__main__ as __ns__ is used as plugin, otherwise a fresh one is created.
+Namespace operations: import_module, let, get, delete.
 """
 import importlib
 import os
@@ -256,7 +255,7 @@ def _parse_group(tok):
             buf = ""
         elif ch in ")]":
             if buf.strip():
-                stack[-1][1].append(_atom(buf))
+                stack[-1][1].append(_atom_leaf(buf))
                 buf = ""
             kind, items = stack.pop()
             value = tuple(items) if kind == "(" else list(items)
@@ -266,7 +265,7 @@ def _parse_group(tok):
                 return value
         elif ch in ", \t\n":
             if buf.strip():
-                stack[-1][1].append(_atom(buf))
+                stack[-1][1].append(_atom_leaf(buf))
                 buf = ""
         else:
             buf += ch
@@ -282,11 +281,11 @@ def _var_deref(index):
     raise ValueError("no variable at index " + str(index))
 
 
-def _atom(tok):
-    """Convert a literal token to a Python value: quoted strings, numbers,
-    True/False/None, tuples/lists, and nesting (iterative).  Pointer forms:
-    &name is the index of variable ``name``; *expr dereferences it (a
-    number, an index-carrying variable, or another & form)."""
+def _atom_leaf(tok):
+    """Convert a non-group literal token to a Python value: quoted
+    strings, numbers, True/False/None, and the pointer forms (&name /
+    *expr).  The group parser calls this for its leaf tokens (so the
+    group parser never calls back into the group parser)."""
     if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
         return tok[1:-1]
     if tok == "True":
@@ -314,11 +313,6 @@ def _atom(tok):
             except KeyError:
                 raise ValueError("unknown variable: " + name)
         raise ValueError("invalid dereference: " + tok)
-    if tok.startswith(("(", "[")):
-        if not ((tok.startswith("(") and tok.endswith(")")) or
-                (tok.startswith("[") and tok.endswith("]"))):
-            raise ValueError("unbalanced literal: " + tok)
-        return _parse_group(tok)
     try:
         return int(tok)
     except ValueError:
@@ -326,6 +320,17 @@ def _atom(tok):
             return float(tok)
         except ValueError:
             return tok
+
+
+def _atom(tok):
+    """Convert a literal token to a Python value: quoted strings, numbers,
+    True/False/None, tuples/lists, and nesting (iterative)."""
+    if tok.startswith(("(", "[")):
+        if not ((tok.startswith("(") and tok.endswith(")")) or
+                (tok.startswith("[") and tok.endswith("]"))):
+            raise ValueError("unbalanced literal: " + tok)
+        return _parse_group(tok)
+    return _atom_leaf(tok)
 
 
 def _split_words(text):
@@ -826,72 +831,155 @@ def _cond_closure(cond, data):
     return run
 
 
-def _run_instruction(item, data, stats, print_result):
-    """Run one uniform instruction item (plain or control-flow).  Branch
-    items are wrapped into runners at run time - no recursion."""
-    fn, args, kwargs, pos = item
-    if fn in (IF, WHILE):
-        cond = args[0]
-        if isinstance(cond, tuple) and len(cond) == 3 \
-                or isinstance(cond, ValueCode):
-            cond = _cond_closure(cond, data)
-        if fn is IF:
-            _cond, true_items, false_items = args
-            true_runner = _items_runner(
-                true_items, data, stats, print_result)
-            false_runner = (_items_runner(
-                false_items, data, stats, print_result)
-                if false_items else None)
-            args = (cond, true_runner, false_runner)
-        else:
-            _cond, body_items = args
-            body_runner = _items_runner(
-                body_items, data, stats, print_result)
-            args = (cond, body_runner)
-    args, kwargs = _prepare_call_args(args, kwargs, data)
-    result = fn(*args, **kwargs)
-    if pos is not None:
-        try:
-            data[pos] = result
-        except (TypeError, IndexError, KeyError):
-            pass
-    if print_result is not None:
-        print_result(result)
-    stats["run"] += 1
-    return result
+def _nearest_while(frames):
+    """Depth of the innermost while frame in the execution stack."""
+    for depth in range(len(frames) - 1, -1, -1):
+        if frames[depth][0] == "while":
+            return depth
+    return None
 
 
-def _items_runner(items, data, stats, print_result):
-    """Runner for a control-flow branch: execute its uniform items in
-    sequence (plain calls and nested control-flow calls)."""
-    def run():
-        last = None
-        for item in items:
-            if item is None:
-                continue
-            last = _run_instruction(item, data, stats, print_result)
-        return last
-
-    return run
+def _handle_interrupt(frames, stats, interrupt_window):
+    """KeyboardInterrupt policy: the innermost loop yields (condition
+    restarts, count unchanged); a second consecutive interrupt terminates
+    that loop and unwinds one level.  Returns "retry" or "raise" (the top
+    level may re-raise to terminate)."""
+    depth = _nearest_while(frames)
+    if depth is None:
+        note_interrupt(interrupt_window)
+        stats["interrupt"] = True
+        return "retry"
+    frame = frames[depth]
+    try:
+        note_interrupt()
+    except KeyboardInterrupt:
+        del frames[depth:]
+        return "raise"
+    # first interrupt: yield - restart the condition, drop the body frames
+    frame[3] = None
+    del frames[depth + 1:]
+    return "retry"
 
 
 def execute_instruction_items(items, data=None, print_result=None,
                               interrupt_window=INTERRUPT_WINDOW):
     """Execute a uniform instruction item list (function-style control
-    flow).  DataRef variables resolve against the data region (a plain
-    dict by default).  Returns (data, stats).  A first KeyboardInterrupt
-    is recorded and execution continues; a second consecutive one
-    (within the interrupt window) raises to force termination."""
+    flow) on an explicit frame stack.  DataRef variables resolve against
+    the data region (a plain dict by default).  Returns (data, stats).
+    First KeyboardInterrupt: recorded, execution continues; second
+    consecutive one (within the window): raises to terminate."""
     data = {} if data is None else data
     stats = {"run": 0, "interrupt": False}
-    for item in items:
+
+    def wrap_cond(cond):
+        if isinstance(cond, tuple) and len(cond) == 3 \
+                or isinstance(cond, ValueCode):
+            return _cond_closure(cond, data)
+        return cond
+
+    def finish_pending(parent, result):
+        """Complete a suspended IF/WHILE item with the child result
+        (write the result position, print hook, stats, frame last)."""
+        pending = parent[-1]
+        if pending is None:
+            return
+        parent[-1] = None
+        pos = pending[3]
+        if pos is not None:
+            try:
+                data[pos] = result
+            except (TypeError, IndexError, KeyError):
+                pass
+        if print_result is not None:
+            print_result(result)
+        stats["run"] += 1
+        parent[-2] = result
+
+    def handle(item):
+        """Process one item; returns a frame to push or None.  A plain
+        call updates the current frame's last slot directly."""
         if item is None:
-            continue
+            return None
+        fn, args, kwargs, pos = item
+        frame = frames[-1]
+        if fn is IF:
+            cond = wrap_cond(args[0])
+            _cond, true_items, false_items = args
+            branch = true_items if bool(cond()) else false_items
+            if not branch:
+                if pos is not None:
+                    try:
+                        data[pos] = None
+                    except (TypeError, IndexError, KeyError):
+                        pass
+                if print_result is not None:
+                    print_result(None)
+                stats["run"] += 1
+                frame[-2] = None
+                return None
+            frame[-1] = item
+            return ["items", iter(branch), None, None]
+        if fn is WHILE:
+            cond = wrap_cond(args[0])
+            _cond, body_items = args
+            frame[-1] = item
+            return ["while", cond, body_items, None, 0, None, None]
+        args, kwargs = _prepare_call_args(args, kwargs, data)
+        result = fn(*args, **kwargs)
+        if pos is not None:
+            try:
+                data[pos] = result
+            except (TypeError, IndexError, KeyError):
+                pass
+        if print_result is not None:
+            print_result(result)
+        stats["run"] += 1
+        frame[-2] = result
+        return None
+
+    frames = [["items", iter(items), None, None]]
+    while frames:
         try:
-            _run_instruction(item, data, stats, print_result)
+            frame = frames[-1]
+            if frame[0] == "while":
+                if frame[3] is None:
+                    if not bool(frame[1]()):
+                        frames.pop()
+                        if frames:
+                            finish_pending(frames[-1], frame[4])
+                        continue
+                    frame[3] = iter(frame[2])
+                try:
+                    item = next(frame[3])
+                except StopIteration:
+                    frame[3] = None
+                    frame[4] += 1
+                    if _interrupt_pending():
+                        frames.pop()
+                        if frames:
+                            finish_pending(frames[-1], frame[4])
+                        continue
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
+            else:
+                try:
+                    item = next(frame[1])
+                except StopIteration:
+                    frames.pop()
+                    if frames:
+                        finish_pending(frames[-1], frame[2])
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
         except KeyboardInterrupt:
-            note_interrupt(interrupt_window)
-            stats["interrupt"] = True
+            while True:
+                if _handle_interrupt(frames, stats,
+                                     interrupt_window) != "raise":
+                    break
+            continue
     return data, stats
 
 

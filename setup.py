@@ -1,16 +1,16 @@
-﻿"""
+"""
 setup.py – Build and install cos_comparison with optional C acceleration.
 
 This script compiles:
-1. The Python C extension (pydll) – placed inside cos_comparison/core/
-2. The ctypes shared library (core.dll / .so / .dylib) – placed inside cos_comparison/core/cos_comparison_c/
-3. The math_tool C extensions (_topology / _fourier)
+1. The Python C extension (cos_comparison_pydll) – placed inside cos_comparison/core/
+2. The math_tool C extensions (_topology / _fourier / _linear_algebra / _unit_map)
 
 Robust fallbacks keep the installation working even when compilation or
 version injection fails: every extension is built in isolation (one
-failure skips that extension only), the ctypes backend failure is a
-warning, and a version-file injection failure leaves the package
-installable (the runtime then falls back to a default version).
+failure skips that extension only), and a version-file injection failure
+leaves the package installable (the runtime then falls back to a default
+version).  The ctypes backend was removed in v0.5.0: the compiled
+extension IS the C backend (call name "c" in core/config.json).
 """
 
 import os
@@ -92,7 +92,7 @@ def _make_extension(name, source, include_dir, libs=None):
 ext_modules = []
 
 # ----------------------------------------------------------------------
-#  Python C extension (pydll)
+#  Python C extension (the C backend: cos_comparison_pydll)
 # ----------------------------------------------------------------------
 c_source_abs = os.path.abspath("cos_comparison/core/include/cos_comparison_pydll.c")
 c_source_rel = os.path.relpath(c_source_abs, setup_dir)
@@ -105,10 +105,10 @@ if os.path.isfile(c_source_rel):
         ext_modules.append(ext)
         print("Python C extension (cos_comparison_pydll) configured.")
 else:
-    print("Warning: pydll source not found, skipping.")
+    print("Warning: C backend source not found, skipping.")
 
 # ----------------------------------------------------------------------
-#  math_tool C extensions (_topology / _fourier)
+#  math_tool C extensions (_topology / _fourier / _linear_algebra / _unit_map)
 # ----------------------------------------------------------------------
 math_inc_dir = os.path.relpath(
     os.path.abspath(
@@ -139,7 +139,7 @@ for name, rel_path, libs in math_sources:
         print("Warning: {0} source not found, skipping.".format(rel_path))
 
 # ----------------------------------------------------------------------
-#  Custom build_ext: per-extension failure isolation + ctypes shared library
+#  Custom build_ext: per-extension failure isolation
 # ----------------------------------------------------------------------
 class SafeBuildExt(build_ext):
     def build_extension(self, ext):
@@ -153,73 +153,6 @@ class SafeBuildExt(build_ext):
                   "installable (pure Python fallback). ***")
             self.extensions = [x for x in self.extensions if x is not ext]
 
-    def build_ctypes_backend(self):
-        """Build the ctypes C backend shared library and place it in build/lib."""
-        ctypes_src_dir = os.path.abspath("cos_comparison/core/cos_comparison_c/include")
-        ctypes_out_dir = os.path.abspath("cos_comparison/core/cos_comparison_c")
-        core_src = os.path.join(ctypes_src_dir, "core.c")
-
-        if not os.path.isfile(core_src):
-            print("Info: ctypes backend source not found, skipping.")
-            return
-
-        try:
-            compiler = self.compiler
-            os.makedirs(self.build_temp, exist_ok=True)
-
-            # Compile core.c to object file
-            print("Building ctypes C backend...")
-            objects = compiler.compile(
-                [core_src],
-                output_dir=self.build_temp,
-                include_dirs=[ctypes_src_dir],
-                extra_preargs=compile_args,
-                macros=[],
-            )
-
-            # Determine output library name per platform
-            if is_windows:
-                lib_name = "core"
-                lib_ext = ".dll"
-            elif sys.platform == "darwin":
-                lib_name = "core"
-                lib_ext = ".dylib"
-            else:
-                lib_name = "core"
-                lib_ext = ".so"
-
-            # --- IMPORTANT: output directly to build/lib ---
-            build_lib = self.build_lib
-            target_dir = os.path.join(build_lib, "cos_comparison", "core", "cos_comparison_c")
-            os.makedirs(target_dir, exist_ok=True)
-            output_lib = os.path.join(target_dir, lib_name + lib_ext)
-
-            link_args = []
-            if is_windows:
-                link_args = ['/DLL']
-
-            # Use link_shared_object for precise control over output path
-            compiler.link_shared_object(
-                objects,
-                output_lib,
-                libraries=math_libs,
-                library_dirs=[],
-                runtime_library_dirs=[],
-                extra_preargs=link_args
-            )
-
-            print(f"ctypes backend built successfully: {output_lib}")
-
-            # (Optional) Copy to source directory for in-place development
-            source_lib = os.path.join(ctypes_out_dir, lib_name + lib_ext)
-            if source_lib != output_lib:
-                shutil.copy2(output_lib, source_lib)
-                print(f"Copied to source directory: {source_lib}")
-
-        except Exception as e:  # noqa: BLE001 - ctypes fallback is a warning
-            print(f"\n*** ctypes backend compilation failed: {e} ***")
-            print("*** ctypes acceleration will not be available. ***")
-
     def run(self):
         # Build the Python C extensions; per-extension failures are handled
         # inside build_extension.  A global failure (e.g. no compiler) clears
@@ -231,13 +164,6 @@ class SafeBuildExt(build_ext):
             print("*** The package will be installed without C acceleration "
                   "(pure Python fallback). ***")
             self.extensions = []
-
-        # Build ctypes backend regardless of Python extension status
-        try:
-            self.build_ctypes_backend()
-        except Exception as e:  # noqa: BLE001 - extra safety net
-            print(f"\n*** ctypes backend step failed: {e} ***")
-            print("*** The installation continues without it. ***")
 
 # ----------------------------------------------------------------------
 #  Final setup
@@ -260,4 +186,3 @@ except Exception as e:  # noqa: BLE001 - last-resort fallback: install pure Pyth
         ext_modules=[],
         include_package_data=True,
     )
-

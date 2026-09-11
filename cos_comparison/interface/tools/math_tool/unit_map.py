@@ -1,6 +1,8 @@
 """Unit map: fold variable-length runs of repeated units into fixed-length
 real elements (symbolic data to the tensor domain)."""
 
+import operator
+
 __all__ = ("UnitMap", "map_data", "window_units")
 
 _DEFAULT_START = 0.0
@@ -8,24 +10,57 @@ _DEFAULT_STEP = 1.0
 _SIG_MASK = (1 << 61) - 1
 
 
+def _is_mapping(obj):
+    """Mapping protocol (duck): keys() + item access."""
+    return hasattr(obj, "keys") and hasattr(obj, "__getitem__")
+
+
+def _is_sequence(obj):
+    """Sequence protocol: sized + indexable/iterable; text and mappings
+    excluded (mappings use the mapping protocol)."""
+    if _is_mapping(obj) or isinstance(obj, (str, bytes)):
+        return False
+    try:
+        len(obj)
+    except TypeError:
+        return False
+    return hasattr(obj, "__getitem__") or hasattr(obj, "__iter__")
+
+
+def _is_set(obj):
+    """Set protocol (duck): membership + iteration without item access;
+    text and mappings are excluded."""
+    return not _is_mapping(obj) and not isinstance(obj, (str, bytes)) \
+        and hasattr(obj, "__contains__") and hasattr(obj, "__iter__") \
+        and not hasattr(obj, "__getitem__")
+
+
+def _sequence_label(obj):
+    """Structural label keeping the list/tuple distinction via mutability:
+    1 = mutable (list-like), 2 = immutable (tuple-like)."""
+    return 1 if hasattr(obj, "__setitem__") else 2
+
+
+def _set_label(obj):
+    """1 = mutable set-like, 2 = immutable (frozenset-like)."""
+    return 1 if hasattr(obj, "add") else 2
+
+
 class UnitMap:
     """Run-folding unit mapper (duck typing - any objects as units).
 
     ``add`` accumulates object streams; consecutive-equal runs fold into
-    single real elements (each run -> one element carrying the run's flag;
-    variable-length runs become fixed-length elements).  A content table
-    (object <-> flag) is held by the instance, cumulative across streams,
-    and kept queryable (flag_of / decode - the compatibility surface for
-    future query/recovery).  ``put`` writes folded output with a
-    file-pointer model: output position is remembered per output object,
-    ``buffering`` limits the elements of one call (the rest stays queued
-    for the next put).  Run statistics are internal (counts).
+    single real elements (variable-length runs -> fixed-length elements).
+    A cumulative content table (object <-> flag) stays queryable
+    (``flag_of`` / ``decode``).  ``put`` writes folded output with a
+    file-pointer model: the output position is remembered per output
+    object, ``buffering`` limits the elements of one call (the rest stays
+    queued for the next put).  Run statistics are internal (counts).
 
-    Appending is a recurrence: adding more data after a completed parse
-    only processes the new part (the pending run continues, counts
-    accumulate, new runs queue independently) - nothing is recomputed.
-    Unhashable units are resolved through content-signature buckets with
-    iterative deep equality (no recursion)."""
+    Appending is a recurrence: adding data after a completed parse only
+    processes the new part (the pending run continues, counts accumulate,
+    new runs queue independently).  Unhashable units are resolved through
+    content-signature buckets with iterative deep equality."""
 
     __slots__ = ("_counts", "_flags", "_last_out", "_n", "_out_pos",
                  "_pending", "_plain_sig", "_queued", "start", "step",
@@ -330,15 +365,15 @@ def _fold_root(obj, mask):
     order-insensitive for dicts - pairs sorted by element hashes)."""
 
     def children_of(node):
-        if isinstance(node, (list, tuple)):
+        if _is_sequence(node):
             return list(node)
-        if isinstance(node, dict):
+        if _is_mapping(node):
             flat = []
-            for k in sorted(node, key=hash):
+            for k in sorted(node.keys(), key=hash):
                 flat.append(k)
                 flat.append(node[k])
             return flat
-        if isinstance(node, (set, frozenset)):
+        if _is_set(node):
             return list(node)
         return None
 
@@ -365,24 +400,21 @@ def _fold_root(obj, mask):
             except TypeError:
                 memo[id(node)] = hash(repr(node)) % mask
             continue
-        if isinstance(node, (list, tuple)):
-            acc = 1 if isinstance(node, list) else 2
+        if _is_sequence(node):
+            acc = _sequence_label(node)
             for k in kids:
                 acc = (acc * 1000003 + memo[id(k)]) & mask
             memo[id(node)] = acc
-        elif isinstance(node, dict):
-            acc = 3
-            for k in kids[::2]:  # keys then values folded in order
-                pass
+        elif _is_mapping(node):
             acc = 3
             items = sorted(
-                ((memo[id(k)], memo[id(v)]) for k, v in node.items()),
+                ((memo[id(k)], memo[id(node[k])]) for k in node.keys()),
                 key=lambda p: p[0])
             for kh, vh in items:
                 acc = (acc * 1000003 + kh) & mask
                 acc = (acc * 1000003 + vh) & mask
             memo[id(node)] = acc
-        else:  # set / frozenset (members hashable)
+        else:  # set-like (members hashable)
             acc = 4
             for x in sorted(node, key=hash):
                 acc = (acc * 1000003 + memo[id(x)]) & mask
@@ -391,32 +423,30 @@ def _fold_root(obj, mask):
 
 
 def _deep_eq(a, b):
-    """Iterative deep equality (no recursion): containers compare
-    element-wise (list/tuple in order; dict by keys and recursive
-    values; sets by membership); atomic leaves compare with their own
-    ==."""
+    """Iterative deep equality: containers compare through the sequence /
+    mapping / set protocols (structure labels keep list != tuple and
+    set != frozenset); leaves use their own ==."""
     stack = [(a, b)]
     while stack:
         x, y = stack.pop()
         if x is y:
             continue
-        tx = type(x)
-        if tx is list or tx is tuple:
-            if type(y) is not tx or len(x) != len(y):
+        if _is_sequence(x):
+            if (not _is_sequence(y) or len(x) != len(y)
+                    or _sequence_label(x) != _sequence_label(y)):
                 return False
             for xi, yi in zip(x, y):
                 stack.append((xi, yi))
             continue
-        if tx is dict:
-            if type(y) is not dict or x.keys() != y.keys():
+        if _is_mapping(x):
+            if not _is_mapping(y) or x.keys() != y.keys():
                 return False
             for k in x:
                 stack.append((x[k], y[k]))
             continue
-        if tx is set or tx is frozenset:
-            if type(y) is not tx or len(x) != len(y):
-                return False
-            if x != y:
+        if _is_set(x):
+            if (not _is_set(y) or _set_label(x) != _set_label(y)
+                    or x != y):
                 return False
             continue
         if x != y:
@@ -431,7 +461,7 @@ def _nd_shape(data, limit):
     shape = []
     cur = data
     for _ in range(limit):
-        if not isinstance(cur, (list, tuple)):
+        if not _is_sequence(cur):
             break
         shape.append(len(cur))
         if not cur:
@@ -482,12 +512,12 @@ def window_units(data, local_size=1, step=None, start=None, shape=None,
     if probe_dim is None:
         probe_dim = 1
     nd = _nd_shape(data, probe_dim)
-    if isinstance(local_size, int):
-        local_size = (local_size,) * len(nd)
+    if not _is_sequence(local_size):
+        local_size = (operator.index(local_size),) * len(nd)
     if step is None:
         step = local_size
-    if isinstance(step, int):
-        step = (step,) * len(nd)
+    elif not _is_sequence(step):
+        step = (operator.index(step),) * len(nd)
     if start is None:
         start = (0,) * len(nd)
     if shape is None:

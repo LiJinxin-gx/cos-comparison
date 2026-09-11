@@ -9,14 +9,9 @@ from cos_comparison.core import cos_comparison as _py
 
 BACKENDS = [".cos_comparison"]
 try:
-    import cos_comparison.core.cos_comparison_c  # noqa: F401
-    BACKENDS.append(".cos_comparison_c")
-except Exception:  # pragma: no cover - ctypes unavailable
-    pass
-try:
     import cos_comparison.core.cos_comparison_pydll  # noqa: F401
     BACKENDS.append(".cos_comparison_pydll")
-except Exception:  # pragma: no cover - pydll unavailable
+except Exception:  # pragma: no cover - C extension unavailable
     pass
 
 
@@ -47,12 +42,10 @@ class TestNamespaceControl(unittest.TestCase):
     def test_default_namespace_per_backend(self):
         for b in BACKENDS:
             with self.subTest(backend=b):
-                mod = core.set_mode([b]) or __import__(
-                    "cos_comparison.core" + b, fromlist=["x"])
-                mod = core.get_mode()
+                core.set_mode([b])
                 import importlib
                 m = importlib.import_module(
-                    "cos_comparison.core" + core.get_mode()[0])
+                    "cos_comparison.core" + b)
                 seen = self._run_passive(m)
                 self.assertTrue(seen)
                 self.assertTrue(all(n is not None for n in seen))
@@ -82,7 +75,6 @@ class TestNamespaceControl(unittest.TestCase):
                     [1.0, 2.0], output=[0.0, 0.0],
                     algorithm=_algo([]), namespace_hook=hook)
                 self.assertEqual(len(calls), 1)
-                self.assertIn("linear", calls[0])
                 self.assertIn("output", calls[0])
 
     def test_active_kernel_and_disable(self):

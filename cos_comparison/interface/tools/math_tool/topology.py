@@ -2,6 +2,7 @@
 Tools for solving topology problems.
 """
 
+import operator
 from collections import deque
 
 from ..context_tool import VoidContext as default_lock
@@ -42,13 +43,14 @@ def Euler_characteristic_compute_by_cell(cell_list):
     factor = 1
     Euler_characteristic = 0
     for cell in cell_list:
-        if type(cell) is int:
-            if cell <= 0:
-                raise ValueError("Cell must be a positive integer.")
-            Euler_characteristic += cell * factor
-            factor *= -1
-        else:
+        # integer protocol (__index__); bool stays excluded (ambiguous)
+        if isinstance(cell, bool) or not hasattr(cell, "__index__"):
             raise TypeError("Cell must be a positive integer.")
+        cell = operator.index(cell)
+        if cell <= 0:
+            raise ValueError("Cell must be a positive integer.")
+        Euler_characteristic += cell * factor
+        factor *= -1
     return Euler_characteristic
 
 class Graph:

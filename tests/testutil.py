@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-BACKENDS = (".cos_comparison_pydll", ".cos_comparison_c", ".cos_comparison")
+BACKENDS = (".cos_comparison_pydll", ".cos_comparison")
 
 PREFIX = (
     "import json,sys\n"

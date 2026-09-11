@@ -164,21 +164,28 @@ class ValueCode:
 
 
 def compile_value(text):
-    """Compile one value word into a ValueCode (iterative, no recursion).
-    ``text`` must be a single protocol word (spaces inside quotes are
-    fine)."""
+    """Compile one value word into a ValueCode; ``text`` must be a single
+    protocol word (spaces inside quotes are fine)."""
     if not isinstance(text, str):
         return ValueCode((("push", text),), repr(text))
-    if text.startswith("%%"):
-        inner = compile_value(text[2:])
-        return ValueCode(inner.code, text, "unpack_map")
-    if text.startswith("%") and len(text) > 1:
-        inner = compile_value(text[1:])
-        return ValueCode(inner.code, text, "unpack")
-    kind = _container_kind(text)
-    if kind:
-        return ValueCode(_compile_container(text, kind), text)
-    return ValueCode(_compile_atom(text), text)
+    body = text
+    kind = "plain"
+    while True:
+        if body.startswith("%%"):
+            if kind == "plain":
+                kind = "unpack_map"
+            body = body[2:]
+            continue
+        if body.startswith("%") and len(body) > 1:
+            if kind == "plain":
+                kind = "unpack"
+            body = body[1:]
+            continue
+        break
+    container = _container_kind(body)
+    if container:
+        return ValueCode(_compile_container(body, container), text, kind)
+    return ValueCode(_compile_atom(body), text, kind)
 
 
 # ------------------------------ character scanner -----------------------------
