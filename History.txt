@@ -1,0 +1,375 @@
+cos-comparison Project History
+=============================
+v0.5.1 (2026-09-27, in development)
+----------------------------------
+Brain-layer symbolic logic: mathematical-hardening round (brain_layer.logic.symbol_logic), fixing the gaps found by the math-rigor re-audit:
+- **Rule availability is part of the derivation now**: rules whose status does not carry Logic.TRUE are excluded from the judge (attribute-style `status`, or a mapping 'status' key; rule objects without status always participate) - the `__bool__` interface ("carries TRUE") and the engine behaviour agree again (previously every rule participated regardless of status)
+- **Event-domain argument validation**: Atomic_proposition rejects arg_names whose length does not match the argument count and duplicate names (both were silently accepted; dict(prop) could silently drop values); arg_names is normalized to a tuple
+- **Reflexivity for NaN-valued Variables**: Variable equality identity-short-circuits (v == v is True even for NaN values); distinct NaN objects stay unequal (documented)
+- **Path-contract errors surfaced**: with return_path=True, a path_func path containing a segment without a supporting rule raises LogicError (the proving list was silently truncated before); LogicError is now an actually-used exception
+- **Explicit logic predicates**: is_true / is_sure / is_uncertain exported (the four-state flag table is documented in the module header); SURE keeps its original meaning - determined (alone: determined not-true) - corrected from the earlier misdocumentation of SURE as "uncertain" (the wrongly-named Logic_uncertain alias was removed)
+- **Formalized module positioning** (docstring): rule-chain reasoning over an implication fragment (reflexive-transitive closure, BFS judge, return_path proving rules); the verdict is determined within the rule library - underivable pairs resolve to Logic.SURE (determined not-true), matching the probabilistic sibling (0.0); event-identity guidance (keep event kinds type-consistent, reuse one object per Atomic_proposition); slot metadata roles restated
+- **Kept by design** (documented, not changed): Variable value-semantics equality, the flag boolean projections (bool(Logic.SURE) is True since members are non-zero - use the is_true / is_sure / is_uncertain predicates), hashing of unhashable values via repr (reliable for built-in containers; custom objects should provide stable reprs), caller-managed context slots
+- **Judge semantics migrated to full-statement correctness**: the default judge decides the correctness of a complete statement - the unpacked sequence (a, b[, limit[, is_true]]) matching the Logic_bind slots; (a, b) alone keeps the plain derivation query and a/b/limit/is_true may arrive as kwargs.  The statement is CORRECT when its claim agrees with the available rules (rules without Logic.TRUE status excluded): a truth claim (is_true carries Logic.TRUE) must be derivable (reflexive-transitive closure, BFS) within limit; a falsehood claim must not be.  Correct -> sure_true, otherwise Logic.SURE (determined not-true within the library); return_path returns the proving rule list for a correct truth claim ([] when a == b) and None otherwise; limit now bounds both endpoints (No_limit contains everything), activating the previously dead limit/No_limit slot.  Fully backwards compatible: (a, b) queries, kwargs a/b and return_path behave exactly as before
+- **Tests**: 14 new cases (tests/test_brain_logic_protocol.py) - status gating (attribute + mapping + regression guard), NaN reflexivity, arg-name validation, path-contract LogicError with a real-path guard, predicates, plus statement semantics (unpack, truth/falsehood claims, limit bounds, kwargs, return_path forms); full suite 836 OK (822 prior + 14 new), 31/31 test files standalone
+
+Brain-layer logic hardening (brain_layer.logic: probability_logic / symbol_logic), through a full audit -> fix -> protocol-enhancement -> regression cycle:
+- **Strict-chain event domain**: chain conditions expand container events only (frozenset/tuple - IntersectionEvent/UnionEvent); scalar events (strings, Variables, GlobalEvent) stay whole atoms - multi-character events now resolve (was a silent 0.0) and non-iterable conditions (global_event / Variable) no longer crash; `_condition_members` is the single expansion point (documented in the module header)
+- **Duck-typed bind containers**: the engines consume any Mapping/duck container - items() views, (key, p) pairs, (outcome, condition, p) triple lists and `event_bind` (which gains Mapping-style reads and an engine items() view); `default_add_bind` appends or item-assigns; lookup is O(1) for dicts and scans other containers; graph factories are injectable on both engines (EventBinds / EventContextProtocol) instead of hard-coded
+- **Event equality protocol**: kind-based equality (subclasses and same-kind proxies compare by members; plain frozensets / foreign kinds stay separate and symmetric); copy/pickle support via `__reduce__`; GlobalEvent instances compare equal, so a fresh instance matches bindings stored under global_event
+- **Rigorous judge enhancements**: mapping-style rule objects ({'reason', 'result'}) accepted next to attribute-style Logic_bind; malformed rules raise a clear TypeError; `path_func` injectable (default shortest_path_between); underivable pairs return Logic.SURE (determined not-true within the rule library)
+- **Value domain & entry points**: int unit seed in chain products - Decimal / Fraction probability chains work (were TypeError); `chain_probability` gains `strict=` and `path_func=`; `union_probability` / `chain_intersection` / `consistency_diagnostic` accept `strict=`; the probability slots accept `path_func=`
+- **Protocol corrections**: Variable subclass equality + unhashable-value hash fallback (repr); `Atomic_proposition.keys()` raises UnsupportedError without arg_names; `Logic_bind` item access raises KeyError and supports membership; logic-context slots use `is not None` (falsy callables are kept); `event_bind.unbind` catches KeyError only; `EventBinds` keeps strict / graph factory / stats through `copy()` and invalidates its cached graph on direct writes; `EventBinds.resolve` works as `binds.resolve(A, B)`, class-style or via the context; comment and structure simplification in both modules
+- **Exports**: `global_event`, `sure_true`, `Logic_true`, `Logic_sure` are now package-level (`from cos_comparison.brain_layer.logic import ...`)
+- **Tests**: `tests/test_brain_logic_protocol.py` added (39 protocol/robustness cases: duck containers and graphs, event/value domains, serialization, injection points); full suite 822 OK (783 prior + 39 new), 31/31 test files verified standalone
+- **math_tool rigor audit & C hardening** (interface.tools.math_tool): the C topology graph types were rewritten around reference-safe walks - the intermittent access violations are fixed (root causes: union-find path compression dropped its borrowed parent chain, and dg_non_isolated_weakly_connected NULL-dereferenced its saved root after the first comparison; both now use owned references and a snapshot chain), every PyLong temporary leak pattern removed (set_long helper), half-registered vertices roll back, the dg_add_edge adjacency-dict reference leak fixed, and the stub-bound methods implemented (`strong_components_count` / `is_dag` returned the wrong objects before); C `_fourier.idft` now accepts complex inputs like the Python reference (scale gained a complex leaf path).  Verified: 50 heavy build/SCC/toposort rounds and a 1000x eulerian sweep on the former crash scenarios, 21-case topology py/C parity (recorded-edge topological validity, random cyclic SCC partitions, undirected metrics), 8-case Fourier parity (complex idft, dft-idft round trips, kernels), 19-case linear-algebra / unit-map parity plus stress and boundary statuses, tracked-object growth 0 after repeated build/drop cycles, MSVC /Wall /WX clean; C keeps its parity advantage in the re-measured benchmarks (2k/10k build 7.5 ms vs 12.8 ms pure Python; SCC 1.0 ms vs 2.2 ms)
+- **C99 portability & critical-parameter audit (tri-compiler)**: all five C translation units audited under MSVC /Wall /WX, RedPanda GCC 11.5 and WSL GCC 15.2 (-std=c99 -pedantic-errors plus an extended census: -Wconversion -Wsign-conversion -Wshadow -Wvla -Wundef -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes -Wformat=2); fixed 32-bit box truncation in coordinate packing (PyLong_FromLong -> PyLong_FromLongLong, 6 sites), 32-bit variable truncation (2), ~100 signed/unsigned `x * sizeof` and mixed-arithmetic sites, and 3 missing PyInit prototypes - only the two inherent CPython cast-qual casts remain (Py_buffer.format / PyModule_AddObject, documented).  Critical-parameter parity suite (30 cases, py vs C) fixed a GIL-safety defect cluster: the four core Data* functions run inside Py_BEGIN_ALLOW_THREADS yet called the CPython error API on their guard paths (step/window/local_size rejection, OOM, overflow), crashing the process instead of raising - window_size=0 / step=0 was a hard segfault; errors now come from entry-point validators (require_positive_dims / require_positive_shape / require_nonnegative_dims, pure C) with identical ValueError text on both backends.  Also unified: negative start rejected on both backends (was divergent results), empty idft returns empty (was ZeroDivisionError in Python), unit-map add returns 0 (C returned None), negative put buffering writes 0 (C wrote everything).  30/30 critical cases pass py/C parity; full suite 836 OK
+- **Performance & resource audit** (single reference machine - Intel Core Ultra 5 125H + Intel Arc Graphics, Windows 11, CPython 3.14.6; in-house harness kept outside the package, full methodology and data in docs/performance.md): full-module measurements - core (pure Python vs C extension): passive 2D/1D/3D (2D 64^2-2048^2, algos cos/mod/cosmod), active, local statistics, element-wise family (incl. elementwise_position), whole-tensor similarity, element access, data movement/creation utilities, injected `iterate=` engine delegation and threaded concurrency; math_tool (Python reference vs C extension): linear algebra, topology (graph builds/SCC/toposort/reachable/shortest paths/eulerian/Euler cells), unit map (fold/count_vector/window_units/map_data), Fourier (dft/idft/power_spectrum/kernels); brain-layer logic engines (EventBinds + EventContextProtocol), strict/Markov chains, union probability, judge; memory (MapMemory/TableMemory/MemoryWrap) and value grammar layers; OpenCL end-to-end hardware comparisons (passive 3x3: 0.51 ms at 512^2 and 6.96 ms at 2048^2 - 52-60x the C extension, up to ~7500x the pure Python reference, 15-41x a single-thread numpy baseline; memory-bound map/saxpy ~2x end-to-end due to transfers); cold-import times (no overhead over the interpreter baseline for the package import; +21 ms core C backend; +117 ms the four math_tool extensions), module load memory (top-level +0.03 MB RSS; core backend +1.2 MB; math_tool extensions +10 MB), data-structure footprints (nested 2048^2 Python grid ~175 MB vs an 8 MB float32 buffer), runtime peak RSS (passive 2048^2 +67 MB; EventBinds 500k bindings +337 MB; judge over 10k rules +11 MB), pure-Python vs native allocation split (a passive 512^2 run allocates ~259k Python blocks for the nested output while the C backend allocates on the native side), memory-layer carriers (MapMemory/TableMemory/IOStreamMemory incl. a 310 KB on-disk stream/DatabaseMemory), disk footprint (package total 2.07 MB) and compiled artifact sizes (core 316 KB; math_tool 20-38 KB each); two C defects surfaced and reported for follow-up - an intermittent access violation in the C topology graph types (undirected `Graph` builds and directed eulerian sweeps crash reproducibly in isolated processes while other operations pass; Python reference stable at all sizes; isolated-process C numbers captured where stable) and `_fourier.idft` rejecting complex inputs that the Python reference accepts
+
+v0.5.0 (2026-09-10, in development)
+----------------------------------
+Core backend architecture rework (toward super-parallel and scalable operations):
+- **ctypes backend removed**: the ctypes wrapper (core/cos_comparison_c/__init__.py), its standalone shared library (core.c / core.dll / core.so) and the ".cos_comparison_c" module are retired; the compiled C extension cos_comparison_pydll (core/cos_comparison_pydll.<tag>.pyd, built from core/include/cos_comparison_pydll.c) IS the C backend
+- **Backend loading rework**: core/config.json is an ORDERED LIST - the list order is the import priority (the C extension first by default); every entry maps a call name to its import module ({"name", "module"}), and several entries may point at the same module (the compatibility mechanism: "c", ".cos_comparison_pydll" and the retired ctypes-era call name ".cos_comparison_c" all load ".cos_comparison_pydll"; "py" and ".cos_comparison" load ".cos_comparison"); imports try the list in order (each module once) and set_mode looks the name up directly (dot prefix optional); the pure Python module stays the mandatory final fallback
+- **Build system**: setup.py builds `cos_comparison.core.cos_comparison_c` from the renamed source; the ctypes shared-library build stage is removed; package-data drops the ctypes dll/so entries
+- **Optional iterate path** (core element-wise A-class functions): `data_mapping` / `data_filter` / `elementwise` / `position_map` / `elementwise_position` (and the threshold_* combinations) accept an optional `iterate=` keyword - a custom iterator `iterate(kernel, **index_info)` resolves the position parameters (data_shape/start/shape/step) and hands the index (positional) plus the remaining keyword parameters to `kernel(index, **params)`; the element principles live in module-level private kernels (`_data_mapping_kernel` etc., not exported); with iterate=None (default) the original inline skeleton runs unchanged (no default iterator function, zero serial regression); the C extension honours the same contract through a dynamically wrapped C kernel (`PyCFunction_New`, PyObject* in/out, mode-selected, not registered in the method table); `_region_spec_by_shape` is available to custom iterators for position-parameter resolution
+- **B-class iterate path & interface cleanup** (core passive/active): the historical w1/w2/b1/b2 parameters and the iter_a_callback/iter_b_callback hooks are retired (legacy kwargs are still accepted silently - the pure Python side absorbs them through **kwargs, the C kwlist keeps parsing them); the linear transform is replaced by the extensible per-value maps `transform1(value) -> new_value` / `transform2(value) -> new_value` (applied to the first/second comparison window; None = identity, bit-identical default; not limited to the linear form, any callable works - nonlinear maps, thresholds, lookups); the name (func_name_space) no longer carries a linear field; an optional `iterate=` slot is added to cos_comparison_passive/active (mean_local/local_variance inherit it through their wrappers): the outer num (output-grid) space is resolved as before and the element work moves into the module-level private kernels `_passive_kernel`/`_active_kernel` (window_start/window_step/window_kernel parameter naming - the kernel parameter names stay clear of the iterate contract's reserved names); start/end/return callbacks fire once outside the iterator, local/global error callbacks inside the kernel; with iterate=None (default) the original inline double-odometer skeleton runs unchanged (zero serial regression; measured within +-3.5% when iterating, since the window aggregation dominates the kernel-call overhead).  The C extension accepts the same `iterate`/`transform1`/`transform2` keywords and delegates those paths to the pure Python reference implementation (package name derived from the module name, never hard-coded; the C core keeps its plain fast path otherwise)
+- **Operator tools** (interface.tools.op_tool): built-in operations in functional form (Python-style literals, infix expressions with the built-in operators, nested functional calls, symbol operators as function names) across the shell / batch / app instruction protocols (shell_tool.value - the unified iterative value compiler/executor, stdlib-only, zero recursion)
+- **Free-threaded support for all C extensions**: the core backend and the four math_tool extensions (_fourier / _linear_algebra / _topology / _unit_map) declare Py_MOD_GIL_NOT_USED under #if PY_VERSION_HEX >= 0x030D0000 (multi-phase module init where needed); free-threaded builds (cp314t) run without the GIL while older interpreters (< 3.13) simply skip the slot (reliable fallback).  Strict-mode portability verified with three compilers: MSVC /Wall /WX, MinGW-w64 GCC 11.5 (RedPanda C++) and WSL Ubuntu GCC 15.2 (-std=c99 -Wall -Wextra -Wpedantic -Werror; only the inherent CPython patterns - the PEP 573 Py_mod_exec slot cast and partial PyTypeObject initializers - are downgraded, everything else is an error)
+- **math_tool protocol-style refactor** (interface.tools.math_tool): the hard-coded container / numeric types are replaced by duck-typed protocols - fourier (sequence protocol for nested data/axes/shape, integer protocol for shape/axis, float-then-complex protocol for value splitting, sequence-vs-scalar broadcast detection), topology (integer protocol via __index__ for the Euler cell list; bool stays excluded), unit_map (sequence / mapping / set protocols for structure signatures and deep equality, with mutability labels preserving list != tuple and set != frozenset; mapping protocol for mapping units and state restore; integer protocol for window parameters).  The C extensions (_fourier / _topology / _unit_map) mirror the same rules (PySequence_Check + sized + text exclusion, keys()-based mapping protocol, PyNumber_Index, PyNumber_Float with a complex fallback; also a complex-leaf fix in the C power_spectrum).  numpy scalars, custom sequences / mappings / sets and subclasses now work through both implementations (protocol behaviour verified against both)
+- **Recursion removal (shell / app instruction execution)**: a package-wide AST + C brace-matching scan now reports zero real recursion - shell_tool.value.compile_value strips %/%% prefixes iteratively (was self-recursive), the shell literal parser no longer cycles (a dedicated leaf-atom converter), and the shell / app control-flow executors (execute_instruction_items, DockerProtocol branch runners) run nested IF/WHILE on an explicit frame stack instead of recursive closure runners, preserving the original condition re-evaluation, result / result-position writes, loop counts and KeyboardInterrupt policy (innermost loop yields, second consecutive interrupt unwinds one level, top level terminates)
+
+v0.4.5 (2026-09-08)
+-------------------
+Unified instruction protocol, external execution, sensing/generation, memory and extension primitives:
+- **Unified instruction file protocol** (shell / batch / app): function-style instruction control - `data[index]` references (dataN legacy ok), `%` / `%%` sequence / mapping unpacking, `let` assignment (function style), IF / WHILE control-flow blocks, read/write region parameters (start/shape/step, out_start/out_step); pre-imported built-in functions; `import_all_module` (from-import style into the current namespace); interrupt handling (first yields, second consecutive forces termination)
+- **External command execution** (shell_tool `sh` plugin): subprocess.Popen with the system shell; `run(command=..., executable=None, interactive=False)` - interactive passes the terminal through (REPL-style entry), otherwise output is captured; no-argument CLI enters an interactive system command line (prompt = working directory + ` > `)
+- **Sense layer** (TensorReceptor): `threshold_map` (threshold sensing map via data_mapping + (func, value) sequences), `threshold_match` (position iterator via data_filter + threshold_judge); module `elementwise_extract` (get_item read regions -> core.elementwise -> slice-view / set_item write regions; integer status)
+- **Generate layer**: `transform_self` (self-modifying element-wise transform: core.elementwise with output = the tensor itself or a write region)
+- **Linear algebra** (interface.tools.math_tool.linear_algebra): dimension-generic duck-typed dot / norm / normalize / scale / add / multiply / power / clip / flatten / tensor_sum / tensor_mean - tensor out via the `output` keyword, integer status, identical Python / C (C99, output_start/output_step native regions)
+- **Time tools** (interface.api.time_api): timestamp / iso_time / format_time / parse_time / sleep / elapsed; types TimeStamp / Stopwatch / Deadline
+- **Extension layer** (extension_layer.plugin): `PluginPool` - proactive plugin batch aggregation (resources / plugins / func_pool keyed pools, no registration; external plugins unchanged)
+- **Database abstraction** (interface.api.database_api + memory_layer): DatabaseToolWrap module-tool delegation, PEP 249 exception hierarchy and DatabaseCursor / DatabaseConnection wrappers; DatabaseMemory connector-based transcription (delegation functions injected at `__init__`, connector as first argument)
+- **External delegation** (app): `subdocker(docker, flow, data=None, timeout=None)` - child Docker with copied pools, synchronous run, child data_pool returned
+- **Position-aware region walk** (core): `position_map` / `elementwise_position` - walk a real start/shape/step region and report logical coordinates to a per-element callback (origin/scale map real to logical; real positions still drive iteration and set_item writes); callback errors skipped, read/write failures return status 1, elementwise accepts multiple tensors
+- **Logical-coordinate formula** (position callbacks, all three backends): `logical_i = real_i * scale_i - origin_i`; scale=0 is legal (multiplication, no division); integral values normalize to int (type safety - integer parameters yield integer logical coordinates, usable as indices), otherwise float
+- **IO-stream memory** (memory_layer.memory `io_memory`): `IOStreamMemory` - an io stream (`IOFile` / `IOMemory`) as the memory carrier, written through delegating slots with working defaults: the default memory-level slots give MapMemory-compatible key/value storage on the stream (`save(key, value)` queues, commit appends records at the tail, refer recalls via a lazily scanned key -> offset index; re-saving a key overwrites; uncommitted records are invisible; hashable literal values round-trip with their type through the repr/literal_eval record format); the stream-interaction slots transcribe the carrier by default (read/write/seek/tell/flush/readline/open/close/capability) and `encode_func` / `decode_func` are the record-format extension points; mode-adaptive (read-only carriers reject commit, write-only ones reject refer); Mapping protocol (`__getitem__` / keys / len / contains) so MemoryWrap wraps it directly
+- **Docker suspend/resume** (app): cooperative step-boundary suspension - `suspend()` stops the run cleanly at the next top-level step boundary, waits for the execution and returns a `SuspendSnapshot` (shallow pool copies + run cursor + flags + config references); `resume(snapshot)` loads the state back and the next `run`/`start` continues from the recorded cursor (already-done steps are skipped, their side effects kept - each step runs exactly once); both are default interfaces on the manager protocol (delegating - custom managers replace the behaviour)
+- **Super-parallel framework** (interface.api `parallel_api`): `SuperParallel` - a grid-style layered parallel framework (delegating slots, zero third-party dependencies): scale setup decoupled from invocation (`sp[1,2,3]` subscript setup / `sp.grid(dim)` unified coordinate sequences / `sp(*args)` invocation with arguments passed straight to the kernel); `getIdx()` returns the allocation hierarchy (`Layer` allocators - class-level thread-local context, `()` outside an allocation); `DefaultParallel` is the default process-thread two-layer super-concurrency model (1-D setups auto-expand into `min(cpu, n)` processes, 2-D `[P, T]` explicit); external engines (CUDA / Intel GPU) plug in through the same executor protocol; output is not captured (kernels decide).  Verified on the local Intel Arc GPU through pyopencl (element-space coordinates map to OpenCL work items; 4M-element fill in ~3.3 ms - hardware transfer stays a data-layer concern).  Benchmark data (OpenCL saxpy, Intel Arc): pure-compute speedup 6-9x over single-thread numpy at n >= 10^6 (10^7 -> 2.6 ms vs 21.2 ms; 4x10^8 -> 102 ms vs 919 ms); end-to-end (host<->device copies included) stays ahead 1.3-1.9x in the 10^6-10^8 sweet spot, falling behind at 4x10^8 (transfer-bound, ~4.5 GB/s copies vs 19-23 GiB/s device write bandwidth)
+- **Reflex feedback hub** (brain_layer.reflex `feedback`): `Feedback` - Trigger-style paired registrations of (feedback object, feedback function); the hub-receive function (`receive()`, default non-blocking - dispatch on a background thread, returns the handle) triggers the hub, the hub-feedback function (`dispatch()`, default synchronous) hands every feedback function its own paired object (Trigger-style shared carrier; errors isolated on `last_error`); all hub functions are delegating slots with working defaults (`default_receive` / `default_dispatch` / `default_manage` - add/remove/has/len)
+- **Unit mapper** (interface.tools.math_tool `unit_map`): `UnitMap` - run-folding unit mapper bridging discrete symbol data to the tensor domain: any objects as units (duck typing), consecutive-equal runs fold into single real flag elements (variable-length repeated runs become fixed-length elements - directly tensor-mappable); the content table (object <-> flag, first-sight sequential allocation) is instance-held and cumulative across streams, kept queryable (`flag_of` / `decode`) as the compatibility surface for future query/recovery; `add(*seq)` input, `put(output=None, buffering=None)` stateful output (file-pointer continuation per output object, sequence-protocol writes), `get_state`/`set_state`/`clear`, internal run statistics; `window_units` (N-D windows) and `map_data` helpers; identical Python / C behaviour - the C extension `_unit_map` (C99, iterative N-D walk, no recursion, Python-owned bounded memory) is the priority module with the pure-Python reference as fallback; verified under MSVC /W3+ and WSL gcc 15 (C99, -Wall -Wextra -Wpedantic -Werror, zero warnings).  Refined later with an atomic-scale guard: `window_units`/`map_data` take `probe_dim` (dimension-probe limit, default 1 - deeper nesting is unit content, not a data dimension; explicit N-D passes `probe_dim=k`), and the whole implementation is recursion-free (iterative window blocks, iterative post-order content-signature folding, iterative deep equality in the record buckets); appending is a recurrence - adding data after a completed parse only processes the new part (pending run continuation, accumulating counts, no recomputation).  Later extended with count-based frequency statistics: `total()` (dynamic - summed on demand over the per-unit counts, no shared global counter so concurrent adds cannot corrupt it), `count(obj)` / `runs(obj)` (element frequency / run count, live with the open pending run), `most_common(k)` (units by count, descending) and `count_vector()` (per-unit counts in flag order - a plain int vector ready for tensor mapping); identical Python / C behaviour
+- **Comment simplification** across the project; docs: `command-line.md` added, cognitive-layers / architecture references completed
+- **func_namespace enhancement** (core, all three backends): the callback namespace now supports the full mapping protocol (`keys()` / `__getitem__` / `__len__` / `__iter__` - `**ns` unpacking, `dict(ns)`, `len`, iteration; missing keys raise `KeyError`; the C `FuncNameSpaceType` exposes native `tp_as_mapping` + a `dict_keys` view via `keys()`); creation control on `cos_comparison_active`/`cos_comparison_passive` with two temporary keywords - `use_namespace=False` skips namespace creation entirely (pure algorithms / GPU-style contexts; callbacks then receive `None` as their namespace argument) and `namespace_hook=callable` replaces the creation factory (default `func_name_space`; the core fills once via a single `hook(**fill_kwargs)` call - C builds one kwargs dict and calls the hook once, replacing ~15 setattr operations); the C `CallbackContext` gains a direct `algorithm` slot so a custom algorithm still runs without a namespace, and all callbacks unify on the None-fallback argument
+
+v0.4.4 (2026-08-24)
+-------------------
+Exploration test suite, Agent experiments and behavior-driven frameworks:
+- **Exploration test suite** (tests/exploration_*): delegated standard-library primitives (exploration_base), OpenAI-format local server (exploration_openai), face/digits/captcha/image tasks (exploration_image), NLP clustering (exploration_nlp), data generation (exploration_generate), autonomous captcha Agent (exploration_agent), light-theme GUI (server console + OpenCode-style client)
+- **Video abstraction & generation training** (video_agent_gen_v3.py): L0-L3 hierarchy (raw frames -> cos features -> scene-segment prototypes -> video summary); prototypes (same points) and contrast points (differences) in SQLite; generation = high-level concretization via learned contrast-point weighted aggregation (joint training across 3 videos); free-threaded 18-worker parallelism; +20.2% generation improvement on identical frame pairs (vs v2 guided baseline -1.6%), +6.4% cross-video generalization; 10 videos / 22545 frames stored
+- **Agent web-search knowledge base** (agent_web_knowledge.py): selenium + Edge headless search-and-fetch pipeline; 118/118 chemical elements (symbol/number 100% complete after infobox dt/dd extraction + authority-table validation) and 188 ISO 639 languages, all stored with provenance; generated elements encyclopedia + language-code quick reference
+- **Behavior-composition memory Agent framework** (tests/behavior_agent.py, formal): von Neumann structure - behaviors as data (definition/target/args/enabled/statistics in DB), instruction cycle fetch->decode->reflect-execute->write-back; dynamic reconfiguration via DB only (enabled/target/defaults, zero code change); external behavior modules loaded via interface.api (CallDict + importlib reflection); delegation slots (loader_func, DatabaseToolWrap check_same_thread=False, ExecuterDriver worker); ControlFlowDriver/Sequence composition; Monitor reflection; test_behavior_agent 11 offline tests (mock behavior injection)
+- **Generic executor** (tests/behavior_agent.py, formal): atomic instructions (func-name, positional args, keyword args) stored in DB (programs/instructions tables); fixed run_program reads and executes - fixed code runs multi-logic; `$N` result references; `program:<sub>` composite embedding (recursive, register-copy isolation); any-module reflection (plugin-style calls) with error isolation; test_behavior_agent extended to 19 cases
+- **Von-Neumann instructionized web surf** (von_surf_engine.py): built on von_neumann_engine.py (fixed CPU + DB instructions), extended with BEHAVE/REFLECT/CORRECT instructions - behavior call / reflection / self-correction loop: collect -> reflect (entry quality scoring: relevance/source/noise/completeness/duplicates) -> correct (filter low-quality) -> paper reflect -> paper correct; composite accuracy 86/100 (noise 16.7% -> 0%)
+- **Feedback-driven search** (agent_surf_behaviors.py): derive_queries derives search directions from already-stored data (frequent relevant terms + view-coverage gaps); targeted re-search then merge/re-analyze; cluster groups 2 -> 5, composite accuracy 90/100
+- **Continuous-mapping hierarchical-isolation memory** (von_hier_engine.py + agent_hier_behaviors.py): layered abstract memory (L1 entries -> L2 topic prototypes -> L3 views) with continuous mapping (feature vector + cos continuous score) and threshold-layer isolation; demand-driven extraction (only needs-related entries abstracted; unrelated data isolated, not compressed); detail preservation (diff vectors + detail terms); two-way layer driving (bottom-up aggregation; top-down need signals drive mapping and search; isolation is re-evaluable when needs evolve); search (producer, parallel) and arrangement (consumer) decoupled via layers
+- **Firefox logged-in platform fetch** (agent_platform_behaviors.py + run_platform_program.py): machine login-fortress scenario - user Firefox profile cookie reuse (copies cookies.sqlite etc.); generic-executor instruction program (13 triples) drives login-check / article-fetch / posts-collect / collect / report behaviors; login confirmed (account mask incl. full-width star regex); 3 encyclopedia articles + 2 forum boards' real hot posts stored; report generated
+- **Docs**: docs/exploration/README.md extended (video training, search knowledge base, behavior Agent, generic executor, reflex correction, feedback drive, hierarchical memory, logged-in fetch)
+
+v0.4.3 (2026-08-16)
+-------------------
+Robustness, protocol-style delegation and default-algorithm release:
+- **C core hardening (18 fixes, API unchanged)**: memory-safety NULL checks, single-fire end/return callbacks, step=0 division protection, output write-bounds checks, short-parameter tolerance, integer-overflow guards, global_error callback ABI alignment (pydll + ctypes backends)
+- **Element-wise filter/mapping API (all three backends)**: `data_filter` (yield positions whose callback(value) is truthy over a sampled read region, with origin/basis position reporting; stateless value-only callbacks; callback errors silently skipped), `data_mapping` (map a region through callback into a new or pre-allocated output with out_start/out_step), `threshold_filter` / `threshold_map` (interval [low, high] with inclusive endpoint control). C implementation is C99-strict (no VLA/GNU extensions, all static, const-correct, shared `_resolve_read_region` core, long-long totals, explicit free on every path) and backend-switch safe
+- **Upper-layer defect fixes**: database `executemany` partial-replay removal (errors re-raise, cursor-less fallback only), `MapMemory.commit` atomicity (applied entries dropped, retry never re-applies; `create_hook` factory support), `Process.stop(terminate=True)` child termination + synchronous reader threads, monitor handle race fixed via `parallel_lock` binding, `Graph.__repr__` and `DirectedGraph.shortest_path` nested-lock deadlocks eliminated, `Receptor.receptor` kwargs=None handling
+- **Logic layers (protocol-style)**: `event_context` delegated slots (`init_func`/`add_func`/`probability_func`), relative-probability axiom system (A1–A5: relativism, reflexivity, chain rule, Bayes duality, union; absolute forms degenerate from `global_event`), two-stage rigorous resolution (exact hit → relative Bayes over direct references → shortest-path chain fallback), `EventBinds` binds-as-engine protocol container (cached graph, stats, strict switch; default construction), `EventContextProtocol` deploy form, default graph-reachability judge for `Logic_context` (`logic_judge`), `shortest_path_between` in `interface.tools.math_tool.topology`
+- **Default dict-protocol implementations**: `Map` three-slot defaults (mapper), truthiness substitution → `is not None` default construction (call_api / executer / symbol_logic / logic contexts)
+- **Generate layer**: `TensorGenerator.generate(func, args, kwargs)` unified delegation entry, `set_point` via the core `set_item` protocol, module-level `copy_region` region fill (core `load_data` wrapper, target-first)
+- **Sense layer**: `data_match` — integrated matching-position iterator (active comparison + threshold filter; algorithm default resolved inside the backend, pydll-safe; None region parameters omitted so backends treat them uniformly); `Receptor.receptor` delegation entry (kwargs=None handling). The sense layer now exposes a single perception entry instead of separate filter/mapping functions (core keeps the full four-function API)
+- **Fourier module** (`interface.tools.math_tool.fourier`): generic `dft` / `idft` / `power_spectrum` from the cos/sin integral formula F(ξ)=Σf(x)cos(2πξ·x)−i·Σf(x)sin(2πξ·x) — multi-dimensional (axis-wise, odometer), recursion-free, trig-variant float arithmetic (no complex-object overhead), iterative loops only
+- **get_item scalar-index parity**: the pure-Python and ctypes backends now treat a scalar index as a 1-D index like the C extension (previously `*index` unpacking raised TypeError)
+- **Version handling**: VERSION.txt restored at the package directory, `__init__.py` reads it with `.strip()` and `utf-8-sig` (clean `version_tuple`, BOM/newline tolerant); `setup.py` writes the pure version string (no trailing newline, no BOM) and reads pyproject.toml BOM-tolerantly; version set to 0.4.3
+- **Docs**: README (v0.4.3 section), cognitive-layers / modular-architecture / seven-layer / core / backend-system updated for v0.4.3
+
+v0.4.2 (2026-08-13)
+-------------------
+Portability and robustness release - no API changes:
+- **ARM / piwheels build fixes**: Fixed C99 label-after-declaration errors in the C extension (type_vector.h) that blocked compilation on ARM Linux with `-std=c99`; removed non-static inline declarations from ctypes backend type_data.h that caused duplicate-symbol issues
+- **Empty-input hardening**: All backends now raise consistent exceptions (IndexError / ValueError / TypeError) for empty tensors instead of crashing; the C extension previously segfaulted on `vector_map_as_tensor(vector=[])`
+- **C extension Vector_init**: Default shape is now (1,) matching pure Python; scalar/empty vector inputs convert gracefully to 0.0 instead of triggering inconsistent-shape errors
+- **Memory safety audit**: Added NULL checks after every malloc/calloc across both C codebases; fixed a missing-brace bug (`if (!num) PyErr_NoMemory(); return NULL;`) that caused unconditional failure on allocation failure; fixed 12 reference-count and memory leaks in arithmetic operators and statistics
+- **Duck typing for indices**: Index parameters now accept any object implementing `__index__` (via PyNumber_Index) instead of requiring exact int/Long types, supporting numpy integers and custom index types
+- **Unified error messages**: ctypes backend now uses "effectless args." consistently; `infer_shape(None)` and `infer_shape(scalar)` return None on all backends
+- **Buffer protocol**: C extension now raises TypeError for zero-shaped tensors (matching pure Python memoryview behavior)
+- **Arithmetic on empty tensors**: All arithmetic operators and in-place variants raise IndexError on empty tensors across all backends
+- **mean/variance on empty tensors**: Now raise IndexError instead of returning None, matching pure Python behavior
+- **Removed dead code**: Deleted unused `_flatten_list_to_data` (68 lines), unused variables, and duplicate function declarations
+- **Restored missing func_tools.py**: The `no_done` no-op helper module was accidentally missing from the source tree, causing import failures in the interface layer
+- **Zero compiler warnings** on MSVC (C11, /W3), GCC, and Clang; C99-compatible for piwheels ARM builds
+- **`vector_map_as_tensor(vector=None, shape=)` auto-creation**: passing `vector=None` (with or without `shape=`) now auto-creates the default zero-filled flat vector — a list of zeros on the Python backends, the native zero-filled array on the C backends.  Previously the C extension crashed with heap corruption (0xC0000374) on `vector=None`; the Python backends stored `None` and failed on access.  An *omitted* `vector` keeps the historical default `(1,)` with value `1.0` on all backends
+- **C extension scalar in-place operators**: `t += scalar` / `t -= scalar` now work on the pydll backend, matching the ctypes and pure-Python backends (which already supported scalar in-place for `*=`, `/=`, `**=`); cross-backend operator behaviour is now identical
+- **Type-promotion decision (documented, not implemented)**: integer-typed results / most-precise-type promotion for arithmetic were considered and deliberately NOT implemented — the design keeps double as the single universal element type so the C hot loops stay SIMD-vectorizable; arithmetic always returns float-valued tensors (division is always double, as before)
+- **Buffer-protocol write-through for memoryview inputs**: the C extension previously obtained memoryview buffers with `PyBUF_SIMPLE | PyBUF_FORMAT`, which CPython satisfies with a detached copy for multi-byte formats — silently breaking zero-copy write-through.  It now requests `PyBUF_ND | PyBUF_FORMAT | PyBUF_STRIDES` for memoryview inputs (keeping C-contiguous views zero-copy and shared), so `memoryview`-backed tensors write through to the original buffer on every backend
+- **Buffer export read-only unification**: the Python backends' `__buffer__` (PEP 688) export was writable-but-write-lost (a fresh bytearray snapshot per export); it now exports read-only (`.toreadonly()`), matching the C extension and numpy's `frombuffer` of immutable input.  Writing to `memoryview(tensor)` raises TypeError on all backends
+- **ctypes `Data` structure layout fix**: the ctypes wrapper's `Data` Structure was missing the C struct's `dtype` field; added `("dtype", c_int)` so Python-side layout exactly matches the C layout (no out-of-bounds write if a Python-constructed `Data` is passed to C)
+- **C type-size/overflow hardening**: `Vector_getbuffer` itemsize uses `sizeof(double)` instead of a hardcoded 8; shape/sequence-length conversions from `Py_ssize_t` to `int` now raise OverflowError instead of silently truncating (`_infer_shape` buffer and sequence paths, `_parse_shape_tuple`, `_parse_int_seq`)
+
+v0.4.1 (2026-08-11)
+-------------------
+Major architecture upgrade release - modernized indexing, new features, and performance improvements:
+- **Breaking change**: Complete removal of legacy indexing parameters (`p`, `end`, `cache`) from vector_map_as_tensor, final migration to stride+offset architecture
+- **New `infer_shape` function**: Multi-priority shape inference for all backends - PyBuffer protocol > `__shape__()` method > iterative length detection, fast path for internal tensors
+- **`__shape__` protocol method**: All tensor types now expose `__shape__()` method for zero-overhead shape inference, overridable by subclasses for custom shape logic
+- **Enhanced `load_as_default_data`**: Added `step` parameter support for sub-sampling during data loading, tensor fast path using native slicing operations, PyBuffer fast path for contiguous double data
+- **Keyword-only initialization**: All vector_map_as_tensor constructors now use keyword arguments for optional parameters, cleaner and safer API
+- **Code simplification**: Removed all backward compatibility shims, simplified indexing logic, more general and maintainable codebase
+- **Enhanced PyBuffer protocol**: Improved zero-copy support for array.array, memoryview, bytes, and other buffer-like objects, automatic type conversion for common numeric formats (double/float/int/short/long/long long/unsigned char), unified type detection
+- **Further SIMD optimizations**: More loops annotated with cross-compiler ivdep hints, better auto-vectorization on all compilers, added portable optimization macros (unroll, alignment, branch prediction, inline)
+- **Optimized `[::,::]` slice performance**: Optimized non-contiguous view access patterns, faster read and assignment for stepped slices
+- **All three backends updated**: Pure Python (reference), C extension, and ctypes backends all implement v0.4.1 features with 100% behavioral parity
+- **ARM / piwheels compatibility fixes**: Removed all x86-specific assumptions, fully portable C11 code, fixes for ARM platform compilation
+- **Fixed ctypes backend call errors**: Corrected function signatures and type mappings, all ctypes operations work correctly
+- **Updated core module loader**: `infer_shape` added to hot API list for zero-overhead access
+- **Improved portability**: Added portable optimization macros (COS_UNROLL_LOOP, COS_ASSUME_ALIGNED, COS_INLINE, COS_LIKELY/COS_UNLIKELY), all degrade gracefully on unknown compilers
+- **Unified shape inference in core functions**: Replaced ad-hoc shape detection in `cos_comparison_passive` and `cos_comparison_active` with `infer_shape` function, simpler and more consistent code
+- **Math library optimization**: C extension `sqrt` now uses C `math.h` directly with thin Python wrapper (no longer imports from Python math module), ctypes backend imports from Python math module, C code internally uses native C math functions
+- **Fixed integer chain return bug**: `multiple_chain` and `add_chain` now correctly return integers for integer inputs (previously always returned floats), fixes index calculation errors
+- **Type safety improvements**: Comprehensive type safety audit, all type conversions verified, proper error checking throughout
+- **Enhanced `load_as_default_data`**: Added tensor fast path using native slice operations, PyBuffer fast path for contiguous double data, step parameter support for sub-sampling
+- **default_contain consistency fix**: C extension `default_contain` now matches pure Python API exactly - `default` + `default_dict` constructor parameters, no `__setitem__` support, same behavior across all backends
+- **vector_map_as_tensor keyword-only args**: All backends now enforce keyword-only constructor arguments (matching pure Python `def __init__(self, *, ...)`), cleaner and safer API
+- **Free-threaded Python 3.14 verification**: Full functionality verified on free-threaded Python 3.14t, GIL correctly released in compute-heavy functions, no thread safety issues
+- **Dual version (standard GIL / free-threaded Python 3.14) clean build with zero errors and zero warnings**
+- **Comprehensive testing**: All functional tests pass across all three backends, no regressions, 100% recursion-free guarantee
+- **Zero external dependencies, C11 standard compliant, cross-compiler portable (MSVC/GCC/Clang), supports x86/ARM/RISC-V**
+- **C extension __getitem__ deep optimization**: Further optimized Vector_subscript with SIMD auto-vectorization hints, two-pass processing strategy, and Py_TYPE subclass support for maximum performance while maintaining 100% behavioral parity with pure Python reference implementation
+- **Fixed _flat_index negative index bug**: Pure Python and ctypes backends' `_flat_index` function now properly handles negative indices, fixing `__setitem__`, `__get_item__`, and `__set_item__` failures when using negative indices
+- **Added dimension property to C extension**: C extension `vector_map_as_tensor` now exposes `dimension` property (matching pure Python API), ensuring consistent API across all three backends
+- **Unified sequence abstraction**: Replaced all hardcoded tuple-only checks with Python sequence protocol (PySequence_Check) for maximum generality - shape, strides, start_offset, step_offset parameters now accept any sequence type (list, tuple, array, etc.), not just tuples
+- **Added sequence parsing helpers**: Added `_parse_int_sequence` and `_override_int_array` helper functions to reduce code duplication and unify sequence handling logic
+- **Fixed shape list bug in C extension**: C extension previously ignored non-tuple shape parameters (like lists) and inferred shape from vector structure, causing shape=[2,2] to be interpreted as shape=(4,). Now properly handles any sequence type as shape parameter
+- **Enhanced __shape__ method flexibility**: `_infer_shape` now accepts any sequence type returned from `__shape__()` method, not just tuples, allowing subclasses to return custom sequence types
+- **Extended setitem sequence support**: Assignment now accepts any sequence type on the right-hand side, not just lists and tuples
+- **Fixed C extension load_as_default_data step parameter**: C extension previously lacked `step` parameter support (only pure Python and ctypes backends had it), causing behavioral inconsistency. Now all three backends support sub-sampling with arbitrary step sizes during data loading
+- **Added tensor fast path to C extension load_as_default_data**: C extension now uses native slicing operations when input is already a vector_map_as_tensor, matching pure Python and ctypes backends for improved performance
+- **Added `start` property to C extension**: C extension `vector_map_as_tensor` now exposes `start` property (global flat start offset), completing the property set across all backends - shape, dimension, strides, start, offset, start_offset, step_offset are now identical across all three backends
+- **Fixed reference counting in fast path**: Properly managed Python object references in load_as_default_data tensor fast path, eliminated potential memory leaks
+- **Improved bounds checking with step**: C extension load_as_default_data now correctly validates bounds when step > 1, preventing out-of-bounds access
+- **Carry iteration rewrite**: Rewrote sub-region copy loop to use standard 0-based carry iteration with step support, more maintainable and correct
+- **New `load_data` function**: Added `load_data(source, target, *, source_start, source_step, shape, target_start, target_step)` to all three backends - copies a sub-region from source to target with independent start/step for each side, PyBuffer fast path with write-persistence probing, three-level fallback (memoryview -> getitem/setitem -> get_item/set_item), automatic bounds clamping, returns number of elements copied
+- **C extension `load_data` implementation**: Full C implementation with memoryview-based buffer fast path, write-persistence probe (re-exports buffer to verify writes are not ephemeral snapshots), index tuple reuse for performance, proper reference counting and memory management on all error paths
+- **C4113 warning fix**: Added `(PyCFunction)` cast to `py_no_done` in method table, zero warnings on MSVC /W3
+- **Free-threaded compatibility**: `load_data` verified on both standard GIL and free-threaded Python 3.14t, all core tests pass on both builds
+- **Test coverage**: Added `tests/test_load_data.py` with 9 cross-backend tests covering basic copy, start/step, clamping, 1D/3D, empty copy, list-to-list, return type, and target step
+
+### Round 2 bug fixes and hardening
+- **Fixed memory leak in `load_data` parameter parsing**: `_parse_int_seq` allocates internally; pre-allocated arrays were overwritten and leaked. Refactored to `goto oom/fail` unified error handling, all arrays initialized to NULL and freed on every exit path
+- **Fixed `load_data` probe index**: Probe now uses `source_start`/`target_start` instead of all-zeros, avoiding unintended writes to target position 0 when start is non-zero
+- **Fixed `load_data` write-persistence verification**: Now re-exports target buffer and reads back the probed value via a fresh memoryview (matching pure Python), correctly detecting containers that return ephemeral buffer snapshots
+- **Fixed `py_get_item` reference counting**: `PyTuple_Pack` returns a new reference; removed spurious extra `Py_INCREF` that leaked the index tuple; added NULL check after `PyTuple_Pack`
+- **Removed dead code**: Deleted unused `_get_item_recursive` function
+- **Duck typing for integer sequences**: `_parse_shape_tuple`, `_parse_int_sequence`, and `_override_int_array` now use `PyNumber_Index` instead of `PyLong_Check`, accepting numpy integers and any `__index__`-compliant type
+- **Duck typing for `get_item`/`set_item` fallback**: Index conversion in nested-list fallback paths now uses `PyNumber_Index`, matching Python's native `[]` operator behavior
+- **Fixed zero-copy buffer path memory leak**: The `Data` struct and `data->strides` allocated in the zero-copy PyBuffer path were never freed (VECTOR_FLAG_VIEW suppressed `Data_free`). Now `data->shape` gets its own copy, only VECTOR_FLAG_BUFFER is set, and `Data_free` correctly releases the struct while respecting `owns_data=0`
+- **Added dimension safety guards**: `_data_to_vector` and `_data_to_independent_vector` now reject dimension < 1, added missing malloc failure checks for `start_offset`/`step_offset`, removed commented-out `PyObject_GC_Track` lines
+- **Added `tests/test_round2_fixes.py`**: Validation tests for zero-copy memory leak, duck-typed indices, `load_data` probe correctness, integer-sequence duck typing, and dimension-zero protection
+- All tests pass on both standard GIL and free-threaded Python 3.14, zero compiler errors/warnings
+
+### ctypes backend stability hotfix (merged)
+- Fixed hard crash when calling the ctypes backend without callbacks: the iteration callback pointer is now registered only when `iter_a_callback` / `iter_b_callback` is actually provided, no more unconditional callback invocation through the C API
+- Fixed heap corruption (0xC0000374) in `cos_comparison_passive`, `cos_comparison_active`, `cos`, `mean_local` and `local_variance`: removed invalid `Data_free` calls on Python-managed ctypes buffers (`data_a/data_b/data_c/kernel_c`); only the C-allocated `result_c` is still freed, input buffers are handled entirely by Python/ctypes garbage collection
+- Fixed callback crash on Python 3.14: callback lookup no longer relies on `ctypes.cast(ctx, ctypes.py_object).value` (unstable object-layout-dependent cast); replaced with an id-based registry pipeline - ctx now passes `id(name)`, and the callback name-space is recovered via `_callback_registry` for all six callback types
+- All callback functionality preserved: start/end/iter_a/iter_b/local_error/global_error/return callbacks keep their original signatures, triggering order and return-value contract; registry is fully cleaned up after every call (zero leaks, zero stale entries)
+- No public API changes, no performance regression, pure-Python-side fix only (no C code modified)
+- Verified: `tests/test_full.py` and `tests/test_tensor_comprehensive.py` pass on all three backends; callback scenarios and stress runs (thousands of iterations with and without callbacks) complete cleanly with EXIT=0
+
+v0.3.10 (2026-08-02)
+-------------------
+Fix some bugs and enhance features.
+
+v0.3.9 (2026-07-31)
+-------------------
+Major indexing architecture upgrade, NumPy-like fancy indexing for all backends:
+- Complete rewrite of vector_map_as_tensor indexing system: replaced old depth-based `p` attribute with modern stride+offset architecture, new properties: `start`, `offset`, `start_offset`, `step_offset`, `strides`
+- Index formula: `flat_idx = start + offset + sum(strides[k] * (start_offset[k] + i_k * step_offset[k]))`
+- Full N-dimensional fancy indexing: supports arbitrary int/slice mixed indices, negative indices, arbitrary step sizes, automatic dimension collapse on integer indexing, matches NumPy indexing semantics
+- All slicing operations create views, no data copying: even non-contiguous step slices share underlying memory, zero copy overhead
+- Correct non-contiguous view support: all arithmetic operations (+-*/**), in-place operations, mean/variance statistics, and core comparison functions correctly handle arbitrary strides and step sizes
+- Iterative carry-based index traversal: 100% recursion-free, no stack overflow even for high-dimensional tensors
+- Enhanced PyBuffer protocol: zero-copy path for double/unsigned char formats, automatic conversion for float/int/short/long/long long formats, improved read/write performance and robustness
+- Further SIMD optimizations: cross-compiler ivdep hints for all linear loops, improved auto-vectorization on MSVC/GCC/Clang
+- Backward compatibility: `p` property remains as read-only returning 0, `end`/`cache`/`tensor_size` properties preserved, all existing code works without modification
+- All three backends updated: pure Python (reference), C extension, and ctypes backends all implement new indexing with 100% behavioral parity
+- Fixed module import errors in skeleton layers (memory_layer, action_layer), all 7 cognitive layers now import cleanly
+- Fixed C extension __all__ export list, all public types (vector_map_as_tensor, func_name_space, default_contain) correctly exported
+- Cleaned up residual old indexing code, removed technical debt, improved code generality and simplicity
+- Dual version (standard GIL / free-threaded Python 3.14) clean build with zero errors and zero warnings
+- Comprehensive testing: basic indexing, slicing, step slices, dimension collapse, view arithmetic, view statistics, setitem, 3D tensors, cross-backend consistency all pass
+- Zero external dependencies, C11 standard compliant, cross-compiler portable (MSVC/GCC/Clang)
+
+v0.3.8 (2026-07-26)
+-------------------
+Stability, portability, performance and LSP compliance patch release:
+- Removed last remaining alloca() call in list flattening helper, 100% alloca-free across all C code
+- Fixed potential memory leak in _infer_shape(): added NULL check for realloc() result, prevents memory leak on allocation failure
+- Added missing NULL checks for all malloc() calls in buffer initialization path, prevents null pointer dereference on out-of-memory
+- All dynamic memory allocations now properly checked and freed on all error return paths, zero memory leaks
+- LSP (Liskov Substitution Principle) compliance: replaced all strict type checks (PyObject_TypeCheck / type(x) == type(y)) with isinstance checks across all three backends, subclasses can now correctly participate in operations with parent class instances
+- Enhanced PyBuffer protocol support: added PyBUF_FORMAT flag to correctly detect element types (double / unsigned char), zero-copy support for array.array, bytes, memoryview and other buffer objects works correctly for both tensor creation and leaf-dimension slice assignment
+- Fine-grained error handling: dimension inference no longer overwrites original exceptions (index errors, type errors, shape mismatch errors), errors are preserved for upper layer callback handling instead of returning generic "not a tensor"
+- Verified zero division protection in all core similarity algorithms: cos/mod/cosmod functions correctly handle zero-norm vectors without crashing, returns mathematically consistent values
+- Infinite loop risk audit: all carry-mechanism nested loops verified to terminate correctly, no infinite loop paths
+- Cross-compiler SIMD auto-vectorization hints added to all element-wise loops (arithmetic operations, slice assignment, mean/variance calculation), compiler automatically generates SIMD instructions for 50-100% performance improvement on supported CPUs, no architecture-specific intrinsics used
+- Enhanced free-threaded support: compute-heavy core functions automatically release GIL when no Python callbacks are present, supports true multi-threaded parallelism on Python 3.13+ free-threaded builds
+- Cleaned up outdated comments and dead code, updated documentation to match current implementation
+- Dual version (standard GIL / free-threaded Python 3.14) clean build with zero errors and zero warnings
+- Comprehensive testing: 13 functional tests + cross-backend consistency test + subclass operation test + buffer test + zero vector test + free-threaded test, all pass
+- All non-core modules verified to import correctly without fatal errors
+- Maintains 100% API and behavioral parity across pure Python / ctypes / C extension backends
+- Zero external dependencies, C11 standard compliant, cross-compiler portable (MSVC/GCC/Clang)
+
+v0.3.7 (2026-07-26)
+-------------------
+Performance, stability and portability release:
+- Complete Python GC support: added tp_traverse/tp_clear functions, correctly manages owner references, fixes memory leaks and circular reference issues
+- Portability fix: replaced non-standard alloca() with standard malloc/free, conforms to C11 standard, supports all C compilers
+- Subclass return type support: all view creation and arithmetic operations return instance actual type, subclasses correctly return own type from operators and slicing
+- Numerical stability fix for mean/variance: all three backends use Welford's online algorithm, eliminates large number sum/sum_sq overflow and precision loss
+- Fixed pow/ipow function signature warning: correctly uses ternaryfunc type, eliminates C4113 compiler warning
+- Fixed GC double-track assertion: correctly handles GC tracking for C-allocated instances, dual version compilation with zero warnings
+- Added sequence protocol support: C extension now supports default iteration, list() conversion and for loop behavior matches pure Python version exactly
+- Extracted unified view creation inline function: eliminated ~150 lines of duplicate code, unified subview/slice creation logic
+- Added SIMD auto-vectorization hints for all simple linear loops, 50-100% performance improvement on element-wise operations
+- Enhanced Py_Buffer protocol support for leaf-dimension slice assignment: supports all buffer-protocol objects (array.array, memoryview, numpy arrays, byte buffers)
+- Added pow/ipow operator support: tensor-tensor and tensor-scalar exponentiation across all three backends
+- Fixed slice length bug: slicing correctly updates tensor_size, len() returns accurate slice length, iteration does not go out of bounds
+- Fixed critical new_cache calculation bug: subview cache for single-integer and tuple indices correctly divides by next dimension size
+- Fixed set_item module-level function: added to C extension and ctypes backends, fixed typo in pure Python implementation
+- Fixed buffer protocol handling bug: correctly handles native double buffers without unnecessary cast
+- All code paths iterative: no recursion anywhere, supports arbitrarily high-dimensional data without stack overflow
+- Absolute zero external dependencies: core package does not import any third-party modules
+- Comprehensive testing in clean virtual environment, 100% API and behavioral parity across all three backends
+- Dual Python 3.14 support: both standard GIL and free-threaded (no-GIL) versions compile with zero warnings
+
+v0.3.6 (2026-07-24)
+-------------------
+Stability and API alignment release:
+- Fixed critical C extension constructor bug: now supports standard `vector_map_as_tensor(flat_data, shape_tuple)` N-dimensional tensor initialization, aligned with pure Python API
+- Fixed Python subclass inheritance crash: subclasses inheriting from C extension Vector type (e.g. sense_layer.Data) now work correctly without memory access violations
+- Fixed fatal import errors in all non-core modules: sense_layer, brain_layer, test_tool and other modules now import without errors
+- All non-core modules updated to follow inheritance specification: use `data` keyword argument for initialization, proper super() calls
+- C code fully optimized: all dead code removed, all compiler warnings fixed (zero warnings on MSVC/GCC/Clang), small functions inlined for performance
+- All code paths iterative: eliminated all recursion to prevent stack overflow on high-dimensional data
+- Dual Python 3.14 support: both standard GIL and free-threaded (no-GIL) versions supported
+- 100% API parity across all three backends (C extension, ctypes, pure Python)
+- Build system reverted to simple hardcoded setup.py for reliability
+- Added project metadata: author email, bug tracker URL
+- Updated documentation and fixed typos
+
+v0.3.5 (2026-07-20)
+-------------------
+Interface alignment release:
+- Standardized __set_item__ interface across all backends: tuple index + value calling convention
+- Added fast path for tuple assignment in C extension, 2-3x faster output writing
+- Eliminated recursive implementation in set_item, all paths iterative
+- Fixed cache calculation alignment between __get_item__ and __set_item__
+- Added PyBuffer protocol support for output writing
+- Fixed subview creation logic to match pure Python behavior
+
+v0.3.0 (2026-07-10)
+-------------------
+Multi-backend release:
+- Added Python C extension backend for maximum performance
+- Added ctypes pure C backend for portability
+- Three-backend automatic fallback system
+- Added PyBuffer zero-copy support for array.array and compatible types
+- Added operator overloading (+, -, *, /, in-place operators)
+- Added statistical methods: mean, variance
+- Cross-platform support for Windows, Linux, macOS
+
+v0.2.0 (2026-06-25)
+-------------------
+Major architecture restructuring - breaking change, seven-layer prototype:
+- **Breaking change**: All core functions moved to `core` submodule - import changed from `import cos_comparison as cc` to `from cos_comparison import core as cc`
+- Added seven-layer cognitive architecture prototype: action_layer, brain_layer (with logic/symbol_logic), expend_layer, generate_layer, memory_layer, sense_layer, test_tool
+- Implemented vector_map_as_tensor N-dimensional tensor view system
+- Added sliding window local comparison algorithm
+- Implemented cos, mod, cosmod similarity metrics (cosmod = 2(A·B)/(||A||² + ||B||²))
+- Added passive (edge detection) and active (template matching) modes
+- Added output parameter support for in-place writing
+- Added multi-dimensional indexing and slicing
+- Added generic N-dim functions: cos_comparison_passive, cos_comparison_active
+- Added batch execution helpers: execute_many, execute_many_iter
+- Added sliding window statistics: mean_local, local_variance
+- Added generic cos(A, B) function for arbitrarily nested lists
+- Updated command line interface: python -m cos_comparison.core
+- Added NumPy acceleration backend (optional)
+- Added experimental version warning
+- Author note: student preparing for important exam, development paused until June 9, 2026
+
+v0.1.5 (2026-06-20)
+-------------------
+Documentation and API refinement release:
+- Added PyPI version badge to README
+- Added Core Principles section (9 principles: local comparison, centre-surround antagonism, three similarity measures, dual modes, multi-scale, dimension-agnostic, zero training, determinism, modular architecture)
+- Added experimental version warning (do not use in production, interfaces may change)
+- Added roadmap and contribution guidelines
+- Added quick start examples for all modes
+- Added optional backends table (C > NumPy > Pure Python)
+- Added API overview section
+- Added command line usage example
+- Added import troubleshooting note
+- Added v0.2.0 breaking change preview warning
+- Added cos_comparison_simple.py simplified backend
+- File structure: config.json, CONTINUING.md, WARNING.md, core_base.txt all present
+
+v0.1.4 (2026-06-18)
+-------------------
+Core principles documentation release:
+- Added PyPI version badge to README
+- Added Core Principles section (9 principles)
+- Added experimental version warning
+- Added roadmap and contribution guidelines
+- Added cos_comparison_simple.py simplified backend
+- Expanded README with detailed usage examples
+- File structure: config.json, CONTINUING.md, WARNING.md, core_base.txt all present
+
+v0.1.3 (2026-06-15)
+-------------------
+Backend configuration and core principles documentation:
+- Added config.json for backend priority configuration (order: cos_comparison_c, cos_comparison_numpy, cos_comparison)
+- Added core_base.txt - detailed 9 core principles document
+- Added CONTINUING.md (development guide) and WARNING.md (experimental warning)
+- Added backend auto-fallback mechanism
+- File structure: config.json, CONTINUING.md, WARNING.md, core_base.txt
+
+v0.1.2 (2026-06-10)
+-------------------
+Stability and documentation release:
+- Added CONTINUING.md (development guide for contributors)
+- Added WARNING.md (experimental version warning)
+- Minor bug fixes and stability improvements
+- File structure: CONTINUING.md, WARNING.md added
+
+v0.1.1 (2026-06-05)
+-------------------
+Experimental warning documentation:
+- Added CONTINUING.md (how to contribute: fix bugs, compare algorithms, test datasets, develop core ideas)
+- Added WARNING.md (experimental version warning: do not use in production, interfaces may change)
+- Minor bug fixes and stability improvements
+- File structure: CONTINUING.md, WARNING.md added
+
+v0.1.0 (2026-06-01)
+-------------------
+Initial release:
+- Core cosine similarity comparison algorithm
+- Basic 1D/2D data processing
+- Centre-surround antagonism mechanism implementation (biologically inspired)
+- cosmod similarity formula: 2(A·B)/(||A||² + ||B||²)
+- Three similarity measures: cos (angular), mod (magnitude), cosmod (combined)
+- Passive (reflex/edge detection) and active (template matching) modes
+- Works on 1D, 2D, 3D, 4D data (audio, images, video, volumes)
+- Three backends: C (cos_comparison_c), NumPy (cos_comparison_numpy), pure Python (cos_comparison.py)
+- Legacy version: cos_comparison_old.py
+- Zero training, zero labels, zero backpropagation
+- Full determinism and interpretability
+- test_core.py basic test suite
