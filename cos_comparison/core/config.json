@@ -1,0 +1,7 @@
+[
+    {"name": "c", "module": ".cos_comparison_pydll"},
+    {"name": ".cos_comparison_pydll", "module": ".cos_comparison_pydll"},
+    {"name": ".cos_comparison_c", "module": ".cos_comparison_pydll"},
+    {"name": "py", "module": ".cos_comparison"},
+    {"name": ".cos_comparison", "module": ".cos_comparison"}
+]

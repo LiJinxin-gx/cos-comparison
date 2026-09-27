@@ -1,0 +1,40 @@
+site_name: cos-comparison Documentation
+site_description: Local similarity comparison for feature extraction — biologically inspired, zero-training edge/pattern detection, multi-backend acceleration.
+site_author: LiJinxin-gx
+repo_url: https://github.com/LiJinxin-gx/cos-comparison
+repo_name: cos-comparison
+
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Building: build.md
+  - Command Line: command-line.md
+  - Performance: performance.md
+  - API Reference:
+      - Overview: api/README.md
+      - Core: api/core.md
+      - Active Mode: api/active-mode.md
+      - Passive Mode: api/passive-mode.md
+      - Statistics: api/statistics.md
+      - Cognitive Layers: api/cognitive-layers.md
+  - Architecture:
+      - Overview: architecture/README.md
+      - Seven Layers: architecture/seven-layer.md
+      - Modular Architecture: architecture/modular-architecture.md
+      - Backend System: architecture/backend-system.md
+  - Principles:
+      - Overview: principles/README.md
+      - First Principle: principles/first-principle.md
+      - Dual Mode: principles/dual-mode.md
+      - Similarity Measures: principles/similarity-measures.md
+  - Exploration:
+      - Overview: exploration/README.md
+      - Atomic Contrast Matching: exploration/atomic_contrast_matching.md
+      - Hierarchical Isolation Reflection: exploration/hierarchical_isolation_reflection.md
+      - Massive Heatmap Analysis: exploration/massive_heatmap_analysis.md
+      - Open Memory System: exploration/open_memory_system.md
+      - Structural Inverse Loop: exploration/structural_inverse_loop.md
+      - Text Distributed Training: exploration/text_distributed_training.md
