@@ -1,9 +1,10 @@
 """app module tests: protocol-style Docker with default runnability.
 
-Default protocol class provides: shell-format reading with data<N> ->
-data_pool index refs (like C compilation), submit interfaces (reading and
-running decoupled), brain-layer control flow driving, action-layer operate
-flow driving (ExecuterDriver non-blocking), manage/store_error interfaces.
+The default protocol provides shell-format reading with data<N> ->
+data_pool index refs (like C compilation), decoupled submit
+interfaces, brain-layer control-flow driving, non-blocking
+action-layer operate-flow driving (ExecuterDriver), and manage /
+store_error interfaces.
 """
 
 import time
@@ -49,7 +50,7 @@ class TestDefaultRunnable(unittest.TestCase):
                                  (with_data, (10,), {})])
         driver = d.run()
         driver.wait(timeout=5)
-        self.assertEqual(d.run if False else d.data_pool, {0: 1, 1: 11})
+        self.assertEqual(d.data_pool, {0: 1, 1: 11})
 
     def test_manage_default_noop(self):
         d = Docker()
@@ -63,21 +64,33 @@ class TestDefaultRunnable(unittest.TestCase):
         self.assertIs(d.error, exc)
 
     def test_terminate_flag_stops_run(self):
-        def stopper(x):
-            return x
-        d = Docker(operate_pool=[(_input, (1,), {}),
-                                 (stopper, (2,), {}),
-                                 (_input, (3,), {})])
-        # terminate from the maintainer side before running the last step
-        orig = d.default_run
-        def interrupting(*a, **k):
-            driver = orig(*a, **k)
-            driver.wait(timeout=5)
-            return driver
-        d.default_run = interrupting
-        driver = d.run()
-        driver.wait(timeout=5)
-        self.assertEqual(d.data_pool, {0: 1, 1: 2, 2: 3})
+        import threading
+        entered = threading.Event()
+        release = threading.Event()
+
+        def first():
+            entered.set()
+            release.wait(timeout=5)
+            return 1
+
+        def second():
+            return 2
+
+        d = Docker(operate_pool=[(first, (), {}, 0), (second, (), {}, 1)])
+        handle = d.start()
+        try:
+            self.assertTrue(entered.wait(timeout=5))
+            d.terminated = True
+            release.set()
+            handle.join(timeout=5)
+        finally:
+            release.set()
+        # the in-flight step completes on the action-layer worker; poll
+        deadline = time.monotonic() + 5
+        while d.data_pool.get(0) != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # the next boundary saw the flag: exactly the first step ran
+        self.assertEqual(d.data_pool, {0: 1})
 
 
 class TestShellReader(unittest.TestCase):
@@ -93,8 +106,10 @@ class TestShellReader(unittest.TestCase):
         self.assertEqual(len(flow), 2)
         fn, args, _kwargs, pos = flow[1]
         self.assertIs(fn, add)
-        self.assertIsInstance(args[0], DataRef)
-        self.assertEqual(args[0].index, 0)
+        # values are compiled (ValueCode); the data reference executes
+        # against the pool at run time
+        self.assertIsInstance(args[0].code[0][1], DataRef)
+        self.assertEqual(args[0].code[0][1].index, 0)
         self.assertEqual(pos, 1)
 
     def test_run_from_shell_text(self):
@@ -143,7 +158,7 @@ class TestDefaultExecutorNamespace(unittest.TestCase):
     def test_project_module_dotted_call(self):
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "core.add_chain (1 2 3) -> 0")
+            "core.add_chain (1, 2, 3) -> 0")
         driver = d.run()
         self.assertTrue(driver.wait(timeout=5))
         self.assertEqual(d.data_pool, {0: 6})
@@ -151,7 +166,7 @@ class TestDefaultExecutorNamespace(unittest.TestCase):
     def test_core_reflection_dotted(self):
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "core.multiple_chain (1 2 3) -> 0")
+            "core.multiple_chain (1, 2, 3) -> 0")
         driver = d.run()
         self.assertTrue(driver.wait(timeout=5))
         self.assertEqual(d.data_pool, {0: 6})
@@ -227,39 +242,39 @@ class TestControlBlocks(unittest.TestCase):
 
     def test_if_true_branch(self):
         d = self._run_flow(
-            "IF core.add_chain (1 1)\n"
-            "    core.add_chain (1 2) -> 0\n"
+            "IF core.add_chain (1, 1)\n"
+            "    core.add_chain (1, 2) -> 0\n"
             "ELSE\n"
-            "    core.add_chain (9 9) -> 0\n"
+            "    core.add_chain (9, 9) -> 0\n"
             "END\n")
         self.assertEqual(d.data_pool, {0: 3})
 
     def test_if_false_branch(self):
         d = self._run_flow(
             "IF builtins.bool\n"
-            "    core.add_chain (1 2) -> 0\n"
+            "    core.add_chain (1, 2) -> 0\n"
             "ELSE\n"
-            "    core.add_chain (9 9) -> 0\n"
+            "    core.add_chain (9, 9) -> 0\n"
             "END\n")
         self.assertEqual(d.data_pool, {0: 18})
 
     def test_if_without_else(self):
         d = self._run_flow(
-            "IF core.add_chain (1 1)\n"
-            "    core.add_chain (1 2) -> 0\n"
+            "IF core.add_chain (1, 1)\n"
+            "    core.add_chain (1, 2) -> 0\n"
             "END\n")
         self.assertEqual(d.data_pool, {0: 3})
 
     def test_nested_if(self):
         d = self._run_flow(
-            "IF core.add_chain (1 1)\n"
-            "    IF core.add_chain (1 1)\n"
-            "        core.add_chain (1 2) -> 0\n"
+            "IF core.add_chain (1, 1)\n"
+            "    IF core.add_chain (1, 1)\n"
+            "        core.add_chain (1, 2) -> 0\n"
             "    ELSE\n"
-            "        core.add_chain (1 7) -> 0\n"
+            "        core.add_chain (1, 7) -> 0\n"
             "    END\n"
             "ELSE\n"
-            "    core.add_chain (1 9) -> 0\n"
+            "    core.add_chain (1, 9) -> 0\n"
             "END\n")
         self.assertEqual(d.data_pool, {0: 3})
 
@@ -275,7 +290,7 @@ class TestControlBlocks(unittest.TestCase):
         SH.register_callable("bump", bump)
         try:
             d = self._run_flow(
-                "core.add_chain (0) -> 0\n"
+                "core.add_chain (0,) -> 0\n"
                 "WHILE cond_lt3\n"
                 "    bump -> 0\n"
                 "END\n")
@@ -286,8 +301,8 @@ class TestControlBlocks(unittest.TestCase):
     def test_unterminated_block(self):
         d = Docker()
         with self.assertRaises(ValueError):
-            d.read_operate_flow("IF core.add_chain (1 1)\n"
-                                "    core.add_chain (1 2) -> 0\n")
+            d.read_operate_flow("IF core.add_chain (1, 1)\n"
+                                "    core.add_chain (1, 2) -> 0\n")
 
     def test_shell_and_app_control_consistent(self):
         """Different implementations (shell: instruction-jump functions
@@ -304,21 +319,90 @@ class TestControlBlocks(unittest.TestCase):
         finally:
             SH.ns_delete(["fiv", "nine"])
         d_true = self._run_flow(
-            "IF core.add_chain (1 1)\n"
-            "    core.add_chain (1 4) -> 0\n"
+            "IF core.add_chain (1, 1)\n"
+            "    core.add_chain (1, 4) -> 0\n"
             "ELSE\n"
-            "    core.add_chain (1 8) -> 0\n"
+            "    core.add_chain (1, 8) -> 0\n"
             "END\n")
         d_false = self._run_flow(
             "IF builtins.bool\n"
-            "    core.add_chain (1 4) -> 0\n"
+            "    core.add_chain (1, 4) -> 0\n"
             "ELSE\n"
-            "    core.add_chain (1 8) -> 0\n"
+            "    core.add_chain (1, 8) -> 0\n"
             "END\n")
         self.assertEqual(shell_true, 5)
         self.assertEqual(shell_false, 9)
         self.assertEqual(d_true.data_pool, {0: 5})
         self.assertEqual(d_false.data_pool, {0: 9})
+
+
+class TestFunctionPool(unittest.TestCase):
+    """Docker background function pool: duck-typed storage (dict default),
+    every invocation receives self, keyed operations."""
+
+    def test_default_dict_and_auto_keys(self):
+        d = Docker()
+        k0 = d.submit_function(lambda self: 1)
+        k1 = d.submit_function(lambda self: 2)
+        self.assertEqual((k0, k1), (0, 1))
+        self.assertEqual(sorted(d.function_pool), [0, 1])
+        self.assertEqual(d.call_function(0), 1)
+        self.assertEqual(d.call_function(1), 2)
+
+    def test_explicit_key(self):
+        d = Docker()
+        key = d.submit_function(lambda self: 42, key="named")
+        self.assertEqual(key, "named")
+        self.assertEqual(d.call_function("named"), 42)
+
+    def test_self_injected_first(self):
+        d = Docker()
+        seen = []
+
+        def probe(self, x):
+            seen.append((self, x))
+            return x * 2
+
+        d.submit_function(probe)
+        self.assertEqual(d.call_function(0, 5), 10)
+        self.assertIs(seen[0][0], d)
+
+    def test_remove_function(self):
+        d = Docker()
+        d.submit_function(lambda self: 1)
+        d.remove_function(0)
+        self.assertEqual(d.function_pool, {})
+        with self.assertRaises(KeyError):
+            d.call_function(0)
+
+    def test_start_functions_threads(self):
+        import threading
+        d = Docker()
+        done = threading.Event()
+
+        def bg(self):
+            done.set()
+
+        d.submit_function(bg)
+        self.assertEqual(d.start_functions(), 1)
+        self.assertTrue(done.wait(timeout=3))
+
+    def test_stop_functions_clears(self):
+        d = Docker()
+        d.submit_function(lambda self: 1)
+        d.submit_function(lambda self: 2)
+        d.stop_functions()
+        self.assertEqual(d.function_pool, {})
+
+    def test_sequence_pool_duck(self):
+        d = Docker(function_pool=[])
+        k0 = d.submit_function(lambda self: 7)
+        k1 = d.submit_function(lambda self: 8)
+        self.assertEqual((k0, k1), (0, 1))
+        self.assertEqual(d.call_function(0), 7)
+        self.assertEqual(d.call_function(1), 8)
+        d.remove_function(0)
+        self.assertEqual(d.call_function(0), 8)  # list shifts
 
 
 class TestSubDocker(unittest.TestCase):
@@ -329,19 +413,17 @@ class TestSubDocker(unittest.TestCase):
         from cos_comparison.app.protocol import subdocker
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "core.add_chain (1 2) -> 0")
-        result = subdocker(d, "core.add_chain (3 4) -> 0")
+            "core.add_chain (1, 2) -> 0")
+        result = subdocker(d, "core.add_chain (3, 4) -> 0")
         self.assertEqual(result, {0: 7})
 
-    def test_delegate_copies_pools(self):
+    def test_delegate_copies_data_pool(self):
         from cos_comparison.app.protocol import subdocker
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "core.add_chain (1 2) -> 0")
+            "core.add_chain (1, 2) -> 0")
         d.run().wait(timeout=5)
-        d.interface_pool.append("iface")
-        d.extension_pool.append("plugin")
-        result = subdocker(d, "core.add_chain (1 1) -> 1")
+        result = subdocker(d, "core.add_chain (1, 1) -> 1")
         self.assertEqual(result, {0: 3, 1: 2})  # child copies parent data_pool
         self.assertEqual(d.data_pool, {0: 3})   # parent unaffected by child
 
@@ -349,9 +431,9 @@ class TestSubDocker(unittest.TestCase):
         from cos_comparison.app.protocol import subdocker
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "core.add_chain (1 2) -> 0")
+            "core.add_chain (1, 2) -> 0")
         d.run().wait(timeout=5)
-        subdocker(d, "core.add_chain (9 9) -> 0")
+        subdocker(d, "core.add_chain (9, 9) -> 0")
         self.assertEqual(d.data_pool, {0: 3})  # child writes do not pollute parent
 
     def test_delegate_explicit_data(self):
@@ -393,7 +475,7 @@ class TestSubDocker(unittest.TestCase):
         from cos_comparison.shell_tool import shell as SH
 
         def outer_flow(docker):
-            inner = subdocker(docker, "core.add_chain (1 2) -> 0")
+            inner = subdocker(docker, "core.add_chain (1, 2) -> 0")
             return inner[0] + 1
 
         SH.register_callable("outer_flow", outer_flow)
@@ -401,7 +483,7 @@ class TestSubDocker(unittest.TestCase):
             d = Docker()
             result = subdocker(
                 d,
-                "core.add_chain (1 1) -> 0\n"
+                "core.add_chain (1, 1) -> 0\n"
                 "outer_flow -> 5\n")
             self.assertEqual(result, {0: 2, 5: 4})
         finally:
@@ -630,6 +712,106 @@ class TestExtensionScenarios(unittest.TestCase):
         driver.wait(timeout=5)
         self.assertEqual(d.data_pool, {10: 5, 20: 20})
 
+class TestSuspend(unittest.TestCase):
+    """Docker suspend/resume: cooperative stop at step boundaries, snapshot
+    export, continuation from the recorded cursor without re-running."""
+
+    def _flow(self, n, calls, delay=0.02):
+        def step(i):
+            def run(x):
+                calls.append(i)
+                time.sleep(delay)
+                return x
+            return run
+        return Docker(operate_pool=[(step(i), (i,), {}, i)
+                                    for i in range(n)])
+
+    def test_suspend_returns_snapshot(self):
+        calls = []
+        d = self._flow(8, calls, delay=0.05)
+        t = d.start()
+        deadline = time.monotonic() + 5
+        while d.done_steps == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        snap = d.suspend(timeout=5)
+        t.join(timeout=5)
+        self.assertTrue(d.suspended)
+        self.assertGreaterEqual(snap.done_steps, 0)
+        self.assertLess(snap.done_steps, 8)  # stopped mid-run
+        self.assertEqual(snap.data_pool, d.data_pool)
+        self.assertIsNot(snap.data_pool, d.data_pool)  # shallow copy
+        self.assertIs(snap.manager, d.manager)
+        self.assertLessEqual(len(calls), 8)
+
+    def test_resume_continues_exactly_once(self):
+        calls = []
+        d = self._flow(10, calls, delay=0.05)
+        t = d.start()
+        deadline = time.monotonic() + 5
+        while d.done_steps == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        snap = d.suspend(timeout=5)
+        t.join(timeout=5)
+        done = snap.done_steps
+        self.assertGreater(done, 0)
+        d2 = Docker()
+        d2.resume(snap)
+        self.assertFalse(d2.suspended)
+        self.assertEqual(d2.done_steps, done)
+        self.assertEqual(d2.data_pool, snap.data_pool)
+        d2.start()
+        deadline = time.monotonic() + 5
+        while d2.data_pool.get(9) != 9 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(d2.data_pool, {i: i for i in range(10)})
+        self.assertEqual(len(calls), 10)  # each step ran exactly once
+
+    def test_resume_keeps_existing_config(self):
+        # resume loads state only; manager/namespace stay the instance's own
+        calls = []
+        d = self._flow(6, calls, delay=0.01)
+        t = d.start()
+        time.sleep(0.05)
+        snap = d.suspend(timeout=5)
+        t.join(timeout=5)
+        d2 = Docker(manager=d.manager, namespace=d.namespace)
+        d2.resume(snap)
+        d2.start()
+        deadline = time.monotonic() + 5
+        while d2.data_pool.get(5) != 5 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(calls), 6)
+
+    def test_plain_run_resets_cursor(self):
+        calls = []
+        d = self._flow(3, calls, delay=0.0)
+        d.run().wait(timeout=5)
+        first = len(calls)
+        d.run().wait(timeout=5)  # ordinary run: full re-run, no skip
+        self.assertEqual(len(calls), first * 2)
+        self.assertEqual(d.data_pool, {0: 0, 1: 1, 2: 2})
+
+    def test_suspend_without_run(self):
+        d = Docker(operate_pool=[(_input, (1,), {}, 0)])
+        snap = d.suspend()
+        self.assertEqual(snap.done_steps, 0)
+        self.assertTrue(d.suspended)
+        d2 = Docker()
+        d2.resume(snap)
+        d2.run().wait(timeout=5)
+        self.assertEqual(d2.data_pool, {0: 1})  # nothing skipped
+
+    def test_presuspended_run_skips_all(self):
+        d = Docker(operate_pool=[(_input, (1,), {}, 0),
+                                 (_add, (1, 1), {}, 1)])
+        d.suspended = True
+        driver = d.run()
+        driver.wait(timeout=5)
+        self.assertEqual(d.data_pool, {})  # stopped at the first boundary
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

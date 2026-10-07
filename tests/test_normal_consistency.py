@@ -61,6 +61,10 @@ WORKLOAD = (
 
 class TestNormalConsistency(unittest.TestCase):
     def test_all_backends_bit_identical(self):
+        try:
+            import cos_comparison.core.cos_comparison_pydll  # noqa: F401
+        except ImportError:
+            self.skipTest("C extension not built; parity needs both backends")
         results = {}
         for backend in testutil.BACKENDS:
             rc, out, err = testutil.run_backend(backend, WORKLOAD)

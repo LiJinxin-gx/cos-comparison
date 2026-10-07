@@ -18,6 +18,13 @@
  * pointers, designated initializers, inline helpers, function pointers.
  */
 
+#ifdef _MSC_VER
+/* CPython extension ABI patterns under /Wall (see cos_comparison_pydll.c):
+   C4191 method-table casts, C4232 PyType_GenericNew address,
+   C4820 struct padding; C5045/C4711/C4710 are /Wall performance hints. */
+#pragma warning(push)
+#pragma warning(disable: 4191 4232 4820 5045 4711 4710)
+#endif
 #include <Python.h>
 #include <math.h>
 #include <stdint.h>
@@ -32,20 +39,24 @@
 /* helpers (duck-typed)                                                */
 /* ------------------------------------------------------------------ */
 
-static inline int _la_is_seq(PyObject *obj)
+static inline int la_is_seq(PyObject *obj)
 {
+    /* a bare __getitem__ is not enough (numpy scalars index but do not
+     * iterate); sized indexing or iteration means container */
     return PyObject_HasAttrString(obj, "__iter__")
-        || PyObject_HasAttrString(obj, "__getitem__");
+        || (PyObject_HasAttrString(obj, "__getitem__")
+            && PyObject_HasAttrString(obj, "__len__"));
 }
 
-static inline int _la_convert(PyObject *obj, double *out)
+static inline int la_convert(PyObject *obj, double *out)
 {
-    if (PyFloat_Check(obj)) {
+    if (PyFloat_CheckExact(obj)) {
         *out = PyFloat_AS_DOUBLE(obj);
         return 1;
     }
-    if (PyLong_Check(obj)) {
-        *out = (double)PyLong_AsLongLong(obj);
+    if (PyLong_CheckExact(obj)) {
+        long long v = PyLong_AsLongLong(obj);
+        *out = (double)v;
         return !PyErr_Occurred();
     }
     {
@@ -61,8 +72,8 @@ static inline int _la_convert(PyObject *obj, double *out)
 }
 
 /* flatten any-dimension data into a PyList of leaf values
- * (explicit iterator stack - no recursion); NULL on failure */
-static PyObject *_la_flatten(PyObject *data)
+ * (explicit iterator stack); NULL on failure */
+static PyObject *la_flatten(PyObject *data)
 {
     PyObject *values = PyList_New(0);
     PyObject *stack = PyList_New(0);
@@ -103,7 +114,7 @@ static PyObject *_la_flatten(PyObject *data)
             continue;
         }
         if (PyUnicode_Check(item) || PyBytes_Check(item)
-            || !_la_is_seq(item)) {
+            || !la_is_seq(item)) {
             if (PyList_Append(values, item) < 0) {
                 Py_DECREF(item);
                 Py_DECREF(values);
@@ -136,7 +147,7 @@ static PyObject *_la_flatten(PyObject *data)
 
 /* convert a PyList of leaves to a double array (malloc'd);
  * returns 0 on conversion failure (array freed, *values = NULL) */
-static int _la_to_doubles(PyObject *list, double **values, Py_ssize_t *n)
+static int la_to_doubles(PyObject *list, double **values, Py_ssize_t *n)
 {
     Py_ssize_t len = PyList_GET_SIZE(list);
     double *buf;
@@ -151,7 +162,7 @@ static int _la_to_doubles(PyObject *list, double **values, Py_ssize_t *n)
         return 0;
     }
     for (Py_ssize_t i = 0; i < len; i++) {
-        if (!_la_convert(PyList_GET_ITEM(list, i), &buf[i])) {
+        if (!la_convert(PyList_GET_ITEM(list, i), &buf[i])) {
             PyMem_Free(buf);
             *values = NULL;
             return 0;
@@ -163,7 +174,7 @@ static int _la_to_doubles(PyObject *list, double **values, Py_ssize_t *n)
 }
 
 /* duck-typed item write: output[i] = value (0 on failure) */
-static inline int _la_set_item(PyObject *output, Py_ssize_t i, double value)
+static inline int la_set_item(PyObject *output, Py_ssize_t i, double value)
 {
     PyObject *key = PyLong_FromSsize_t(i);
     PyObject *val = PyFloat_FromDouble(value);
@@ -184,11 +195,11 @@ static inline int _la_set_item(PyObject *output, Py_ssize_t i, double value)
 }
 
 /* write values linearly into output (0 on write failure) */
-static int _la_write_flat(PyObject *output, const double *restrict values,
+static int la_write_flat(PyObject *output, const double *restrict values,
                           Py_ssize_t n)
 {
     for (Py_ssize_t i = 0; i < n; i++) {
-        if (!_la_set_item(output, i, values[i])) {
+        if (!la_set_item(output, i, values[i])) {
             return 0;
         }
     }
@@ -196,14 +207,17 @@ static int _la_write_flat(PyObject *output, const double *restrict values,
 }
 
 /* write values back following a shape (nested item paths, iterative) */
-static int _la_write_shaped(PyObject *output, PyObject *shape,
+static int la_write_shaped(PyObject *output, PyObject *shape,
                             const double *restrict values, Py_ssize_t n)
 {
     Py_ssize_t dims = PyTuple_GET_SIZE(shape);
     Py_ssize_t *idx;
     Py_ssize_t i, d;
+    if (n == 0) {
+        return 1;   /* nothing to write: an empty tensor writes cleanly */
+    }
     if (dims == 0) {
-        return _la_write_flat(output, values, n);
+        return la_write_flat(output, values, n);
     }
     idx = (Py_ssize_t *)PyMem_Malloc((size_t)dims * sizeof(Py_ssize_t));
     if (idx == NULL) {
@@ -248,7 +262,7 @@ static int _la_write_shaped(PyObject *output, PyObject *shape,
             obj = next;
             owned = 1;
         }
-        if (_la_set_item(obj, idx[dims - 1], values[i])) {
+        if (la_set_item(obj, idx[dims - 1], values[i])) {
             rc = 1;
         }
         if (owned) {
@@ -274,7 +288,7 @@ static int _la_write_shaped(PyObject *output, PyObject *shape,
 }
 
 /* infer the shape of a duck-typed tensor (iterative) */
-static PyObject *_la_shape(PyObject *data)
+static PyObject *la_shape(PyObject *data)
 {
     PyObject *shape = PyList_New(0);
     PyObject *obj = data;   /* borrowed (first level) */
@@ -286,7 +300,7 @@ static PyObject *_la_shape(PyObject *data)
         Py_ssize_t len;
         PyObject *item;
         if (PyUnicode_Check(obj) || PyBytes_Check(obj)
-            || !_la_is_seq(obj)) {
+            || !la_is_seq(obj)) {
             break;
         }
         len = PyObject_Length(obj);
@@ -342,10 +356,10 @@ static PyObject *_la_shape(PyObject *data)
 /* shared element-wise implementations (function pointers, C99)         */
 /* ------------------------------------------------------------------ */
 
-typedef double (*_la_binop)(double, double);
+typedef double (*la_binop)(double, double);
 
-static PyObject *_la_pair(PyObject *a, PyObject *b, PyObject *output,
-                          _la_binop op)
+static PyObject *la_pair(PyObject *a, PyObject *b, PyObject *output,
+                          la_binop op)
 {
     PyObject *fa, *fb;
     double *va = NULL, *vb = NULL;
@@ -357,19 +371,19 @@ static PyObject *_la_pair(PyObject *a, PyObject *b, PyObject *output,
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
-    fb = _la_flatten(b);
+    fa = la_flatten(a);
+    fb = la_flatten(b);
     if (fa == NULL || fb == NULL) {
         Py_XDECREF(fa);
         Py_XDECREF(fb);
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         Py_DECREF(fb);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
-    if (!_la_to_doubles(fb, &vb, &nb)) {
+    if (!la_to_doubles(fb, &vb, &nb)) {
         PyMem_Free(va);
         Py_DECREF(fa);
         Py_DECREF(fb);
@@ -394,12 +408,12 @@ static PyObject *_la_pair(PyObject *a, PyObject *b, PyObject *output,
     }
     PyMem_Free(va);
     PyMem_Free(vb);
-    shape = _la_shape(a);
+    shape = la_shape(a);
     if (shape == NULL) {
         PyMem_Free(out_buf);
         return NULL;
     }
-    if (!_la_write_shaped(output, shape, out_buf, na)) {
+    if (!la_write_shaped(output, shape, out_buf, na)) {
         status = LA_NO_OUTPUT;
     }
     PyMem_Free(out_buf);
@@ -407,8 +421,9 @@ static PyObject *_la_pair(PyObject *a, PyObject *b, PyObject *output,
     return PyLong_FromLong(status);
 }
 
-static PyObject *_la_single(PyObject *a, PyObject *output,
-                            double (*op)(double, double), double extra)
+static PyObject *la_single(PyObject *a, PyObject *output,
+                            double (*op)(double, const void *),
+                            const void *ctx)
 {
     PyObject *fa;
     double *va = NULL;
@@ -420,11 +435,11 @@ static PyObject *_la_single(PyObject *a, PyObject *output,
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
+    fa = la_flatten(a);
     if (fa == NULL) {
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
@@ -436,15 +451,15 @@ static PyObject *_la_single(PyObject *a, PyObject *output,
         return PyErr_NoMemory();
     }
     for (Py_ssize_t i = 0; i < na; i++) {
-        out_buf[i] = op(va[i], extra);
+        out_buf[i] = op(va[i], ctx);
     }
     PyMem_Free(va);
-    shape = _la_shape(a);
+    shape = la_shape(a);
     if (shape == NULL) {
         PyMem_Free(out_buf);
         return NULL;
     }
-    if (!_la_write_shaped(output, shape, out_buf, na)) {
+    if (!la_write_shaped(output, shape, out_buf, na)) {
         status = LA_NO_OUTPUT;
     }
     PyMem_Free(out_buf);
@@ -456,25 +471,30 @@ static PyObject *_la_single(PyObject *a, PyObject *output,
 /* the linear algebra functions                                         */
 /* ------------------------------------------------------------------ */
 
-static inline double _la_b_add(double x, double y) { return x + y; }
-static inline double _la_b_mul(double x, double y) { return x * y; }
-static inline double _la_u_scale(double v, double f) { return v * f; }
-static inline double _la_u_power(double v, double e)
+static inline double la_b_add(double x, double y) { return x + y; }
+static inline double la_b_mul(double x, double y) { return x * y; }
+static inline double la_u_scale(double v, const void *ctx)
 {
-    return pow(v, e);
+    return v * *(const double *)ctx;
+}
+static inline double la_u_power(double v, const void *ctx)
+{
+    return pow(v, *(const double *)ctx);
 }
 
-static double _la_clip_low = 0.0;
-static double _la_clip_high = 0.0;
+typedef struct {
+    double low;
+    double high;
+} la_clip_ctx;
 
-static double _la_clip_impl(double v, double extra)
+static double la_clip_impl(double v, const void *ctx)
 {
-    (void)extra;
-    if (v < _la_clip_low) {
-        return _la_clip_low;
+    const la_clip_ctx *bounds = (const la_clip_ctx *)ctx;
+    if (v < bounds->low) {
+        return bounds->low;
     }
-    if (v > _la_clip_high) {
-        return _la_clip_high;
+    if (v > bounds->high) {
+        return bounds->high;
     }
     return v;
 }
@@ -497,15 +517,15 @@ static PyObject *py_la_dot(PyObject *self, PyObject *args, PyObject *kwargs)
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
-    fb = _la_flatten(b);
+    fa = la_flatten(a);
+    fb = la_flatten(b);
     if (fa == NULL || fb == NULL) {
         Py_XDECREF(fa);
         Py_XDECREF(fb);
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)
-        || !_la_to_doubles(fb, &vb, &nb)) {
+    if (!la_to_doubles(fa, &va, &na)
+        || !la_to_doubles(fb, &vb, &nb)) {
         PyMem_Free(va);
         PyMem_Free(vb);
         Py_DECREF(fa);
@@ -525,7 +545,7 @@ static PyObject *py_la_dot(PyObject *self, PyObject *args, PyObject *kwargs)
     }
     PyMem_Free(va);
     PyMem_Free(vb);
-    status = _la_write_flat(output, &total, 1) ? LA_OK : LA_NO_OUTPUT;
+    status = la_write_flat(output, &total, 1) ? LA_OK : LA_NO_OUTPUT;
     return PyLong_FromLong(status);
 }
 
@@ -548,11 +568,11 @@ static PyObject *py_la_scalar_reduce(PyObject *self, PyObject *args,
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
+    fa = la_flatten(a);
     if (fa == NULL) {
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
@@ -572,7 +592,7 @@ static PyObject *py_la_scalar_reduce(PyObject *self, PyObject *args,
         }
     }
     PyMem_Free(va);
-    status = _la_write_flat(output, &result, 1) ? LA_OK : LA_NO_OUTPUT;
+    status = la_write_flat(output, &result, 1) ? LA_OK : LA_NO_OUTPUT;
     return PyLong_FromLong(status);
 }
 
@@ -594,11 +614,11 @@ static PyObject *py_la_norm(PyObject *self, PyObject *args, PyObject *kwargs)
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
+    fa = la_flatten(a);
     if (fa == NULL) {
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
@@ -608,7 +628,7 @@ static PyObject *py_la_norm(PyObject *self, PyObject *args, PyObject *kwargs)
     }
     PyMem_Free(va);
     total = sqrt(total);
-    status = _la_write_flat(output, &total, 1) ? LA_OK : LA_NO_OUTPUT;
+    status = la_write_flat(output, &total, 1) ? LA_OK : LA_NO_OUTPUT;
     return PyLong_FromLong(status);
 }
 
@@ -632,11 +652,11 @@ static PyObject *py_la_normalize(PyObject *self, PyObject *args,
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
+    fa = la_flatten(a);
     if (fa == NULL) {
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
@@ -655,12 +675,12 @@ static PyObject *py_la_normalize(PyObject *self, PyObject *args,
         out_buf[i] = (length == 0.0) ? 0.0 : va[i] / length;
     }
     PyMem_Free(va);
-    shape = _la_shape(a);
+    shape = la_shape(a);
     if (shape == NULL) {
         PyMem_Free(out_buf);
         return NULL;
     }
-    if (!_la_write_shaped(output, shape, out_buf, na)) {
+    if (!la_write_shaped(output, shape, out_buf, na)) {
         status = LA_NO_OUTPUT;
     }
     PyMem_Free(out_buf);
@@ -677,7 +697,7 @@ static PyObject *py_la_add(PyObject *self, PyObject *args, PyObject *kwargs)
                                      &a, &b, &output)) {
         return NULL;
     }
-    return _la_pair(a, b, output, _la_b_add);
+    return la_pair(a, b, output, la_b_add);
 }
 
 static PyObject *py_la_multiply(PyObject *self, PyObject *args,
@@ -690,7 +710,7 @@ static PyObject *py_la_multiply(PyObject *self, PyObject *args,
                                      &a, &b, &output)) {
         return NULL;
     }
-    return _la_pair(a, b, output, _la_b_mul);
+    return la_pair(a, b, output, la_b_mul);
 }
 
 static PyObject *py_la_scale(PyObject *self, PyObject *args,
@@ -704,10 +724,10 @@ static PyObject *py_la_scale(PyObject *self, PyObject *args,
                                      &a, &factor, &output)) {
         return NULL;
     }
-    if (!_la_convert(factor, &f)) {
+    if (!la_convert(factor, &f)) {
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
-    return _la_single(a, output, _la_u_scale, f);
+    return la_single(a, output, la_u_scale, &f);
 }
 
 static PyObject *py_la_power(PyObject *self, PyObject *args,
@@ -721,10 +741,10 @@ static PyObject *py_la_power(PyObject *self, PyObject *args,
                                      &a, &exponent, &output)) {
         return NULL;
     }
-    if (!_la_convert(exponent, &e)) {
+    if (!la_convert(exponent, &e)) {
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
-    return _la_single(a, output, _la_u_power, e);
+    return la_single(a, output, la_u_power, &e);
 }
 
 static PyObject *py_la_clip(PyObject *self, PyObject *args,
@@ -738,12 +758,11 @@ static PyObject *py_la_clip(PyObject *self, PyObject *args,
                                      &a, &low, &high, &output)) {
         return NULL;
     }
-    if (!_la_convert(low, &fl) || !_la_convert(high, &fh)) {
+    if (!la_convert(low, &fl) || !la_convert(high, &fh)) {
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
-    _la_clip_low = fl;
-    _la_clip_high = fh;
-    return _la_single(a, output, _la_clip_impl, 0.0);
+    la_clip_ctx bounds = {fl, fh};
+    return la_single(a, output, la_clip_impl, &bounds);
 }
 
 static PyObject *py_la_flatten(PyObject *self, PyObject *args,
@@ -764,16 +783,16 @@ static PyObject *py_la_flatten(PyObject *self, PyObject *args,
     if (output == Py_None) {
         return PyLong_FromLong(LA_NO_OUTPUT);
     }
-    fa = _la_flatten(a);
+    fa = la_flatten(a);
     if (fa == NULL) {
         return NULL;
     }
-    if (!_la_to_doubles(fa, &va, &na)) {
+    if (!la_to_doubles(fa, &va, &na)) {
         Py_DECREF(fa);
         return PyLong_FromLong(LA_CONVERSION_FAILURE);
     }
     Py_DECREF(fa);
-    status = _la_write_flat(output, va, na) ? LA_OK : LA_NO_OUTPUT;
+    status = la_write_flat(output, va, na) ? LA_OK : LA_NO_OUTPUT;
     PyMem_Free(va);
     return PyLong_FromLong(status);
 }
@@ -824,19 +843,31 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+static PyModuleDef_Slot module_slots[] = {
+#if defined(Py_mod_gil) && defined(Py_MOD_GIL_NOT_USED)
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_linear_algebra",
     "Dimension-generic linear algebra (duck typing, output keyword).",
-    -1,
+    0,
     methods,
-    NULL,  /* m_slots */
+    module_slots,
     NULL,  /* m_traverse */
     NULL,  /* m_clear */
     NULL,  /* m_free */
 };
 
+PyMODINIT_FUNC PyInit__linear_algebra(void);
 PyMODINIT_FUNC PyInit__linear_algebra(void)
 {
-    return PyModule_Create(&moduledef);
+    return PyModuleDef_Init(&moduledef);
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

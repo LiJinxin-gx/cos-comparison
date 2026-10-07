@@ -21,7 +21,7 @@
 pip install cos-comparison
 ```
 
-C backends compile automatically if a compiler is available; otherwise the pure Python backend works with zero dependencies.
+The C extension compiles automatically if a compiler is available; otherwise the pure Python backend works with zero dependencies.
 
 > For in-place builds, dual-compiler strict-mode checks, free-threaded
 > (cp314t) builds and test instructions, see [Building](build.md).
@@ -30,7 +30,7 @@ C backends compile automatically if a compiler is available; otherwise the pure 
 import cos_comparison
 print(cos_comparison.__version__)
 from cos_comparison import core as cc
-print(cc.get_mode())  # enabled backends
+print(cc.get_mode())  # configured backend priority (first loaded wins)
 ```
 
 ---
@@ -149,8 +149,8 @@ cc.cos_comparison_passive(data, window_size=(3, 3, 3, 3), d=(1, 0, 0, 0))
 ## Backend Management
 
 ```python
-cc.get_mode()                  # current backend priority
-cc.set_mode("cos_comparison")  # force pure Python for debugging
+cc.get_mode()                  # configured backend priority (first loaded wins)
+cc.set_mode("py")              # force pure Python for debugging
 ```
 
 → [Backend Management System](architecture/backend-system.md)

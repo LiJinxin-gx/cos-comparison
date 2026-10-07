@@ -1,8 +1,8 @@
 """
 Action executor with delegated async execution: runs the call list strictly
-in order, in the background by default (non-blocking call_all), capturing
-per-item out/err results. Thread launching is delegated to interface; an
-injected worker replaces the default launcher entirely.
+in order on a background worker (non-blocking call_all), capturing per-item
+out/err results. Thread launching is delegated to the interface; an injected
+worker replaces the default launcher entirely.
 """
 
 import time
@@ -75,7 +75,12 @@ class ExecuterDriver:
         """Submit all entries in order on a background worker; non-blocking."""
         self.wait()
         self.results = [ActionResult() for _ in self.call_list]
-        self._handle = self._worker(self._run_serial, args, kwargs if kwargs is not None else {})
+        # args / kwargs are forwarded to every entry; the worker protocol is
+        # target(*worker_args, **worker_kwargs), so pack them into one target
+        # argument (works with the default thread launcher and injected
+        # launchers alike)
+        self._handle = self._worker(
+            self._run_serial, (args, kwargs if kwargs is not None else {}), {})
         return self
     def _run_serial(self, args=(), kwargs=None):
         kwargs = kwargs if kwargs is not None else {}

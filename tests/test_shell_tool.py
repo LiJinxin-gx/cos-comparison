@@ -1,6 +1,7 @@
-﻿"""shell_tool tests: runpy directory plugin execution, imperative shell."""
+"""shell_tool tests: runpy directory plugin execution, imperative shell."""
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,8 +11,41 @@ from unittest import mock
 import cos_comparison.__main__ as CLI
 from cos_comparison.shell_tool import shell as SH
 
+import testutil
 
-class TestPluginSearch(unittest.TestCase):
+
+def _snapshot_shared_state():
+    ns = {key: (dict(value) if isinstance(value, dict)
+                else list(value) if isinstance(value, list) else value)
+          for key, value in SH._ns.items()}
+    return ns, dict(SH._interrupt), dict(CLI._NAMESPACE)
+
+
+def _restore_shared_state(snapshot):
+    ns, interrupt, cli_ns = snapshot
+    for key in list(SH._ns):
+        if key not in ns:
+            del SH._ns[key]
+    for key, value in ns.items():
+        SH._ns[key] = value
+    SH._interrupt.clear()
+    SH._interrupt.update(interrupt)
+    CLI._NAMESPACE.clear()
+    CLI._NAMESPACE.update(cli_ns)
+
+
+class ShellTestCase(unittest.TestCase):
+    """Snapshot/restore the process-global shell and CLI namespace state
+    so tests never leak variables, callables or interrupt counters."""
+
+    def setUp(self):
+        self._shared_snapshot = _snapshot_shared_state()
+
+    def tearDown(self):
+        _restore_shared_state(self._shared_snapshot)
+
+
+class TestPluginSearch(ShellTestCase):
     """Directory code search: file name == command name (no registry)."""
 
     def test_plugin_path_exists(self):
@@ -27,33 +61,62 @@ class TestPluginSearch(unittest.TestCase):
         self.assertIn("shell", cmds)
 
 
-class TestParseCall(unittest.TestCase):
+def _value(text, data=None, env=None):
+    """Compile + execute a single value word (tests the unified literal
+    grammar end to end)."""
+    from cos_comparison.shell_tool.value import compile_value, ValueEnv
+    if env is None:
+        env = ValueEnv(data=data, vars={}, resolve=SH.resolve_callable,
+                       var_index={})
+    return compile_value(text).execute(env)
+
+
+def _call_values(call_text, data=None):
+    """Positional/keyword values of a parsed call, executed (so a test
+    sees the real values, not the compiled ValueCode objects)."""
+    _f, args, kwargs = SH.parse_call(call_text)
+    env = SH.ValueEnv(data=data, vars={}, resolve=SH.resolve_callable,
+                      var_index={})
+    out_args = tuple(
+        a.execute(env) if isinstance(a, SH.ValueCode) else a for a in args)
+    out_kwargs = {k: (v.execute(env) if isinstance(v, SH.ValueCode) else v)
+                  for k, v in kwargs.items()}
+    return out_args, out_kwargs
+
+
+class TestParseCall(ShellTestCase):
     def test_positional(self):
         func, args, kwargs = SH.parse_call("math.sqrt 16.0")
         self.assertEqual(func, "math.sqrt")
-        self.assertEqual(args, (16.0,))
+        self.assertEqual(_call_values("math.sqrt 16.0")[0], (16.0,))
         self.assertEqual(kwargs, {})
 
     def test_keyword(self):
-        _func, args, kwargs = SH.parse_call("math.pow 2 -exp 3")
-        self.assertEqual(args, (2,))
-        self.assertEqual(kwargs, {"exp": 3})
+        _func, _args, kwargs = SH.parse_call("math.pow 2 -exp 3")
+        self.assertEqual(_call_values("math.pow 2 -exp 3")[0], (2,))
+        self.assertEqual(_call_values("math.pow 2 -exp 3")[1],
+                         {"exp": 3})
+        self.assertEqual(tuple(kwargs), ("exp",))
 
     def test_nested_group(self):
-        func, args, _kwargs = SH.parse_call("f (1 2 3) (4 5)")
+        # a multi-element group without commas is a NESTED CALL; tuples
+        # are Python-style, comma-separated
+        func, args, _kwargs = SH.parse_call("f (1, 2, 3) (4, 5)")
         self.assertEqual(func, "f")
-        self.assertEqual(args, ((1, 2, 3), (4, 5)))
+        self.assertEqual(_call_values("f (1, 2, 3) (4, 5)")[0],
+                         ((1, 2, 3), (4, 5)))
 
     def test_quoted(self):
-        _func, args, _kw = SH.parse_call('f "hello world"')
-        self.assertEqual(args, ("hello world",))
+        _func, _args, _kw = SH.parse_call('f "hello world"')
+        self.assertEqual(_call_values('f "hello world"')[0],
+                         ("hello world",))
 
     def test_numbers(self):
-        _func, args, _kw = SH.parse_call("f 1 2.5 x")
-        self.assertEqual(args, (1, 2.5, "x"))
+        _func, _args, _kw = SH.parse_call("f 1 2.5 x")
+        self.assertEqual(_call_values("f 1 2.5 x")[0], (1, 2.5, "x"))
 
 
-class TestLiterals(unittest.TestCase):
+class TestLiterals(ShellTestCase):
     """Python-convention literals: tuples with commas, lists, booleans,
     None, single/double quoted strings, nesting (spaces still accepted)."""
 
@@ -61,7 +124,7 @@ class TestLiterals(unittest.TestCase):
         self.assertEqual(SH._atom("(1, 0)"), (1, 0))
         self.assertEqual(SH._atom("(1,)"), (1,))
         self.assertEqual(SH._atom("()"), ())
-        self.assertEqual(SH._atom("(1 0)"), (1, 0))
+        self.assertEqual(SH._atom("(1, 0)"), (1, 0))
 
     def test_list(self):
         self.assertEqual(SH._atom("[1, 2]"), [1, 2])
@@ -105,9 +168,9 @@ class TestLiterals(unittest.TestCase):
             SH._atom("(1, 2")
 
 
-class TestExecute(unittest.TestCase):
+class TestExecute(ShellTestCase):
     def test_core_call(self):
-        self.assertEqual(SH.execute_call(*SH.parse_call("cos (1 0) (1 0)")),
+        self.assertEqual(SH.execute_call(*SH.parse_call("cos (1, 0) (1, 0)")),
                          1.0)
 
     def test_error_intercepted(self):
@@ -123,12 +186,28 @@ class TestExecute(unittest.TestCase):
             SH.execute_call(*SH.parse_call("kb_f"))
 
 
-class TestNamespaceOps(unittest.TestCase):
+class TestNamespaceOps(ShellTestCase):
     def test_let_get_delete(self):
         self.assertEqual(SH.ns_set("x", "5"), "5")
         self.assertEqual(SH.ns_get("x"), "5")
         self.assertEqual(SH.ns_delete(["x"]), "deleted: x")
         self.assertEqual(SH.ns_get("x"), "undefined")
+
+    def test_get_none_value_not_undefined(self):
+        SH.ns_set("n", "None")
+        try:
+            self.assertEqual(SH.ns_get("n"), "None")
+        finally:
+            SH.ns_delete(["n"])
+
+    def test_negative_literal_is_not_a_keyword(self):
+        _func, _args, kwargs = SH.parse_call("math.pow -2 3")
+        self.assertEqual(kwargs, {})
+        self.assertEqual(_call_values("math.pow -2 3")[0], (-2, 3))
+        # keyword form still works
+        _func, _args, kwargs = SH.parse_call("math.pow 2 -exp 3")
+        self.assertEqual(tuple(kwargs), ("exp",))
+        self.assertEqual(_call_values("math.pow 2 -exp 3")[1], {"exp": 3})
 
     def test_import_module(self):
         result = SH.ns_import("operator")
@@ -137,12 +216,12 @@ class TestNamespaceOps(unittest.TestCase):
         self.assertEqual(r, 3)
 
 
-class TestProjectNamespace(unittest.TestCase):
+class TestProjectNamespace(ShellTestCase):
     """Default namespace: project package modules, dotted attribute/method
     extraction, and the injected namespace management functions."""
 
     def test_dotted_module_function(self):
-        r = SH.execute_call(*SH.parse_call("core.add_chain (1 2 3)"))
+        r = SH.execute_call(*SH.parse_call("core.add_chain (1, 2, 3)"))
         self.assertEqual(r, 6)
 
     def test_dotted_core_reflection(self):
@@ -167,7 +246,9 @@ class TestProjectNamespace(unittest.TestCase):
     def test_import_module_project_path(self):
         result = SH.ns_import("core")
         self.assertIn("imported core", result)
-        self.assertIs(SH.ns_get("core").startswith("module"), False)
+        self.assertIn("core", SH._ns["modules"])
+        r = SH.execute_call(*SH.parse_call("core.add_chain (1, 2)"))
+        self.assertEqual(r, 3)
 
     def test_list_modules(self):
         result = SH.ns_list_modules()
@@ -227,23 +308,26 @@ class TestProjectNamespace(unittest.TestCase):
         self.assertEqual(SH._atom('"&x"'), "&x")
         self.assertEqual(SH._atom('"*3"'), "*3")
         self.assertEqual(SH._atom("'&x'"), "&x")
-        func, args, kwargs = SH.parse_call(
+        func, _args, kwargs = SH.parse_call(
             'operator.add "&x" "*3" -k "*&y"')
         self.assertEqual(func, "operator.add")
-        self.assertEqual(args, ("&x", "*3"))
-        self.assertEqual(kwargs, {"k": "*&y"})
+        self.assertEqual(tuple(kwargs), ("k",))
+        self.assertEqual(_call_values('operator.add "&x" "*3" -k "*&y"')[0],
+                         ("&x", "*3"))
+        self.assertEqual(_call_values('operator.add "&x" "*3" -k "*&y"')[1],
+                         {"k": "*&y"})
 
     def test_quoted_inside_group_verbatim(self):
         self.assertEqual(SH._atom('("a&b" "*c")'), ("a&b", "*c"))
 
 
-class TestBuiltinsPreimport(unittest.TestCase):
+class TestBuiltinsPreimport(ShellTestCase):
     """CLI pre-imports built-in functions (functions/types from the __builtins__ module) — directly usable without overriding project-registered names."""
 
     def test_builtin_function_callable(self):
-        r = SH.execute_call(*SH.parse_call("len (1 2 3)"))
+        r = SH.execute_call(*SH.parse_call("len (1, 2, 3)"))
         self.assertEqual(r, 3)
-        r2 = SH.execute_call(*SH.parse_call("sum (1 2 3)"))
+        r2 = SH.execute_call(*SH.parse_call("sum (1, 2, 3)"))
         self.assertEqual(r2, 6)
 
     def test_builtin_type_callable(self):
@@ -267,13 +351,13 @@ class TestBuiltinsPreimport(unittest.TestCase):
     def test_builtins_batch_usage(self):
         from cos_comparison.shell_tool.batch import run_batch
         data, _ = run_batch([
-            "core.add_chain (1 2) -> 0",
+            "core.add_chain (1, 2) -> 0",
             "str data[0] -> 1",
         ])
         self.assertEqual(data, {0: 3, 1: "3"})
 
 
-class TestIndexSyntax(unittest.TestCase):
+class TestIndexSyntax(ShellTestCase):
     """data[index] indexing syntax (replaces the data<N> name-collision form), % / %% unpack operations, and let functional assignment."""
 
     def test_data_index_syntax(self):
@@ -296,15 +380,15 @@ class TestIndexSyntax(unittest.TestCase):
         self.assertAlmostEqual(data[1], 3.0 ** 0.5)
 
     def test_percent_sequence_unpack(self):
-        r = SH.execute_call(*SH.parse_call("max %(1 2 3)"))
+        r = SH.execute_call(*SH.parse_call("max %(1, 2, 3)"))
         self.assertEqual(r, 3)
-        r2 = SH.execute_call(*SH.parse_call("min %(1 2 3)"))
+        r2 = SH.execute_call(*SH.parse_call("min %(1, 2, 3)"))
         self.assertEqual(r2, 1)
 
     def test_percent_unpack_data_ref(self):
         from cos_comparison.shell_tool.batch import run_batch
         data, _ = run_batch([
-            "list (1 2) -> 0",
+            "list (1, 2) -> 0",
             "max %data[0] -> 1",
         ])
         self.assertEqual(data, {0: [1, 2], 1: 2})
@@ -319,7 +403,7 @@ class TestIndexSyntax(unittest.TestCase):
         try:
             from cos_comparison.shell_tool.batch import run_batch
             data, _ = run_batch([
-                "dict ((a 1) (b 2)) -> 0",
+                "{a: 1, b: 2} -> 0",
                 "key_join %%data[0] -> 1",
             ])
             self.assertEqual(data, {0: {"a": 1, "b": 2}, 1: 3})
@@ -330,7 +414,7 @@ class TestIndexSyntax(unittest.TestCase):
         from cos_comparison.shell_tool.batch import run_batch
         _data, stats = run_batch([
             "let x 5",
-            "let y (1 2)",
+            "let y (1, 2)",
         ])
         self.assertEqual(stats["run"], 2)
         self.assertEqual(SH.ns_get("x"), "5")
@@ -340,15 +424,15 @@ class TestIndexSyntax(unittest.TestCase):
         from cos_comparison.app import Docker
         d = Docker()
         d.operate_pool = d.read_operate_flow(
-            "max %(1 2 3) -> 0\n"
-            "list (1 2) -> 1\n"
+            "max %(1, 2, 3) -> 0\n"
+            "list (1, 2) -> 1\n"
             "max %data[1] -> 2\n")
         drv = d.run()
         self.assertTrue(drv.wait(timeout=5))
         self.assertEqual(d.data_pool, {0: 3, 1: [1, 2], 2: 2})
 
 
-class TestControlFunctions(unittest.TestCase):
+class TestControlFunctions(ShellTestCase):
     """Instruction-style control flow (assembly-like jumps, function
     unit) with name-mapping targets, injected into the namespace like
     import_module."""
@@ -423,7 +507,7 @@ class TestControlFunctions(unittest.TestCase):
         self.assertIn("imported operator", result)
 
 
-class TestImportAllModule(unittest.TestCase):
+class TestImportAllModule(ShellTestCase):
     """import_all_module: from module import * effect — all public objects are attached to the specified namespace (keyword namespace, defaults to the current shell namespace)."""
 
     def test_import_all_default_namespace(self):
@@ -484,18 +568,15 @@ class TestImportAllModule(unittest.TestCase):
         self.assertIn("dot", SH.namespace())
 
 
-class TestMainCLI(unittest.TestCase):
+class TestMainCLI(ShellTestCase):
     """python -m cos_comparison <command> — runpy plugin execution."""
 
     def _run(self, *args):
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [os.path.dirname(os.path.abspath(__file__)),
-             env.get("PYTHONPATH", "")])
         return subprocess.run(
             [sys.executable, "-m", "cos_comparison", *args],
-            capture_output=True, text=True, env=env, timeout=60,
-            check=False)
+            capture_output=True, text=True, env=testutil.clean_env(),
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            timeout=60, check=False)
 
     def test_version_cli(self):
         p = self._run("version")
@@ -503,14 +584,14 @@ class TestMainCLI(unittest.TestCase):
         self.assertRegex(p.stdout.strip(), r"\d+\.\d+")
 
     def test_shell_cli(self):
-        p = self._run("shell", "cos", "(1 0)", "(1 0)")
+        p = self._run("shell", "cos", "(1, 0)", "(1, 0)")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), "1.0")
 
     def test_shell_kwargs_cli(self):
         p = self._run("shell", "cos_comparison_passive",
-                      "((1 2 3 4) (5 6 7 8) (9 1 2 3) (4 5 6 7))",
-                      "-window_size", "(3 3)")
+                      "((1, 2, 3, 4), (5, 6, 7, 8), (9, 1, 2, 3), (4, 5, 6, 7))",
+                      "-window_size", "(3, 3)")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertNotIn("error", p.stdout)
 
@@ -525,12 +606,13 @@ class TestMainCLI(unittest.TestCase):
         self.assertIn("error:", p.stdout)
 
 
-class TestMainMonitor(unittest.TestCase):
+class TestMainMonitor(ShellTestCase):
     """__main__ monitors KeyboardInterrupt and intercepts errors."""
 
-    def _make_plugin(self, code):
+    def _make_plugin(self, code, name="kb"):
         tmp = tempfile.mkdtemp()
-        path = os.path.join(tmp, "kb.py")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, name + ".py")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(code)
         return path
@@ -560,40 +642,40 @@ class TestMainMonitor(unittest.TestCase):
 
     def test_namespace_injected(self):
         """__ns__ mapping is injected into the plugin globals."""
-        tmp = tempfile.mkdtemp()
-        path = os.path.join(tmp, "nscheck.py")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("import sys\n"
-                     "if '__ns__' in globals():\n"
-                     "    globals()['__ns__']['marker'] = 42\n")
+        path = self._make_plugin(
+            "import sys\n"
+            "if '__ns__' in globals():\n"
+            "    globals()['__ns__']['marker'] = 42\n",
+            name="nscheck")
         with mock.patch.object(CLI, "plugin_path", return_value=path):
             rc = CLI.main(["nscheck"])
         self.assertEqual(rc, 0)
         self.assertEqual(CLI._NAMESPACE.get("marker"), 42)
-        CLI._NAMESPACE.clear()
 
     def test_shared_ns_across_plugins(self):
         """Shared mapping keeps values across plugin runs (same process)."""
-        tmp = tempfile.mkdtemp()
-        put = os.path.join(tmp, "put.py")
-        get = os.path.join(tmp, "get.py")
-        with open(put, "w", encoding="utf-8") as fh:
-            fh.write("globals()['__ns__']['v'] = 'shared'\n")
-        with open(get, "w", encoding="utf-8") as fh:
-            fh.write("import sys\n"
-                     "sys.stdout.write(str(globals()['__ns__'].get('v')))\n")
+        import contextlib
+        import io
+        put = self._make_plugin("globals()['__ns__']['v'] = 'shared'\n",
+                                name="put")
+        get = self._make_plugin(
+            "import sys\n"
+            "sys.stdout.write(str(globals()['__ns__'].get('v')))\n",
+            name="get")
         with mock.patch.object(CLI, "plugin_path",
                                return_value=put):
             rc = CLI.main(["put"])
         self.assertEqual(rc, 0)
-        CLI._NAMESPACE["v"] = "shared"
+        buf = io.StringIO()
         with mock.patch.object(CLI, "plugin_path",
-                               return_value=get):
+                               return_value=get), \
+                contextlib.redirect_stdout(buf):
             rc = CLI.main(["get"])
         self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), "shared")
 
 
-class TestPlugins(unittest.TestCase):
+class TestPlugins(ShellTestCase):
     """shell_tool/__init__: lazy import + file-scan plugin listing."""
 
     def test_list_plugins_file_scan(self):
@@ -601,20 +683,32 @@ class TestPlugins(unittest.TestCase):
         plugins = list_plugins()
         for name in ("shell", "version", "batch", "helps"):
             self.assertIn(name, plugins)
+        self.assertNotIn("value", plugins)  # helper module, not a command
 
     def test_load_plugin_lazy(self):
         from cos_comparison.shell_tool import load_plugin
         mod = load_plugin("batch")
         self.assertEqual(mod.__name__.rsplit(".", 1)[-1], "batch")
 
+    def test_is_command_rejects_undecodable_file(self):
+        from cos_comparison.shell_tool import _is_command
+        fd, path = tempfile.mkstemp(suffix=".py")
+        os.write(fd, b"\xff\xfe\x00if __name__ == '__main__':")
+        os.close(fd)
+        try:
+            self.assertFalse(_is_command(path))
+        finally:
+            os.unlink(path)
 
-class TestHelps(unittest.TestCase):
+
+class TestHelps(ShellTestCase):
     """helps plugin: pydoc documentation viewer (extensible/plugin)."""
 
     def test_helps_module(self):
         from cos_comparison.shell_tool.helps import run
         out = run(["math"])
         self.assertIn("math", out)
+        self.assertNotIn("error:", out)
 
     def test_helps_unknown(self):
         from cos_comparison.shell_tool.helps import run
@@ -625,8 +719,32 @@ class TestHelps(unittest.TestCase):
         from cos_comparison.shell_tool.helps import run
         self.assertIn("usage", run([]))
 
+    def test_helps_member_name(self):
+        from cos_comparison.shell_tool.helps import run
+        out = run(["math", "sqrt"])
+        self.assertIn("sqrt", out)
 
-class TestBatch(unittest.TestCase):
+    def test_helps_shell_namespace_alias(self):
+        # a module registered in the shell namespace renders through the
+        # injected __ns__ mapping (reachability documented for helps)
+        import contextlib
+        import io
+        import math as _math
+        from cos_comparison import __main__ as CLI
+        ns = CLI._NAMESPACE
+        ns.setdefault("modules", {})["helps_alias"] = _math
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = CLI.run_command("helps", ["helps_alias"])
+        finally:
+            ns.get("modules", {}).pop("helps_alias", None)
+            CLI._NAMESPACE.clear()
+        self.assertEqual(rc, 0)
+        self.assertIn("math", buf.getvalue())
+
+
+class TestBatch(ShellTestCase):
     """batch plugin: independent batch execution (shell principle, own
     data region, no shared stack, no app dependency)."""
 
@@ -655,7 +773,7 @@ class TestBatch(unittest.TestCase):
     def test_batch_result_position(self):
         from cos_comparison.shell_tool.batch import run_batch
         data, _stats = run_batch([
-            "cos (1 0) (1 0) -> 7",
+            "cos (1, 0) (1, 0) -> 7",
         ])
         self.assertIn(7, data)
         self.assertEqual(data[7], 1.0)
@@ -670,6 +788,11 @@ class TestBatch(unittest.TestCase):
         ])
         self.assertEqual(stats["run"], 2)
         self.assertEqual(data, {0: 2.0})
+
+    def test_arrow_inside_quotes_is_verbatim(self):
+        from cos_comparison.shell_tool.batch import run_batch
+        data, _stats = run_batch(['let x "a->b"', "str data[0] -> 0"])
+        self.assertEqual(data[0], "a->b")
 
     def test_batch_first_interrupt_continues(self):
         # first interrupt does not terminate the subprogram (it may have its own interrupt handler):
@@ -692,6 +815,24 @@ class TestBatch(unittest.TestCase):
         SH.register_callable("kb_cmd", kb_cmd)
         with self.assertRaises(KeyboardInterrupt):
             run_batch(["kb_cmd", "kb_cmd"])
+
+    def test_batch_loop_interrupt_finalizes_result(self):
+        # a force-unwound loop still completes its result position / stats
+        # (like a normal loop completion), per the documented policy
+        from cos_comparison.shell_tool import shell as SH
+        from cos_comparison.shell_tool.batch import run_batch
+
+        def kb_body():
+            raise KeyboardInterrupt()
+
+        SH.register_callable("always_true", lambda: True)
+        SH.register_callable("kb_body", kb_body)
+        try:
+            data, stats = run_batch(["WHILE always_true", "kb_body", "END"])
+        finally:
+            SH.ns_delete(["always_true", "kb_body"])
+        self.assertEqual(data[0], 0)          # completed iterations
+        self.assertTrue(stats["interrupt"])
 
     def test_batch_interrupt_not_accumulated(self):
         # interrupts do not accumulate persistently: outside the window (interrupt_window=0.0) they reset —
@@ -723,13 +864,13 @@ class TestBatch(unittest.TestCase):
             run_batch(IdleKb())
 
 
-class TestUnifiedInstructions(unittest.TestCase):
+class TestUnifiedInstructions(ShellTestCase):
     """Unified instruction-file protocol: app / shell(run) / batch read the same format and uniformly use
     functional imperative control (IF/WHILE instruction functions + operation-flow function calls) —
     behaviour is consistent."""
 
     TEXT = (
-        "core.add_chain (0) -> 0\n"
+        "core.add_chain (0,) -> 0\n"
         "WHILE lt3 data[0]\n"
         "    bump data[0] -> 0\n"
         "END\n"
@@ -775,11 +916,11 @@ class TestUnifiedInstructions(unittest.TestCase):
     def test_batch_control_flow_blocks(self):
         from cos_comparison.shell_tool.batch import run_batch
         data, _ = run_batch([
-            "core.add_chain (1 1) -> 0",
-            "IF core.add_chain (1 1)",
-            "    core.add_chain (1 2) -> 1",
+            "core.add_chain (1, 1) -> 0",
+            "IF core.add_chain (1, 1)",
+            "    core.add_chain (1, 2) -> 1",
             "ELSE",
-            "    core.add_chain (9 9) -> 1",
+            "    core.add_chain (9, 9) -> 1",
             "END",
         ])
         self.assertEqual(data, {0: 2, 1: 3})
@@ -789,7 +930,7 @@ class TestUnifiedInstructions(unittest.TestCase):
         os.close(fd)
         try:
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write("core.add_chain (1 2) -> 0\n")
+                fh.write("core.add_chain (1, 2) -> 0\n")
             result = SH.run_shell(["run", path])
             self.assertIn("1 instructions", result)
         finally:
@@ -816,23 +957,21 @@ class TestUnifiedInstructions(unittest.TestCase):
     def test_batch_cli_file(self):
         import subprocess
         tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         path = os.path.join(tmp, "flow.txt")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("import_module math\n"
                      "math.sqrt 25.0 -> 0\n")
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [os.path.dirname(os.path.abspath(__file__)),
-             env.get("PYTHONPATH", "")])
         p = subprocess.run(
             [sys.executable, "-m", "cos_comparison", "batch", path],
-            capture_output=True, text=True, env=env, timeout=60,
-            check=False)
+            capture_output=True, text=True, env=testutil.clean_env(),
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            timeout=60, check=False)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("imported math", p.stdout)
 
 
-class TestNoHardcodedPackageName(unittest.TestCase):
+class TestNoHardcodedPackageName(ShellTestCase):
     """shell_tool scripts must not hard-code the package name."""
 
     def test_shell_tool_no_package_name(self):

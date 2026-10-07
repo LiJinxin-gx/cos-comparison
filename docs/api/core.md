@@ -1,6 +1,6 @@
 # Core Module
 
-`cos_comparison.core` provides all core functionality regardless of backend. Current version: **0.4.3**
+`cos_comparison.core` provides all core functionality regardless of backend. Current version: **0.5.3**
 
 ```python
 from cos_comparison import core as cc
@@ -51,6 +51,16 @@ Flattens both tensors, accumulates `Σa²`, `Σb²`, `Σab`, applies algorithm. 
 
 All share signature `func(a, b, ab, name)` where `a`/`b` are sums of squares, `ab` is dot product.
 
+`cos_comparison_active` / `cos_comparison_passive` additionally accept two
+temporary keywords: `use_namespace=False` skips the callback-namespace
+creation entirely (pure algorithms / GPU-style contexts — the callbacks
+then receive `None` as their namespace argument), and
+`namespace_hook=callable` replaces the creation factory (default
+`func_name_space`; the core fills the namespace once via a single
+`hook(**fill_kwargs)` call).  `func_name_space` supports the full mapping
+protocol: `**ns` unpacking, `dict(ns)`, `keys()`, `len`, iteration
+(missing keys raise `KeyError`).
+
 → [Similarity Measures](../principles/similarity-measures.md)
 
 ### Utility Functions
@@ -62,7 +72,7 @@ All share signature `func(a, b, ab, name)` where `a`/`b` are sums of squares, `a
 | `create_void_list(length_list=(1,), default=0.0)` | Create tensor filled with default value |
 | `load_as_default_data(data, start=None, shape=None, step=None)` | Load data/sub-region into default tensor type |
 | `load_data(source, target, *, source_start=None, source_step=None, shape=None, target_start=None, target_step=None)` | Bulk-copy region between containers; returns elements copied |
-| `infer_shape(data)` | Infer shape: PyBuffer → `__shape__` → iterative `len()`; `None` if uninferable |
+| `infer_shape(data)` | Infer shape: PyBuffer → `__shape__` → iterative `len()` (text / mappings are values); `None` if uninferable |
 | `get_item(obj, index)` / `set_item(obj, index, value)` | Multi-dimensional indexing (protocol-aware) |
 | `data_filter(data, callback, *, start=None, shape=None, step=None, origin=None, basis=None)` | Yield positions whose `callback(value)` is truthy |
 | `data_mapping(data, callback, *, start=None, shape=None, step=None, out=None, out_start=None, out_step=None)` | Map sampled elements through callback into output |
@@ -70,27 +80,41 @@ All share signature `func(a, b, ab, name)` where `a`/`b` are sums of squares, `a
 | `threshold_map(data, pairs, *, default_value=0.0, **region)` | First truthy `(func, value)` pair selects value; `default_value` fallback |
 | `threshold_judge(low=None, high=None, *, inclusive=(True,True))` | Judge factory: `1` in range / `0` out; pairs with `threshold_map` |
 | `vector_chain_compute(A)` | Chained dot products → `(compute, fix, get)` closures |
+| `elementwise(*tensors, func, output)` | Element-wise operation over tensors; `func(x1, x2, ...)` per position; returns status 0 |
+| `elementwise_position(output, *tensors, callback, ...)` | Multi-tensor element callback by position: `callback([values], logical_coord)` |
+| `position_map(output, callback, ...)` | Position-driven element callback: `output[real] = callback(logical_coord)` |
 | `no_done(*arg, **kwarg)` | No-op placeholder |
 
 **Utility details:**
 
 - **`create_void_list`** returns a `vector_map_as_tensor` with shape `length_list` filled with `default`.
-- **`load_as_default_data`** infers shape, validates `start`/`shape` (raises `ValueError` on mismatch or out-of-bounds), flattens the requested region into a new tensor.
+- **`load_as_default_data`** infers shape, validates `start`/`shape` (raises `ValueError` on mismatch or out-of-bounds), flattens the requested region into a new tensor; a zero-element `shape` yields an empty tensor (`shape` preserved).
 - **`load_data`** copies a sub-region from `source` into `target`. `shape` is the upper bound per dimension; effective size clipped to what both containers can hold (out-of-bounds silently truncated). Each side attempts PyBuffer first (read/write probed independently with persistence re-export check); falls back to `get_item`/`set_item` loop. Returns total elements actually copied. Iterative only.
-- **`infer_shape`** priority: PyBuffer protocol → `__shape__` attribute → iterative `len()` detection.
+- **`infer_shape`** priority: PyBuffer protocol → `__shape__` attribute → iterative `len()` detection.  Text and mappings are treated as values (the walk stops and returns `None` for a bare string / dict).
 - **`vector_chain_compute(A)`** returns `compute(vector)` (tuple of dot products against rows of `A`), `fix(new)` (replaces `A`), `get()` (returns current `A`).
 - **`get_item`/`set_item`** honor `__get_item__`/`__set_item__` protocol when present, otherwise normal indexing — allows custom tensors to hook into core loops.
 - **`data_filter`** walks a sampled read region and yields the multi-dimensional position of every element whose `callback(value)` is truthy. Reported position = `origin + basis * local` (defaults: global read position). Callbacks stateless (value only); errors silently skipped. Iterative odometer walk.
 - **`data_mapping`** applies `callback(value)` to every sampled element, writes result to output at `out_start + out_step * local` (out-of-bounds clipped). `out` pre-allocated or default-allocated (fresh tensor shaped like read region); returns output. Errors silently skipped.
 - **`threshold_filter`/`threshold_map`** instantiate the above. `threshold_map` iterates `(func, value)` pairs per element — first truthy selects its value, else `default_value`. `threshold_judge` returns a judge function (`1` in range / `0` out) designed to pair with `threshold_map`, e.g. `threshold_map(data, [(threshold_judge(low=3, high=7), 2.0), (lambda v: True, 3.0)])`.
+- **`elementwise(*tensors, func, output)`** applies `func(x1, x2, ...)` at every position across all tensors, writing into `output` (same shape required). `func` and `output` are both required; shapes must match exactly; callback errors propagate. Supports any duck-typed tensor with `get_item`/`set_item`/`infer_shape`. Iterative, never recursive. Returns status code `0` on success.
+- **`elementwise_position(output, *tensors, callback, start=None, shape=None, step=None, origin=None, scale=None)`** is the position-aware variant: `callback([t[real] for t in tensors], logical)` where `logical = real * scale - origin`. Useful for coordinate-dependent transforms (e.g. spatial filtering, position-based weighting). Callback errors silently skipped. Returns status code `0`.
+- **`position_map(output, callback, start=None, shape=None, step=None, origin=None, scale=None)`** writes `output[real] = callback(logical)` for every position in the read region. Single-tensor position mapping; useful for generating coordinate patterns (grids, radial masks, positional encodings). Returns status code `0`.
+- **`pool(data, window_size=None, func=None, step=None, start=None, end=None, output=None, iterate=None)`** (v0.5.2) sliding-window pooling: every valid window of `data` reduces to one output element, `output[i] = func(*values)` reading the window at `start + step*i` (windows may overlap when `step < window_size`, tile exactly when equal, or be spaced apart when larger; trailing windows that would cross `end` are dropped and `end` must not exceed the data shape). The window values are passed in row-major order (`func=None` = mean; any N-D; `window_size` defaults to all ones; `output` is required and must have the window-count shape). Elementwise-style interface: errors raise `ValueError`/`TypeError` (no callback family), success returns `0`; `iterate=` runs the work through the injected element engine.
+- **`iterate` (v0.5.0)** — the element-wise functions (`data_filter`, `data_mapping`, `elementwise`, `elementwise_position`, `position_map`, `pool`, `threshold_*`) and the B-class functions accept an optional external-engine slot: `iterate(engine_kernel, **index_info)` resolves the position parameters and calls `kernel(index, **params)`; with `None` (default) the original inline skeleton runs. See [Common Parameters](#common-parameters) and [External Engines](../architecture/backend-system.md#external-engines-iterate-injection-v050).
 
 ### Backend Management
 
 | Function | Description |
 |----------|-------------|
-| `get_mode()` | Enabled backends in priority order (immutable tuple) |
-| `get_available_backends()` | All configured backends including disabled |
+| `get_mode()` | Configured backends in priority order (immutable tuple; the first one that loaded is active) |
+| `get_available_backends()` | All configured call names |
+| `get_active_backend()` | Call name of the backend actually loaded (`None` before loading) |
 | `set_mode(backend)` | Force specific backend(s) |
+
+Environment (v0.5.3): an automatic fallback to the pure Python backend
+emits a one-time `RuntimeWarning` (silence with
+`COS_COMPARISON_SILENT_FALLBACK=1`); `COS_COMPARISON_REQUIRE_C=1` makes
+a missing C backend a hard `ImportError` (packaging / CI strict mode).
 
 > `cos_comparison.core` hot-injects the full public API of the active
 > backend into the module namespace (zero-overhead access); `__all__`
@@ -115,18 +139,27 @@ All share signature `func(a, b, ab, name)` where `a`/`b` are sums of squares, `a
 | `data` | nested list / tensor | required | Input; 1D–ND; must be regular; duck-typed `__get_item__` supported |
 | `window_size` | tuple of ints | all ones | Comparison window size; length matches data dimension |
 | `kernel` | nested list / tensor | required (active) | Template; same dimensionality as data; determines window size; `ValueError` if `None` |
-| `start` / `end` | tuple of ints | 0 / full shape | Computation region; `end` is exclusive |
-| `step` | tuple of ints | all ones | Sliding-window step; larger = fewer points = faster |
-| `d` | tuple of ints | `(1,0,0,...)` | Passive only: displacement between comparison windows |
+| `start` / `end` | tuple of ints | 0 / full shape | Computation region; `end` is exclusive and must not exceed the data shape; `start` non-negative (both enforced with `ValueError`) |
+| `step` | tuple of ints | all ones | Sliding-window step; larger = fewer points = faster (must be positive) |
+| `d` | tuple of ints | `(1,0,0,...)` | Passive only: displacement between comparison windows; both windows must stay inside the data (`start + d ≥ 0`, `end - d ≤ shape`, `ValueError` otherwise) |
 | `algorithm` | function | `_cosmod` | Similarity function; custom signature `def algo(a, b, ab, name)` |
-| `w1`/`w2`/`b1`/`b2` | number | 1/1/0/0 | Linear transform: `w*value + b` for each comparison region |
 | `output` | tensor | `None` | Pre-allocated output container (creates new if `None`) |
-| `output_start` / `output_step` | tuple of ints | 0 / 1 | Output region placement |
+| `output_start` / `output_step` | tuple of ints | 0 / 1 | Output region placement (non-negative / positive); a non-zero `output_start` requires an explicit `output` (`ValueError` otherwise) |
+| `iterate` | callable | `None` | Optional external engine `engine(kernel, **index_info)` (v0.5.0): resolves the position parameters and hands the index plus the kernel parameters to `kernel(index, **params)`; with `None` the original inline skeleton runs (zero regression) |
+| `transform1` / `transform2` | callable | `None` | Per-value maps replacing the retired linear transform: `transform1(value) → new_value` applied to each read of the first comparison window (passive `main` / active data window), `transform2(...)` to the second (passive `other = main + d` / active kernel template); `None` = identity (bit-identical default) |
 | `start_callback` | function | `None` | Called before computation: `callback(name_space)` |
 | `end_callback` | function | `None` | Called after computation: `callback(name_space)` |
 | `global_error_callback` | function | `None` | Called on outer-loop errors: `callback(error, name_space)` |
 | `local_error_callback` | function | `None` | Called on inner-loop errors: `callback(error, name_space)`; may impact performance |
 | `return_callback` | function | identity | Wraps return value: `callback(output, name_space) → wrapped` |
+
+> **v0.5.0 interface cleanup:** the historical `w1`/`w2`/`b1`/`b2`
+> parameters and the `iter_a_callback`/`iter_b_callback` hooks were
+> removed; legacy keyword arguments are still accepted silently (absorbed
+> by the pure Python side, parsed and ignored by the C side).  The
+> linear transform is replaced by the extensible `transform1`/
+> `transform2` callables (not limited to `w*x+b`), and the `name_space`
+> no longer carries a `linear` field.
 
 ---
 
@@ -184,7 +217,7 @@ t[0] = 99.0       # buf[0] becomes 99.0 (shared storage)
 
 Namespace container for function parameters passed to callbacks and custom algorithms.
 
-**Slots:** `output`, `output_start`, `output_step`, `window_size`, `kernel`, `linear`, `start`, `end`, `d`, `step`, `algorithm`, `num`
+**Slots:** `output`, `output_start`, `output_step`, `window_size`, `kernel`, `start`, `end`, `d`, `step`, `algorithm`, `num`
 
 ### default_contain
 
@@ -203,7 +236,7 @@ c[5]        # 2.0
 
 ```python
 import cos_comparison
-cos_comparison.__version__  # "0.4.3"
+cos_comparison.__version__  # "0.5.3"
 ```
 
 > `cos_comparison.core` does not define `__version__`; read from the top-level package.

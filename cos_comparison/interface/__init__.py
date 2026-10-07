@@ -1,5 +1,5 @@
 """
-the module aim to provide abstraction of the External Interface.
+Abstraction of the external interface.
 """
 
 from . import api

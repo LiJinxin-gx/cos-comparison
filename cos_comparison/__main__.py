@@ -1,10 +1,10 @@
 """
 Command-line entry: directory-searched plugins executed via runpy.
 
-No registration: a root command names a file under shell_tool/ (the file
-name is the command name); plugins run via runpy with a shared mapping
-injected as __ns__.  KeyboardInterrupt breaks the command; other errors
-are intercepted.
+No registration: a root command names a command script under shell_tool/
+(a .py file with a __main__ entry guard; the file name is the command
+name); plugins run via runpy with a shared mapping injected as __ns__.
+KeyboardInterrupt breaks the command; other errors are intercepted.
 
 Interactive call page (python -m cos_comparison): >>> executes commands,
 ... shows nested execution (e.g. the shell command line); help / exit.
@@ -13,22 +13,32 @@ import os
 import runpy
 import sys
 
+from .shell_tool import _is_command
+
 _PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "shell_tool")
 _NAMESPACE = {}
 
 _PROMPT = ">>> "
-_PROMPT_NESTED = "... "
 
 
 def plugin_path(name):
+    """Command-script path for ``name``; None when unknown.  The name must
+    be a plain file name (no path components), so a command can never
+    escape the plugin directory; helper modules without a ``__main__``
+    entry guard are not commands."""
+    if not name or os.path.basename(name) != name or name.startswith("."):
+        return None
     path = os.path.join(_PLUGIN_DIR, name + ".py")
-    return path if os.path.isfile(path) else None
+    if os.path.isfile(path) and _is_command(path):
+        return path
+    return None
 
 
 def list_commands():
     return sorted(f[:-3] for f in os.listdir(_PLUGIN_DIR)
-                  if f.endswith(".py") and not f.startswith("_"))
+                  if f.endswith(".py") and not f.startswith("_")
+                  and _is_command(os.path.join(_PLUGIN_DIR, f)))
 
 
 def usage(stream=None):
@@ -53,10 +63,10 @@ def help_text(stream=None):
 
 def run_command(name, args=None):
     """Run a plugin directly via runpy; return the exit code.  The plugin
-    runs with run_name="__main__" and a shared __ns__ mapping; arguments
-    are passed through sys.argv only when given (interactive call page).
-    KeyboardInterrupt breaks the command; other exceptions are
-    intercepted."""
+    runs with run_name="__main__" and a shared __ns__ mapping; argv is the
+    CLI form (argv[1] = command name, plugins read argv[2:]).  The page is
+    never killed: KeyboardInterrupt breaks the command, SystemExit is
+    translated to its exit code.  Other exceptions are intercepted."""
     path = plugin_path(name)
     if path is None:
         print("unknown command: " + name)
@@ -70,10 +80,8 @@ def run_command(name, args=None):
         pass
     old_argv = sys.argv
     try:
-        if args:
-            # argv[1] is the command name (plugins read argv[2:]), matching
-            # the command line form: python -m cos_comparison <cmd> [args...]
-            sys.argv = [path, name] + list(args)
+        # always expose the CLI argv shape, bare commands included
+        sys.argv = [path, name] + (list(args) if args else [])
         try:
             runpy.run_path(path, init_globals={"__ns__": _NAMESPACE},
                            run_name="__main__")
@@ -81,22 +89,21 @@ def run_command(name, args=None):
             print("interrupted")
             return 130
         except SystemExit as se:
-            # plugins may call sys.exit(); do not kill the interactive page
-            code = se.code if isinstance(se.code, int) else 0
-            return code
+            # mirror Python exit semantics without killing the page:
+            # None -> 0; int -> that code; message -> stderr + 1
+            code = se.code
+            if code is None:
+                return 0
+            if isinstance(code, int):
+                return code
+            print(code, file=sys.stderr)
+            return 1
         except Exception as exc:  # noqa: BLE001 - intentional interception
             print("error: " + type(exc).__name__ + ": " + str(exc))
             return 1
     finally:
         sys.argv = old_argv
     return 0
-
-
-def _shell_repl():
-    """Nested command line operation of the shell command (prompt: ...);
-    exit/quit/q returns to the outer call page (>>>)."""
-    from cos_comparison.shell_tool.shell import repl as _shell_repl_run
-    return _shell_repl_run(prompt=_PROMPT_NESTED)
 
 
 def _interactive():
@@ -118,11 +125,8 @@ def _interactive():
             continue
         parts = line.split(None, 1)
         name = parts[0]
-        if name == "shell" and len(parts) == 1:
-            _shell_repl()
-            continue
         if len(parts) > 1:
-            from cos_comparison.shell_tool.shell import _split_words
+            from .shell_tool.shell import _split_words
             args = _split_words(parts[1])
         else:
             args = None

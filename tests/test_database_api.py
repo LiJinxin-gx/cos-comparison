@@ -1,8 +1,7 @@
-"""Tests for the split design: DatabaseToolWrap is a database MODULE tool
-abstraction (delegation, default getattr(tool, name)); DatabaseMemory
-wraps the storage procedure around one connector and transcribes
-Connection object methods through delegation functions passed in at
-__init__ (connector as first argument)."""
+"""Split design: DatabaseToolWrap abstracts a database MODULE tool
+(delegation, default getattr(tool, name)); DatabaseMemory wraps one
+connector, transcribing Connection methods via __init__-injected
+delegation functions (connector as first argument)."""
 
 import sqlite3
 import unittest
@@ -27,7 +26,11 @@ class TestToolWrapModuleAbstraction(unittest.TestCase):
 
     def test_connect_default_calls_getattr(self):
         wrap = DatabaseToolWrap()
-        self.assertEqual(wrap.connect_func(":memory:").total_changes, 0)
+        conn = wrap.connect_func(":memory:")
+        try:
+            self.assertEqual(conn.total_changes, 0)
+        finally:
+            conn.close()
         wrap.connect(":memory:").close()
 
     def test_custom_connect_func(self):
@@ -75,8 +78,10 @@ class TestDatabaseMemoryConnector(unittest.TestCase):
         self.assertIs(self.mem.memory, self.mem.connector)
 
     def test_connect_method_switches_connector(self):
+        old = self.mem.connector
         conn = self.mem.connect(":memory:")
         self.assertIs(conn, self.mem.connector)
+        old.close()
 
     def test_cursor_transcription(self):
         cur = self.mem.cursor()
@@ -126,8 +131,11 @@ class TestDatabaseMemoryConnector(unittest.TestCase):
 
     def test_rollback_delegation(self):
         mem = DatabaseMemory()
-        mem.execute("CREATE TABLE t (a INTEGER)")
-        self.assertIsNone(mem.rollback())
+        try:
+            mem.execute("CREATE TABLE t (a INTEGER)")
+            self.assertIsNone(mem.rollback())
+        finally:
+            mem.close()
 
 
 class TestDatabaseMemoryPEP249Surface(unittest.TestCase):

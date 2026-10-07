@@ -1,8 +1,5 @@
-"""
-Tests for interface.tools.func_tool: ComposalFunction (stack-shared
-composition), FuncHelper (stdlib helper slots), FuncWrap.
-Stdlib only, non-GUI.
-"""
+"""func_tool tests: ComposalFunction (stack-shared composition),
+FuncHelper (stdlib helper slots), FuncWrap.  Stdlib only, non-GUI."""
 
 import functools
 import unittest

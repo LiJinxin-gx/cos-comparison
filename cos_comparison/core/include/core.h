@@ -9,34 +9,40 @@
 typedef struct {
     PyObject *local_error_callback;
     PyObject *name_space;
+    PyObject *algorithm;  /* direct callable algorithm (works without a
+                             namespace - use_namespace=False) */
 } CallbackContext;
 
-static inline double _cos_(double a, double b, double ab, CallbackContext *ctx) {
+static inline double cos_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
     double c = a * b;
     if (c) return ab / sqrt(c);
     return (a == b) ? 1.0 : 0.0;
 }
 
-static inline double _mod_(double a, double b, double ab, CallbackContext *ctx) {
+static inline double mod_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
+    (void)ab;
     double c = a * b;
     if (c) return 2 * sqrt(c) / (a + b);
     return (a == b) ? 1.0 : 0.0;
 }
 
-static inline double _cosmod_(double a, double b, double ab, CallbackContext *ctx) {
+static inline double cosmod_(double a, double b, double ab, CallbackContext *ctx) {
+    (void)ctx;
     double c = a * b;
     if (c) return 2 * ab / (a + b);
     return (a == b) ? 1.0 : 0.0;
 }
 
-static inline double _convolution_(double a, double b, double ab, CallbackContext *ctx) {
+static inline double convolution_(double a, double b, double ab, CallbackContext *ctx) {
     (void)a; (void)b; (void)ctx;
     return ab;
 }
 
 typedef double (*algo_fn)(double, double, double, CallbackContext*);
 
-static inline Data* _compute_output_shape(int dim, const int num[],
+static inline Data* compute_output_shape(int dim, const int num[],
                                           const int output_start[], const int output_step[]) {
     (void)output_start; /* output always starts at 0 when created by core */
     int *out_shape = (int*)malloc((size_t)(dim) * sizeof(int));
@@ -55,7 +61,7 @@ static inline Data* _compute_output_shape(int dim, const int num[],
 }
 
 /* Helper: write value to arbitrary nested Python object (iterative, no stack overflow, uses generic object protocol with __set_item__ fast path) */
-static inline void _py_set_item(PyObject *obj, const int idx[], int dim, int depth, double value) {
+static inline void py_set_item_value(PyObject *obj, const int idx[], int dim, int depth, double value) {
     (void)depth;
     if (dim == 0) return;
     /* Fast path: check for __set_item__ method (takes index tuple and value) */

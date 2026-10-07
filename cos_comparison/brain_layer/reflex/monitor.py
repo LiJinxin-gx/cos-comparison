@@ -1,6 +1,6 @@
-# Monitoring logic only: probe truthiness, callback triggering, hit/error
-# bookkeeping, rule lifetime. Mechanisms (async scheduling, threads, locks)
-# come from interface (EventLoop / run_in_thread / parallel_lock).
+# Monitoring logic only: probe evaluation, callback triggering, hit/error
+# bookkeeping, rule lifetime.  Mechanisms (scheduling, threads, locks) come
+# from interface (EventLoop / run_in_thread / parallel_lock).
 
 import inspect
 
@@ -26,7 +26,7 @@ def _make_worker(state, record):
 
     async def worker():
         # read under parallel_lock: a worker starting right after schedule()
-        # must never observe the unbound (None) handle
+        # must not observe the unbound (None) handle
         with parallel_lock:
             handle = state["handle"]
         hit = False

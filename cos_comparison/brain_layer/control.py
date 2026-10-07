@@ -214,6 +214,11 @@ class ControlFlowDriver(Control):
 
     def __setitem__(self, index, value):
         if isinstance(index, tuple):
+            if len(index) == 1:
+                # a one-element tuple indexes like the scalar key
+                # (matching __getitem__)
+                self.slots[index[0]] = value
+                return
             target = self.slots[index[0]]
             for key in index[1:-1]:
                 target = target[key]

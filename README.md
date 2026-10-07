@@ -1,4 +1,4 @@
-# Cos Comparison
+﻿# Cos Comparison
 
 [![PyPI version](https://badge.fury.io/py/cos-comparison.svg)](https://pypi.org/project/cos-comparison/)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -28,76 +28,59 @@ Three similarity measures, selected via the `algorithm` parameter:
 
 ### Key Features
 
-- **No training, no labels, no backpropagation** — a step toward biologically plausible AGI
+- **No training, no labels, no backpropagation** — biologically plausible AGI direction
 - Works on **1D–4D** data (audio, images, video, volumetric data)
 - **Passive** (reflexive boundary detection) and **active** (template matching) modes
-- Three high-performance backends with automatic fallback: C extension, ctypes C, pure Python
+- Two high-performance backends with automatic fallback: C extension, pure Python
+- Free-threaded (no-GIL) C extensions on Python 3.13+ (core backend and math_tool), with a reliable fallback on older interpreters
 - Cross-platform (Windows, Linux, macOS) and **zero external dependencies**
 - Callback system for progress tracking and custom I/O; flexible output into pre-allocated tensors
 - Duck-typed indices: any `__index__`-capable object accepted
-- **Unified command line**: shell / batch / app share one instruction file protocol
+- **Unified instruction protocol**: shell / batch / app share one instruction file format
+- **External command execution**: `sh` plugin (system shell, interactive command line)
 - **Dimension-generic linear algebra**: duck typed, `output` keyword pass-out, identical Python / C behaviour
+- **Proactive plugin hosting** (`extension_layer.plugin`): `PluginPool` batch aggregation
 
 ---
 
 ## What's New
 
-### v0.4.4 — Exploration Test Suite & Behavior-Driven Frameworks
+### v0.5.3 — ABI-Migration Prerequisites, Layer Audits & Low-Version Builds
 
-**Exploration & Learning:**
-- Exploration test suite: face/digits/captcha/image tasks, NLP clustering, data generation, autonomous Agent, GUI viewers
-- Video abstraction & generation: L0–L3 hierarchy, prototypes and contrast points in SQLite; +20.2% generation improvement
-- Agent web-search knowledge base: 118 chemical elements and 188 ISO 639 languages stored with provenance
-- Continuous-mapping hierarchical-isolation memory: layered abstract memory with two-way layer driving
+- **Free-threading / static-state cleanup** — removed the process-global `g_module` from the C core and the `la_clip` global bounds in `_linear_algebra` (clip bounds now travel through the callback context); `UnitMap` / `Graph` / `DirectedGraph` gained full GC support (`Py_TPFLAGS_HAVE_GC`, traverse/clear, dealloc untrack)
+- **Build / backends** — the `Py_mod_gil` slots in all five C units now use feature detection (`#if defined(Py_mod_gil) && defined(Py_MOD_GIL_NOT_USED)`), so limited-API builds on 3.13/3.14 headers compile; `core.get_active_backend()` reports the loaded backend, the automatic pure-Python fallback emits a one-time `RuntimeWarning`, and `COS_COMPARISON_REQUIRE_C=1` enforces a hard error for packaging / CI
+- **Upper-layer semantic audit** — six audit rounds with probe-reproduced fixes across the cognitive layers and tooling: core-consistent read-region semantics in `sense_layer` / `generate_layer` (sample-count shape, clipping, N-D output scatter, documented status codes), `DataWrap` on the core item protocol, falsy-callable delegation and duck streams in `memory_layer` / `interface`, exactly-N `DefaultParallel` and duck `load_array`, iterator fixes (`IterWindow` beyond-size steps, empty-source `iter_cycle` spin, `IterWrap.next_func`, `iter_batch` validation), `ExecuterDriver.call_all` argument forwarding, `Monitor.maintain`, interrupt-policy result finalization in the instruction executor, and the CLI fixes (shared `__ns__` namespace, command-name validation with `__main__`-guard classification, Python `SystemExit` semantics, bare-`shell` command line)
+- **Low-version builds** — build-system floor back to `setuptools>=61` with classic license metadata, package discovery solely from `pyproject.toml`, open C-family / platform extension globs in `package-data` + `MANIFEST.in`, per-extension retry without compiler standard flags, and Python 3.8 C-API shims (`PyObject_CallNoArgs`, `Py_NewRef`) plus the portable unused-parameter idiom — Python 3.8.10 + setuptools 61 now builds all five C extensions
+- **Test-suite audit** — deep audit of every `tests/` module: per-test restore of the global shell/CLI namespace and interrupt window, backend save/restore with optional-C skips, sanitised subprocess environments (no `PYTHONPATH` leakage), a real terminate-flag test, deterministic `DefaultParallel` coordinate assertions, lifecycle cleanups (probes / sqlite / pipes / temp dirs), BOM removal and compiled-vs-pure `test_topology` parity coverage; the suite is stdlib + package only and runs unchanged from a temporary directory (the optional numpy test self-skips)
+- **Verification** — full suite **1021 tests green** on 3.14 GIL, 3.14 free-threaded and Python 3.8 (C backend active in all three); MSVC `/Wall /WX` clean with 3.14 and 3.8 headers; WSL GCC 15.2 `-pedantic-errors` pass; wheel/sdist file parity and the reliable pure-Python fallback re-verified; final packaging matrix: the sdist rebuilds and installs in isolated venvs on CPython 3.8–3.14 and 3.14t (five extensions each, full suite, clean `pip uninstall`, cross-version wheels rejected)
 
-**Behavior & Agent Frameworks:**
-- Behavior-composition memory Agent: von Neumann structure — behaviors as data in DB, fetch→decode→reflect-execute→write-back
-- Generic executor: atomic instructions stored in DB, fixed code runs multi-logic; `$N` result references; plugin-style reflection
-- Von-Neumann instructionized web surf: BEHAVE/REFLECT/CORRECT instructions; composite accuracy 86/100
-- Feedback-driven search: derive queries from stored data, accuracy 90/100
+### v0.5.2 — Core Pooling & Super-Parallel Scaling
 
-**Core & Upper Layers:**
-- Element-wise filter/mapping API (all three backends): `data_filter`, `data_mapping`, `threshold_filter` / `threshold_map`
-- Logic layers: `event_context` delegated slots, relative-probability axiom system (A1–A5), `EventBinds` protocol container
-- Fourier module: generic `dft` / `idft` / `power_spectrum`, multi-dimensional, recursion-free
-- Nested control flow: flat `Sequence` / `Branch` / `Loop`; `ControlFlatten` iterative expansion
-- Action layer async execution: `ExecuterDriver.call_all` on delegated background worker
-- Core hot injection: full backend API hot-injected into `core` namespace with explicit `__all__`
+- **`core.pool`** — direct N-D sliding-window pooling (`func(*values)` row-major, `None` = mean; step controls overlap/tiling/gaps; engine-injectable), C fast path 9.5-13× pure Python
+- **Super-parallel scaling** — CPU row-shard threads 2.6-2.9× on the free-threaded build (GIL build flat by construction); OpenCL engine via `iterate=` 130-560× the C fast path
+- **`unit_map` enhancement** - eager-workflow preserving `threshold` / `length`(per-dim over `shape`) + ordered open merge (`+` / `merge_all`); lazy reverse map + fast equality (new pure-Python add -76%, peak -13%; C mirror; outputs bit-identical)
+- **math_tool protocol fixes** — duck-typing audit across the C / Python math_tool surface: numpy containers / scalars and numpy output buffers now work, numeric-protocol subclasses (`__float__`) behave identically on both backends, and the C Euler cell scan accepts one-shot iterables (was silently mis-accumulating; 100k-cell scan 2.83 → 0.88 ms)
+- **core boundary hardening** — the audit's uncatchable-error cases (8 access violations, 1 heap corruption, 1 infinite loop) now raise `ValueError` / `TypeError` instead; passive / active / pool region bounds, `Vector` span overrides and buffer shapes are validated, `infer_shape` treats text / mappings as values, and the `__cos_comparison_passive__` / `__cos_comparison_active__` reload hooks work on both backends
+- **Tests** — pool (18), core boundary (14), reload hooks (4), duck-protocol and Euler regression cases; full suite 960 tests
 
-### v0.4.3 — Robustness, Protocol-Style Delegation
+### v0.5.1 — Brain-Layer Logic Hardening
 
-- C core hardening (18 fixes): NULL checks, division protection, write-bounds checks, overflow guards
-- Element-wise API: C99-strict, shared `_resolve_read_region` core, backend-switch safe
-- Upper-layer fixes: database atomicity, process termination, deadlock elimination
-- Logic: relative-probability axioms, two-stage resolution, `EventBinds` protocol
-- Sense layer `data_match`: integrated matching-position iterator
-- `get_item` scalar-index parity across backends
+- **Rule availability & validation** — rules without `Logic.TRUE` status excluded; `Atomic_proposition` rejects mismatched args; NaN-valued Variables are reflexive
+- **Statement judge** — default judge decides correctness of full statements `(a, b[, limit[, is_true]])`; truth claims must be derivable within `limit`
+- **Event domain & bindings** — strict-chain event domain (container events expand, scalars stay whole); duck-typed bind engines for any Mapping container
+- **Value domain** — Decimal / Fraction probability chains work; `strict=` on probability functions
+- **math_tool hardening** — C topology crash scenarios fixed; `_fourier.idft` accepts complex inputs
+- **C99 & tri-compiler hardening** — five C units clean under MSVC `/Wall /WX` + GCC strict C99; GIL-safety crash cluster fixed
+- **Tests** — protocol/robustness suite (39 cases) + statement-semantics (14 cases); full suite 836 OK
 
-### v0.4.2 — Portability & Robustness
+### v0.5.0 — Backend Consolidation & Extension Points
 
-- ARM/piwheels C99 fixes; empty-input consistency; exhaustive malloc NULL checks
-- 12 memory leaks fixed; duck typing (`PyNumber_Index`); free-threaded 3.14t verified
-- Zero-copy buffer protocol; `vector_map_as_tensor(vector=None)` auto-creation
-- Buffer write-through for memoryview; C type-size/overflow hardening
-
-### v0.4.1 — Architecture Upgrade
-
-- Stride+offset indexing; `infer_shape` / `__shape__` protocol; `load_data` bulk-copy
-- Keyword-only constructors; PyBuffer zero-copy; SIMD hints; free-threaded dual binaries
-- Portable optimization macros with graceful degradation
-
-### Earlier Versions
-
-| Version | Theme | Key Highlights |
-|---------|-------|----------------|
-| **v0.3.9** | Indexing architecture | Stride+offset fancy indexing, zero-copy views, 100% recursion-free |
-| **v0.3.8** | Stability & portability | alloca-free, LSP compliance, PyBuffer format detection, free-threaded GIL release |
-| **v0.3.7** | Performance & stability | Python GC, Welford's algorithm, SIMD hints, `**` operators |
-| **v0.3.6** | API alignment | C extension constructor fix, subclass inheritance fix |
-| **v0.3.5** | Interface alignment | `__set_item__` standardization, tuple assignment fast path |
-| **v0.3.0** | Multi-backend release | C extension + ctypes, three-backend fallback, operator overloading |
-| **v0.2.0** | Tensor system | N-dimensional tensor view, sliding window, cos/mod/cosmod metrics |
-| **v0.1.0** | Initial release | Core cosine similarity, centre-surround antagonism, pure Python |
+- **Single compiled C path** — ctypes backend retired, compatibility mapping in `config.json` keeps old call names working
+- **Free-threaded support** — all C extensions declare `Py_MOD_GIL_NOT_USED` on Python 3.13+, reliable fallback on older interpreters
+- **Extensibility** — `iterate=` slot for external engines (GPU/parallel); `transform1`/`transform2` per-value maps replace linear transforms
+- **math_tool refactor** — duck-typed protocols replace hard-coded types across fourier/topology/unit_map
+- **Recursion removal** — package-wide scan confirms zero real recursion
+- **Benchmark** — OpenCL engine on Intel Arc: up to ~7300× pure Python, 257× C fast path
 
 > Full changelog available in `History.txt`.
 
@@ -111,13 +94,13 @@ Biologically inspired design mimicking mammalian brain structure. Only the core 
 
 | # | Layer | Directory | Brain Structure | Maturity | Core Function |
 |---|-------|-----------|-----------------|----------|---------------|
-| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, three-backend acceleration, free-thread support, element-wise filter/mapping |
+| 1 | Core | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, two-backend acceleration, free-thread support, element-wise filter/mapping |
 | 2 | Sense | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception, raw feature extraction, data matching |
-| 3 | Memory | `memory_layer` | Hippocampus | 🟡 Early | Short/long-term storage, continuous-mapping hierarchical isolation memory, database-backed persistence |
-| 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟡 Early | Relative-probability logic (A1–A5 axioms), symbol logic, nested control flow (Sequence/Branch/Loop), reflex feedback/monitor/trigger, context mapping |
+| 3 | Memory | `memory_layer` | Hippocampus | 🟡 Early | Short/long-term storage, IO-stream memory, database-backed persistence, protocol-based pluggable backends |
+| 4 | Brain | `brain_layer` | Prefrontal Cortex | 🟠 Beta | Relative-probability logic (A1–A5 axioms), symbol logic, nested control flow, reflex feedback/monitor/trigger, context mapping, statement judge |
 | 5 | Action | `action_layer` | Motor Cortex | 🟡 Early | Async execution driver, action result wrapping, delegated background workers |
 | 6 | Generate | `generate_layer` | Broca's / Wernicke's | 🔵 Exploratory | Template-based reverse generation, multi-modal output (validated in exploration) |
-| 7 | Extension | `extension_layer` | Association Cortex | 🔴 Skeleton | Extended capabilities (placeholder) |
+| 7 | Extension | `extension_layer` | Association Cortex | 🔵 Exploratory | Plugin hosting, `PluginPool` batch aggregation, external engine integration |
 
 > Non-core layers do not affect core API stability. `cos_comparison.core` follows semantic versioning.
 
@@ -140,7 +123,6 @@ Three-flow logical decoupling (data / operation / control) with clear ownership 
 
 ```bash
 pip install cos-comparison          # core package (C compilation attempted automatically)
-pip install cos-comparison[test]    # with test dependencies
 ```
 
 If no C compiler is available, installation succeeds with the pure Python backend only.
@@ -150,6 +132,8 @@ If no C compiler is available, installation succeeds with the pure Python backen
 | Python | 3.8+ (3.13+ for free-threaded builds) |
 | C compiler | Optional (auto-fallback to pure Python) |
 | Runtime deps | None |
+
+The test suite is stdlib-only (`unittest`) — no test dependencies to install.
 
 To recompile after source changes: `python setup.py build_ext --inplace`
 
@@ -173,28 +157,55 @@ Extended experiments and algorithm exploration are maintained in a dedicated rep
 
 The core engine has been validated across multiple domains through exploratory experiments:
 
-- **Computer vision**: face recognition (67 ID-photo training → life-photo validation), captcha solving, multi-scale feature extraction
-- **Audio**: music genre classification, spectral feature extraction
+- **Computer vision**: face recognition, captcha solving, multi-scale feature extraction, template-based generation
+- **Audio**: music genre classification, spectral feature extraction, unsupervised speech recognition
 - **Text**: token frequency analysis, hierarchical clustering, demand-driven memory
-- **Video**: frame abstraction, scene segmentation, cross-video generation (+20.2% improvement)
-- **Agent systems**: web-search knowledge base (118 elements, 188 languages), behavior-composition Agent (von Neumann stored-program), generic executor (DB-stored instructions)
+- **Video**: frame abstraction, scene segmentation, cross-video generation
+- **Agent systems**: web-search knowledge base, behavior-composition Agent, generic executor
 - **Learning mechanisms**: continuous-mapping hierarchical isolation, multi-template clustering, reflective self-correction, feedback-driven search
+- **Reasoning**: top-down hypothesis testing, multi-level evidence verification, bidirectional A↔B mapping
 
 All exploration uses the same core local-comparison engine — no deep learning, no backpropagation, no third-party ML dependencies.
 
 ### Performance
 
-Benchmarked on a 322×424×3 RGB image with 3×3 window (Windows 11 x64, Python 3.14.6, MSVC -O2):
+Real measured data on a single reference machine — full audit with
+methodology, per-module tables, GPU comparisons and resource figures:
+**[Performance & Resource Audit](docs/performance.md)**.
 
-| Backend | Time | Speedup | Free-thread |
-|---------|------|---------|-------------|
-| C Extension | 0.004s | ~130× | ✅ Full (no GIL) |
-| ctypes C | 0.007s | ~70× | ✅ Full |
-| Pure Python | 0.52s | 1× | ✅ Full |
+**Test platform:** Intel Core Ultra 5 125H (14C/18T) + Intel Arc Graphics
+(112 CUs, driver 31.0.101.5382); Windows 11 x64; CPython 3.14.6. Numbers are
+medians from the in-house harness (kept in the experiment area, not shipped);
+data are nested Python float grids (deterministic LCG); the GPU path is
+end-to-end (host↔device transfers included).
 
-On Intel N150 (1000×1000, 3×3 passive): C extension 14s (9×), free-threaded 4 threads 4.6s (27×) vs pure Python 126s.
+**Core — passive 3×3 window aggregation (cosmod, step 1, d (1,1)):**
 
-**Memory:** zero-copy PyBuffer protocol (no data duplication on read), view-based slicing (stride+offset, no copy). C extension static memory footprint < 64 KB.
+| Size | Pure Python | C Extension | GPU engine (OpenCL) |
+|------|------------:|------------:|--------------------:|
+| 512² | 3 838 ms | 26.7 ms | 0.51 ms |
+| 2048² | 55 573 ms | 418 ms | 6.96 ms |
+
+The GPU engine (an external module injected through `iterate=`) runs 52–60×
+the C extension and up to ~7 500× the pure Python reference; against a
+single-thread numpy baseline on the same computation it is 15–41×.
+
+**Other highlights** (512² unless noted, pure Python → C extension):
+
+- `mean_local` 10 640 ms → 41.9 ms (254×), `local_variance` 4 687 ms → 24.0 ms (195×)
+- `data_mapping` (per-element callback) 681 ms → 208 ms; `data_filter` 247 ms → 114 ms
+- `cos` over 1e6 floats: 1 372 ms → 42.6 ms (32×)
+- math_tool over 1e6 elements: C advantage 1.3–4.1× (status/output-passing API; the Python reference was later optimized 1.3–4.3× — see the audit update note); `dft` 15.3×; unit-map fold 6.4×
+- cold `import cos_comparison`: no measurable overhead over the interpreter baseline; core C backend +21 ms; four math_tool C extensions +117 ms
+- compiled artifacts: core backend 316 KB; math_tool extensions 20–38 KB each
+
+**Known issues found by the audit** (details in the audit doc):
+single-element `get_item`/`set_item` have negative C ROI; large pure-Python
+rows vary up to ±2.5× from laptop thermal throttling.  (The earlier C
+topology crash cluster and the `_fourier.idft` complex-input rejection were
+fixed in v0.5.1.)
+
+**Memory:** zero-copy PyBuffer protocol (no data duplication on read), view-based slicing (stride+offset, no copy); package import costs ~0.03 MB RSS (core C backend +1.2 MB, the four math_tool extensions +10 MB); a nested 2048² Python grid costs ~175 MB where a float32 buffer costs ~8 MB — use the buffer paths at scale; full resource figures in the audit.
 
 **Key performance features:** zero-copy PyBuffer, SIMD auto-vectorization (SSE/AVX/NEON with safe fallback), view-based slicing, stride indexing, recursion-free carry iteration, GIL release on compute paths.
 
@@ -203,17 +214,19 @@ On Intel N150 (1000×1000, 3×3 passive): C extension 14s (9×), free-threaded 4
 ## Testing
 
 ```bash
-python -m pytest tests/                           # full suite
-python -m pytest tests/test_core_algorithms.py -v # core algorithms only
+python -m unittest discover -s tests              # full suite (stdlib only)
+python -m unittest tests.test_core_algorithms -v  # core algorithms only
 ```
 
-The suite covers core algorithms, tensor ops, backend parity, empty/edge cases, upper layers, and import hygiene. Tests run on both traditional and free-threaded interpreters.
+The suite covers core algorithms, tensor ops, backend parity, empty/edge cases, upper layers, and import hygiene; it uses only the standard library (`unittest`; pytest works too but is not required). Tests run on both traditional and free-threaded interpreters.
 
 ---
 
 ## Author
 
 I was born on May 31, 2008, and feel fortunate to grow up in an era of rapid progress in artificial intelligence. I have run extensive tests and observed many surprising emergent properties. The purpose of open-sourcing is to share my thoughts, in the hope that others may build upon them.
+
+> **Note:** Due to academic commitments, development speed may be slower and updates may be irregular. Issues and PRs are always welcome.
 
 ---
 

@@ -276,14 +276,14 @@ class FileManager:
                  remove_func=None, info_func=None, hash_func=None,
                  read_func=None, write_func=None):
         from ..tools.func_tool import FuncWrap
-        self.list_func = list_func if list_func else FuncWrap(list_dir)
-        self.copy_func = copy_func if copy_func else FuncWrap(copy_path)
-        self.move_func = move_func if move_func else FuncWrap(move_path)
-        self.remove_func = remove_func if remove_func else FuncWrap(remove_path)
-        self.info_func = info_func if info_func else FuncWrap(file_info)
-        self.hash_func = hash_func if hash_func else FuncWrap(file_hash)
-        self.read_func = read_func if read_func else FuncWrap(read_file)
-        self.write_func = write_func if write_func else FuncWrap(write_file)
+        self.list_func = list_func if list_func is not None else FuncWrap(list_dir)
+        self.copy_func = copy_func if copy_func is not None else FuncWrap(copy_path)
+        self.move_func = move_func if move_func is not None else FuncWrap(move_path)
+        self.remove_func = remove_func if remove_func is not None else FuncWrap(remove_path)
+        self.info_func = info_func if info_func is not None else FuncWrap(file_info)
+        self.hash_func = hash_func if hash_func is not None else FuncWrap(file_hash)
+        self.read_func = read_func if read_func is not None else FuncWrap(read_file)
+        self.write_func = write_func if write_func is not None else FuncWrap(write_file)
     def list(self, path, pattern=None, recursive=False, sort=False):
         return self.list_func(self, path, pattern=pattern,
                               recursive=recursive, sort=sort)
@@ -363,7 +363,7 @@ class Process(BaseProcess):
         with self.stdin_lock:
             self.stdin.write(command)
             self.stdin.flush()
-            self.stdin_line.extend(command)   # FIX: use extend instead of append
+            self.stdin_line.extend(command)
         return len(command)
 
     def _readline_stdout(self):
@@ -371,14 +371,14 @@ class Process(BaseProcess):
         line = self.stdout.readline()
         if line:
             with self.stdout_lock:
-                self.stdout_line.extend(line)  # FIX: extend the whole line
+                self.stdout_line.extend(line)
 
     def _readline_stderr(self):
         """Read one line from stderr and store it."""
         line = self.stderr.readline()
         if line:
             with self.stderr_lock:
-                self.stderr_line.extend(line)  # FIX: extend
+                self.stderr_line.extend(line)
 
     def _read_stdout_loop(self):
         """Continuously read lines from stdout until pipe closes or stop event is set."""

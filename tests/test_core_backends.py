@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """Backend loading and cross-backend parity (non-GUI).
 
-Each backend runs in a *fresh* interpreter (see testutil.py): inside one
-process, switching backends leaves objects of the previous backend
-behind and the new backend's dispatch rejects them.
+v0.5.0 backend model: two backends - the compiled C extension (call
+name "c", module cos_comparison_c) and the pure Python core (call name
+"py", module cos_comparison).  Legacy call names are compatibility
+aliases: ".cos_comparison_pydll" and the ctypes-era ".cos_comparison_c"
+both alias "c".  Each backend runs in a *fresh* interpreter (see
+testutil.py).
 """
 import unittest
 
@@ -13,18 +16,43 @@ import testutil
 
 
 class TestBackendControl(unittest.TestCase):
+    def setUp(self):
+        old = core.get_active_backend()
+        if old is not None:
+            self.addCleanup(core.set_mode, old)
+
     def test_mode_tuples(self):
         mode = core.get_mode()
         self.assertIsInstance(mode, tuple)
-        self.assertIn(".cos_comparison", mode)  # pure Python is mandatory
+        self.assertIn("py", mode)  # pure Python is mandatory
         self.assertEqual(core.get_available_backends(),
-                         (".cos_comparison_pydll", ".cos_comparison_c",
-                          ".cos_comparison"))
+                         ("c", ".cos_comparison_pydll", ".cos_comparison_c",
+                          "py", ".cos_comparison"))
 
     def test_set_mode_accepts_str_and_list(self):
-        core.set_mode(".cos_comparison")
-        core.set_mode([".cos_comparison"])
-        core.set_mode(".cos_comparison_pydll")  # restore default
+        core.set_mode("py")
+        self.assertEqual(core.get_active_backend(), "py")
+        core.set_mode(["py"])
+        self.assertEqual(core.get_active_backend(), "py")
+
+    def test_legacy_names_share_the_module(self):
+        # legacy call names are config keys pointing at the same module
+        loaded = {}
+        for alias in (".cos_comparison", ".cos_comparison_pydll",
+                      ".cos_comparison_c", "cos_comparison_pydll", "c"):
+            try:
+                core.set_mode(alias)
+            except ImportError:
+                continue  # optional compiled backend not built
+            self.assertEqual(core.get_active_backend(), alias)
+            entry = core._BACKENDS.get(alias) \
+                or core._BACKENDS.get("." + alias)
+            loaded[alias] = entry["module"]
+        self.assertEqual(loaded[".cos_comparison"], ".cos_comparison")
+        c_aliases = [a for a in loaded if a != ".cos_comparison"]
+        if c_aliases:
+            self.assertEqual(len({loaded[a] for a in c_aliases}), 1)
+            self.assertEqual(loaded[c_aliases[0]], ".cos_comparison_pydll")
 
     def test_set_mode_bad_type(self):
         with self.assertRaises(TypeError):
@@ -33,15 +61,17 @@ class TestBackendControl(unittest.TestCase):
             core.set_mode((1, 2))
 
     def test_set_mode_unknown_backend_raises(self):
+        old = core.get_active_backend()
         with self.assertRaises(ImportError):
             core.set_mode(".does_not_exist")
+        self.assertEqual(core.get_active_backend(), old)
 
     def test_set_mode_recovers_after_failure(self):
-        try:
+        old = core.get_active_backend()
+        with self.assertRaises(ImportError):
             core.set_mode(".does_not_exist")
-        except ImportError:
-            pass
         # loader must restore the previous working backend
+        self.assertEqual(core.get_active_backend(), old)
         r = core.cos_comparison_passive(
             core.create_void_list((3, 3)), window_size=(1, 1))
         self.assertIsNotNone(r)
@@ -80,6 +110,7 @@ class TestBackendParity(unittest.TestCase):
         shapes = {}
         for backend in testutil.BACKENDS:
             code, out, err = testutil.run_backend(backend, self.WORKLOAD)
+            self.assertEqual(code, 0, "%s crashed: %s" % (backend, err[-500:]))
             shapes[backend] = testutil.json_result(out)["shape"]
         self.assertEqual(len(set(tuple(s) for s in shapes.values())), 1,
                          "shapes differ: %r" % shapes)
@@ -96,12 +127,14 @@ class TestBackendParity(unittest.TestCase):
             "print(json.dumps({'s': float(s)}))\n"
         )
         code, out, err = testutil.run_backend(".cos_comparison", body)
+        self.assertEqual(code, 0, "pure backend crashed: %s" % err[-500:])
         s = testutil.json_result(out)["s"]
         self.assertAlmostEqual(s, 1.0 / 2.0 ** 0.5, places=9)
 
-    def test_pydll_and_ctypes_available(self):
-        # the installed package ships both C artifacts; verify they load
-        for backend in (".cos_comparison_pydll", ".cos_comparison_c"):
+    def test_c_backend_available(self):
+        # the installed package ships the C extension; verify it loads
+        # under both the canonical name and the legacy alias
+        for backend in (".cos_comparison_c", ".cos_comparison_pydll", "c"):
             code, out, err = testutil.run_backend(
                 backend, "print(json.dumps({'r': 1}))\n")
             self.assertEqual(code, 0, "%s failed to load: %s"
@@ -109,44 +142,37 @@ class TestBackendParity(unittest.TestCase):
 
 
 class TestKnownDivergences(unittest.TestCase):
-    """Documented backend divergences (cos-comparison 0.4.x).  These are
-    *current behaviour* checks, not desired-behaviour checks: the three
-    backends are NOT 100% interchangeable (see the project docs).
+    """Known backend divergences (cos-comparison 0.4.x/0.5.0): *current
+    behaviour* checks, not desired ones - the two backends are not
+    100% interchangeable (see the project docs).
 
-    1. scalar tensor (shape=()):
-         pure Python   -> tensor works (v[()] == default)
-         ctypes        -> bare float (fixed in 0.4.4: returns a tensor)
-         pydll         -> heap corruption on interpreter exit
-                          (fixed in 0.4.4: returns a tensor)
-    2. scalar in-place add (t += 1.0):
-         pure Python   -> ok
-         pydll         -> TypeError "operands must be vector_map_as_tensor"
-    3. unexpected keyword arguments:
-         pure Python   -> accepted (silently)
-         pydll         -> TypeError "unexpected keyword argument"
-    4. abs(tensor):    every backend returns a plain float (the L2
-                        norm), not a tensor - consistent, but surprising
-    5. same-process backend switch:
-         objects from the old backend are rejected by the new backend's
-         dispatch (TypeError: takes at most 19 arguments (24 given)).
+    1. scalar tensor (shape=()):  pure Python works; C extension works
+       (both fixed in 0.4.4/0.5.0)
+    2. scalar in-place add:       pure Python ok; C extension ok
+       (fixed in 0.4.4/0.5.0)
+    3. unexpected keyword args:   pure Python accepts silently;
+                                   C extension TypeError
+    4. abs(tensor):               plain float (the L2 norm), not a
+                                   tensor - consistent but surprising
+    5. same-process backend switch: old-backend objects are rejected by
+                                   the new backend's dispatch (TypeError)
 
-    Fixed in v0.4.2 (now consistent, tested below):
-    - active without kernel: all backends raise ValueError
-    - infer_shape(scalar/None): all backends return None
+    Fixed in v0.4.2 (consistent now, tested below):
+    - active without kernel: ValueError on all backends
+    - infer_shape(scalar/None): None on all backends
 
-    Fixed in v0.4.4 (now consistent, tested below):
-    - scalar tensor (shape=()): all three backends return a working
-      tensor (pydll previously crashed at exit, ctypes returned a float)
-    - empty-tensor cos: all backends raise IndexError
-    - unary -x/+x/abs(x) on empty tensors: all backends succeed
-    - scalar + explicit shape construction: pydll no longer double-frees
-    - data_filter/data_mapping(None): all backends raise ValueError
-    - threshold_filter/map/judge: present on all backends
+    Fixed in v0.4.4 (consistent now, tested below):
+    - scalar tensors: all backends return a working tensor
+    - empty-tensor cos: IndexError on all backends
+    - unary -x/+x/abs(x) on empty tensors succeed everywhere
+    - scalar + explicit shape: no C-extension double-free
+    - data_filter/data_mapping(None): ValueError on all backends
+    - threshold_filter/map/judge present on all backends
 
-    Best-effort (no hard-coded limits): create_void_list((2**40,)) simply
-    materialises as much as it can on the Python backends and fails fast
-    on the pydll backend; the C cores use the C99 int -> long -> long
-    long type chain for element counts, never hard-coded caps.
+    Best-effort (no hard-coded limits): create_void_list((2**40,))
+    materialises what it can on the Python backends and fails fast on
+    the C extension; the C cores count elements via the C99 int -> long
+    -> long long chain, never hard-coded caps.
     """
 
     def test_scalar_tensor_pure_python(self):
@@ -157,33 +183,30 @@ class TestKnownDivergences(unittest.TestCase):
         data = testutil.json_result(out)
         self.assertEqual(data, {"shape": [], "v": 5.0})
 
-    def test_scalar_tensor_ctypes_returns_tensor(self):
+    def test_scalar_tensor_c_returns_tensor(self):
         code, out, err = testutil.run_backend(
             ".cos_comparison_c",
             "v = core.create_void_list((), default=5.0)\n"
             "print(json.dumps({'type': type(v).__name__, 'v': float(v[()])}))\n")
         data = testutil.json_result(out)
         self.assertEqual(data.get("type"), "vector_map_as_tensor",
-                         "ctypes scalar create: %r" % data)
+                         "C extension scalar create: %r" % data)
         self.assertEqual(data.get("v"), 5.0)
 
-    def test_scalar_tensor_pydll_returns_tensor(self):
+    def test_legacy_alias_pydll_returns_same_tensor(self):
+        # ".cos_comparison_pydll" is an alias of the C backend
         code, out, err = testutil.run_backend(
             ".cos_comparison_pydll",
             "v = core.create_void_list((), default=5.0)\n"
             "print(json.dumps({'type': type(v).__name__, 'v': float(v[()])}))\n")
         data = testutil.json_result(out)
         self.assertEqual(data.get("type"), "vector_map_as_tensor",
-                         "pydll scalar create: %r" % data)
+                         "legacy alias scalar create: %r" % data)
         self.assertEqual(data.get("v"), 5.0)
 
     def test_scalar_iadd_consistent(self):
-        # scalar in-place arithmetic works identically on every backend
-        # (the pydll scalar-in-place gap was closed for cross-backend
-        # consistency; type-promotion semantics are intentionally NOT
-        # implemented - see the type-promotion assessment)
-        for backend in (".cos_comparison", ".cos_comparison_c",
-                        ".cos_comparison_pydll"):
+        # scalar in-place arithmetic is identical on every backend
+        for backend in (".cos_comparison", ".cos_comparison_c"):
             body = ("t = core.create_void_list((2, 2), default=2.0)\n"
                     "try:\n"
                     "    t += 1.0\n"
@@ -214,8 +237,7 @@ class TestKnownDivergences(unittest.TestCase):
 
     def test_infer_shape_scalar_consistent(self):
         """infer_shape on a scalar/None returns None on all backends."""
-        for backend in (".cos_comparison", ".cos_comparison_pydll",
-                        ".cos_comparison_c"):
+        for backend in (".cos_comparison", ".cos_comparison_c"):
             body = ("r = core.infer_shape(3.14)\n"
                     "print(json.dumps({'r': list(r) if r is not None else None}))\n")
             code, out, err = testutil.run_backend(backend, body)
@@ -232,7 +254,7 @@ class TestKnownDivergences(unittest.TestCase):
                 "except Exception as e:\n"
                 "    print(json.dumps({'ok': False, 'e': type(e).__name__}))\n")
         for backend, expected_ok in ((".cos_comparison", True),
-                                     (".cos_comparison_pydll", False)):
+                                     (".cos_comparison_c", False)):
             code, out, err = testutil.run_backend(backend, body)
             data = testutil.json_result(out)
             self.assertEqual(data.get("ok"), expected_ok,
@@ -240,8 +262,7 @@ class TestKnownDivergences(unittest.TestCase):
 
     def test_active_no_kernel_exception_type(self):
         """cos_comparison_active without kernel raises ValueError on all backends."""
-        for backend in (".cos_comparison", ".cos_comparison_pydll",
-                        ".cos_comparison_c"):
+        for backend in (".cos_comparison", ".cos_comparison_c"):
             body = ("v = core.create_void_list((4, 4))\n"
                     "try:\n"
                     "    core.cos_comparison_active(v)\n"

@@ -1,6 +1,6 @@
 """brain_layer rigorous derivation tests: probability chain rule (strict
-vs non-strict modes) and protocol-style judge (unpacked binds, uncertain
-flag)."""
+vs non-strict modes) and protocol-style judge (unpacked binds,
+determined-not-true flag)."""
 
 import unittest
 
@@ -87,7 +87,8 @@ class TestProbabilityChainRule(unittest.TestCase):
 
 class TestJudgeProtocol(unittest.TestCase):
     """judge receives unpacked binds (*args_bind, **kwargs_bind); rigorous
-    default parsing returns the uncertain flag when it cannot judge."""
+    default parsing returns the determined-not-true flag when it cannot
+    validate a statement."""
 
     def _ctx(self):
         ctx = Logic_context()
@@ -103,12 +104,12 @@ class TestJudgeProtocol(unittest.TestCase):
         ctx = self._ctx()
         self.assertEqual(ctx.logic_judge(a="rain", b="slippery"), sure_true)
 
-    def test_missing_events_uncertain(self):
+    def test_missing_events_determined_not_true(self):
         ctx = self._ctx()
         self.assertEqual(ctx.logic_judge("rain"), Logic.SURE)
         self.assertEqual(ctx.logic_judge(), Logic.SURE)
 
-    def test_unknown_pair_uncertain(self):
+    def test_unknown_pair_determined_not_true(self):
         ctx = self._ctx()
         self.assertEqual(ctx.logic_judge("rain", "fire"), Logic.SURE)
 

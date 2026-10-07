@@ -37,10 +37,13 @@ static int DefaultContain_init(DefaultContain *self, PyObject *args, PyObject *k
 }
 
 static int DefaultContain_contains(DefaultContain *self, PyObject *item) {
+    (void)item;
+    (void)self;
 	return 1;
 }
 
 static Py_ssize_t DefaultContain_len(DefaultContain *self) {
+    (void)self;
 	return 1;
 }
 

@@ -18,11 +18,11 @@ A **seven-layer brain-inspired cognitive architecture**, where each layer corres
 |-------|-----------|----------------|----------|---------------|
 | 1 | `core` | Brainstem / Cerebellum | ✅ Production | Local comparison, stride indexing, multi-backend acceleration |
 | 2 | `sense_layer` | Sensory Cortex | 🟡 Early | Stimulus reception (Receptor / TensorReceptor) |
-| 3 | `memory_layer` | Hippocampus / Cortex | 🟡 Early | Map/table/database memory, transactions |
+| 3 | `memory_layer` | Hippocampus / Cortex | 🟡 Early | Map/table/database/io-stream memory, transactions |
 | 4 | `brain_layer` | Prefrontal Cortex | 🟡 Early | Symbolic/probabilistic logic, reflex system, nested control flow |
 | 5 | `action_layer` | Motor Cortex | 🟡 Early | Async execution driver, action result wrapping, delegated background workers |
 | 6 | `generate_layer` | Broca's / Wernicke's | 🔵 Exploratory | Data generation (Generator / TensorGenerator) |
-| 7 | `extension_layer` | Association Areas | 🔴 Skeleton | Extended capabilities |
+| 7 | `extension_layer` | Association Areas | 🟡 Early | Extended capabilities (plugin aggregation) |
 
 **Cross-cutting modules:**
 
@@ -88,7 +88,8 @@ The passive/active philosophy extends vertically:
 - Dimension-agnostic stride-based `vector_map_as_tensor` with fancy indexing, zero-copy views, negative indices, dimension collapse
 - `__shape__` protocol / `infer_shape`, `load_as_default_data`, `load_data`, `vector_chain_compute`
 - Similarity algorithms (cos, mod, cosmod) and callback system
-- Three backends (C extension / ctypes / pure Python) with automatic fallback; free-threaded 3.13+ support; duck-typing for NumPy/PyTorch arrays
+- Two backends (C extension / pure Python) with automatic fallback; free-threaded 3.13+ support; duck-typing for NumPy/PyTorch arrays
+- Recursion-free execution throughout - explicit-stack iteration for indexing, tensor walks, value compilation, and shell / app control-flow execution (verified by `explore/recursion_check.py`)
 
 → [Core Module API](../api/core.md)
 
@@ -96,7 +97,7 @@ The passive/active philosophy extends vertically:
 
 **Responsibilities:** Input normalization, basic feature extraction, sensory adaptation.
 
-**Current:** `Receptor` (wraps data, `point(index)` access), `TensorReceptor` (core `get_item` + `comparison_passive()`/`comparison_active()` shortcuts).
+**Current:** `Receptor` (wraps data, `point(index)` access), `TensorReceptor` (core `get_item` + `comparison_passive()`/`comparison_active()`/`threshold_map()`/`threshold_match()`), module `elementwise_extract`.
 
 → [Cognitive Layer APIs — Sense](../api/cognitive-layers.md#sense-layer)
 
@@ -104,7 +105,7 @@ The passive/active philosophy extends vertically:
 
 **Responsibilities:** Short/long-term storage, consolidation, retrieval, dual-mode database.
 
-**Current:** `Memory` (lifecycle with pluggable rules), `Status` flags, `MapMemory` (dict-backed, atomic transactions), `TableMemory` (nested-key), `DatabaseMemory` (SQLite), wrappers `MemoryWrap`/`MemoryWrapPool`/`MemoryWrapMap`.
+**Current:** `Memory` (lifecycle with pluggable rules), `Status` flags, `MapMemory` (dict-backed, atomic transactions), `TableMemory` (nested-key), `DatabaseMemory` (SQLite), `IOStreamMemory` (io stream carrier, MapMemory-style key/value via delegating slots), wrappers `MemoryWrap`/`MemoryWrapPool`/`MemoryWrapMap`.
 
 → [Cognitive Layer APIs — Memory](../api/cognitive-layers.md#memory-layer)
 
@@ -131,15 +132,15 @@ The passive/active philosophy extends vertically:
 
 **Responsibilities:** Language/image/signal generation, output formatting.
 
-**Current:** `Generator` (applies callable), `TensorGenerator` (`generate(func)` unified entry + `set_point`), `copy_region` region fill.
+**Current:** `Generator` (applies callable), `TensorGenerator` (`generate(func)` unified entry + `set_point` + `transform_self`), `copy_region` region fill.
 
 → [Cognitive Layer APIs — Generate](../api/cognitive-layers.md#generate-layer)
 
-### Layer 7: Extension 🔴 Skeleton
+### Layer 7: Extension 🟡 Skeleton
 
 **Responsibilities:** Specialized capabilities, cross-modal integration, plugin system.
 
-**Current:** Empty package.
+**Current:** `plugin` — `PluginPool` (proactive batch aggregation: `resources`/`plugins`/`func_pool` keyed pools, no registration).
 
 ---
 
@@ -166,12 +167,12 @@ The passive/active philosophy extends vertically:
 - Dual-mode philosophy provides conceptual coherence
 - Memory layer has functional backends (map/table/database) with transaction support
 - Brain layer has symbolic + probabilistic logic and a mechanism-free reflex system
-- Three backends fully API-aligned with zero-warning C code; v0.4.3 adds memory-safety fixes, protocol-style logic layers, and default dict-protocol implementations
+- Two backends fully API-aligned with zero-warning C code; v0.5.0 adds the iterate/transform extension points and the B-class interface cleanup
 
 ### Gaps
 
 - Action and generation layers have minimal primitives
-- Extension layer is an empty skeleton
+- Extension layer has minimal primitives (plugin aggregation; specialized capabilities pending)
 - No clear roadmap for layer-by-layer development
 
 ### Recommendations

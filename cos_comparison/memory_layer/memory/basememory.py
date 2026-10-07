@@ -38,12 +38,12 @@ class Memory(BaseMemory):
                  refer_func=None,
                  close_func=None):
         self.memory =  memory
-        self.init_func = init_func if init_func else no_done
-        self.save_func = save_func if save_func else no_done
-        self.commit_func = commit_func if commit_func else no_done
-        self.rollback_func = rollback_func if rollback_func  else no_done
-        self.refer_func = refer_func if refer_func  else no_done
-        self.close_func = close_func if close_func  else no_done
+        self.init_func = init_func if init_func is not None else no_done
+        self.save_func = save_func if save_func is not None else no_done
+        self.commit_func = commit_func if commit_func is not None else no_done
+        self.rollback_func = rollback_func if rollback_func  is not None else no_done
+        self.refer_func = refer_func if refer_func  is not None else no_done
+        self.close_func = close_func if close_func  is not None else no_done
     def initialize(self,*args,**kwargs):
         return self.init_func(self,*args,**kwargs)
     def save(self,*args,**kwargs):
@@ -57,7 +57,7 @@ class Memory(BaseMemory):
     def close(self,*args,**kwargs):
         return self.close_func(self,*args,**kwargs)
     def process(self,caller=None,args=(),kwargs=None):
-        caller = caller if caller else no_done
+        caller = caller if caller is not None else no_done
         kwargs = {} if kwargs is None else kwargs
         return caller(self.memory,*args,**kwargs)
     def call(self,name,args=(),kwargs=None):

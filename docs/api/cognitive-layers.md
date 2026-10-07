@@ -34,6 +34,10 @@ r.receptor(caller, args=(), kwargs=None)
 `TensorReceptor` stores raw data and provides:
 - `point(index)` — element access via core `get_item` protocol (`__get_item__` authoritative, plain indexing fallback)
 - `comparison_passive(output=None, **kwargs)` / `comparison_active(output=None, **kwargs)` — shortcuts to core modes
+- `threshold_map(pairs, default_value=0.0, output=None, start=None, shape=None, step=None, out_start=None, out_step=None)` — threshold sensing map: the read region is mapped through the `(func, value)` pair sequence into `output` (write region); returns a status code (`0` ok / `1` mismatch / `2` no output / `3` failure)
+- `threshold_match(low=None, high=None, inclusive=(True, True), start=None, shape=None, step=None)` — threshold position iterator (`data_filter` + `threshold_judge`; lazily yields matching positions)
+
+Module-level `elementwise_extract(*tensors, func=None, output=None, start=None, shape=None, step=None, out_start=None, out_step=None)` — unified element-wise extraction: the read region is extracted via core `get_item`, passed to `core.elementwise`; a write region tries an output slice view first and falls back to `set_item`; returns a status code (output=None is decided by the underlying elementwise).
 
 ### data_match
 
@@ -129,6 +133,43 @@ with DatabaseMemory(database_tool=sqlite3, database=":memory:") as db:
 
 - `database_tool` omitted → interface default driver (`interface.api.DATABASE_DRIVER`, sqlite3); `RuntimeError` if no driver available
 
+### IOStreamMemory
+
+An io stream as the memory carrier — a delegating `Memory` whose working
+defaults store records in MapMemory key/value style on the stream:
+
+```python
+from cos_comparison.interface.api.io_api import IOFile, IOMemory
+from cos_comparison.memory_layer.memory import IOStreamMemory
+
+m = IOStreamMemory(IOMemory("", binary=False))       # in-memory carrier
+m.save("name", "cos")        # queue (MapMemory-compatible key/value)
+m.commit()                   # append records at the tail + flush
+m.refer("name")              # recall "cos"
+```
+
+- Carrier: an io_api `IOStream` — `IOFile(path, mode)` (file; `"r"` /
+  `"a"` / `"a+"` …) or `IOMemory` (BytesIO / StringIO) — or any duck stream
+  providing read / write / seek / tell / readline / flush / close (raw
+  file-like objects included); mode-adaptive — read-only carriers reject
+  `commit`, write-only ones reject `refer`
+- Memory-level slots (`save_func` / `commit_func` / `rollback_func` /
+  `refer_func` / `init_func` / `close_func`) decide the operation
+  signatures — working defaults align with `MapMemory`: `save(key, value)`
+  (key must be hashable; re-saving overwrites, keeping the newest record),
+  uncommitted records are invisible until `commit`, `refer(key)` recalls
+  via a lazily scanned key → offset index (existing stream content is
+  restored on first use)
+- Stream-interaction slots transcribe the carrier methods by default
+  (`open_func` / `read_func` / `write_func` / `seek_func` / `tell_func` /
+  `flush_func` / `readline_func` / `stream_close_func` / `capability_func`);
+  `encode_func` / `decode_func` are the record-format extension points —
+  the working default stores text records as repr lines (resolved with
+  `ast.literal_eval`, so literal values round-trip with their type) and
+  binary records as repr key + length-prefixed raw content
+- Mapping protocol (`__getitem__` / `keys()` / `len` / `in`) — wraps
+  directly with `MemoryWrap`
+
 ### Wrappers
 
 | Class | Description | Key methods |
@@ -152,7 +193,14 @@ wrap.call("refer", ("k",))                             # 42
 
 ### Symbolic Logic
 
-Three-valued style logic system for cognitive reasoning.
+Rule-chain reasoning over an implication fragment. `Logic` is a four-state
+flag set — `Logic(0)` unset, `Logic.TRUE` true (not yet certain),
+`Logic.SURE` sure/determined (alone: determined not-true), `sure_true` =
+TRUE|SURE (surely true); the boolean projection means "carries TRUE"
+(`is_true` / `is_sure` / `is_uncertain` are the explicit predicates). The
+verdict is determined within the rule library: correct → `sure_true`,
+otherwise `Logic.SURE` (determined not-true), matching the probabilistic
+sibling's `0.0`.
 
 ### Control Flow
 
@@ -166,15 +214,15 @@ access (`driver[i, key] = value`). `Control` is a pure placeholder marker.
 
 | Class | Description |
 |-------|-------------|
-| `Logic(Flag)` | `TRUE`, `SURE`; constants `Logic_true`, `Logic_sure`, `sure_true` |
-| `Variable(name, value=None)` | Named variable |
-| `No_limit()` | Constraint container containing everything |
-| `LogicError(Exception)` | Logical error |
-| `Atomic_proposition(subject, verb, objects, adv, limit, status)` | Structured proposition; `__bool__` based on `status & TRUE`; dict-style access |
-| `Logic_bind(reason, result, limit, status)` | Implication between propositions |
-| `Logic_context(name="", binds=None, ...)` | Knowledge context with delegated slots |
+| `Logic(Flag)` | Two-bit set: `TRUE`, `SURE`; constants `Logic_true`, `Logic_sure`, `sure_true`; predicates `is_true` / `is_sure` / `is_uncertain` |
+| `Variable(name, value=None)` | Named variable; truth-value equality (same value = same event, subclass-friendly, identity-short-circuit so NaN values stay reflexive); unhashable values hash by `repr` (reliable for built-in containers) |
+| `No_limit()` | Constraint container containing everything (reserved metadata) |
+| `LogicError(Exception)` | Raised when a judge path carries a segment without a supporting rule |
+| `Atomic_proposition(subject, verb, objects, adv, limit, status)` | Structured proposition; `__bool__` based on `status & TRUE`; dict-style access (`keys()` requires `arg_names`, else `UnsupportedError`; the name count must match the argument count and names must be unique) |
+| `Logic_bind(reason, result, limit, status)` | Implication between propositions; **status is availability** — a rule whose status carries no `Logic.TRUE` is excluded from derivations; mapping contract (`bind["reason"]`, `KeyError` on unknown fields, `in`) |
+| `Logic_context(name="", binds=None, ...)` | Knowledge context with delegated slots (`is not None` defaults: falsy callables are kept) |
 
-`Logic_context` slots: `init_func`, `add_func`, `pop_func`, `judge_func`. Default `judge_func` answers by graph reachability over binds (shortest path via topology; `return_path=True` returns rule list, `[]` when `a==b`, `None` when unreachable).
+`Logic_context` slots: `init_func`, `add_func`, `pop_func`, `judge_func`. The default `judge_func` decides the **correctness of a full statement** — the unpacked sequence `(a, b[, limit[, is_true]])` matching the `Logic_bind` slots (`(a, b)` alone keeps the plain derivation query; `a`/`b`/`limit`/`is_true` also arrive as kwargs): a truth claim must be derivable (BFS over the reflexive-transitive closure of the available rules) within `limit` (`No_limit` contains everything), a falsehood claim must not be; correct → `sure_true`, otherwise `Logic.SURE` (determined not-true within the library). `return_path=True` returns the proving rule list for a correct truth claim (`[]` when `a==b`) and `None` otherwise; a `path_func` path without supporting rules raises `LogicError`. Rules may be attribute-style (`Logic_bind`) or mapping-style (`{'reason': ..., 'result': ..., 'status': ...}`); malformed rules raise `TypeError`; `graph_factory` / `path_func` are injectable through the judge kwargs. Event identity uses the objects' own equality — keep event kinds type-consistent and reuse one object per `Atomic_proposition`.
 
 ```python
 from cos_comparison.brain_layer import logic
@@ -189,20 +237,25 @@ print(ctx.logic_judge(p1, p2))  # True (graph-reachability judge)
 
 ### Probabilistic Logic
 
-Uncertain reasoning with conditional probabilities.
+Uncertain reasoning with conditional probabilities. Event domain: any hashable
+object — strings stay whole atoms, container events (frozenset/tuple) expand
+members in chain conditions. Values: any numeric type comparable with 0/1
+(float, int, Fraction, Decimal). Binds are duck containers (`items()` views,
+`(key, p)` pairs, `(outcome, condition, p)` triples, `event_bind`); graph
+factories are injectable on both engines.
 
 | Class/Function | Description |
 |----------------|-------------|
-| `UnionEvent(*event)` / `IntersectionEvent(*event)` | Frozenset-based event classes |
-| `GlobalEvent()` / `global_event` | Relative probability benchmark |
-| `event_bind(name, event)` | Conditional probability storage; `bind(event, p)` validates `0 ≤ p ≤ 1` |
-| `event_context(name="", binds=None, ...)` | Protocol-style context; `binds=None` → `EventBinds()` (dict subclass with cached dependency graph, stats, `strict` switch) |
+| `UnionEvent(*event)` / `IntersectionEvent(*event)` | Frozenset-based event classes; kind-based equality (subclasses compare by members, plain frozensets stay separate); copy/pickle supported |
+| `GlobalEvent()` / `global_event` | Relative probability benchmark; all instances compare equal |
+| `event_bind(name, event)` | Conditional probability storage; `bind(event, p)` validates `0 ≤ p ≤ 1`; Mapping-style reads plus an engine `items()` view |
+| `event_context(name="", binds=None, ...)` | Protocol-style context; `binds=None` → `EventBinds()` (dict subclass with cached dependency graph, stats, `strict` switch, injectable graph factory) |
 
 **Axioms** (all probabilities relative to `global_event`): relativism, reflexivity `P(X|X)=1`, chain rule, Bayes duality, union.
 
 **Default resolution**: exact hit → relative Bayes over direct references (`strict`, division guarded) → shortest-path chain fallback; `0.0` only when unreachable.
 
-Related: `chain_probability`, `default_probability_func`, `strict_probability_func`, `union_probability`, `consistency_diagnostic`, `EventBinds`, `EventContextProtocol`.
+Related: `chain_probability` (`strict=`, `path_func=`), `default_probability_func`, `strict_probability_func` (`path_func=`), `union_probability` / `chain_intersection` / `consistency_diagnostic` (`strict=`), `EventBinds`, `EventContextProtocol`.
 
 ### Reflex
 
@@ -210,6 +263,7 @@ Related: `chain_probability`, `default_probability_func`, `strict_probability_fu
 |-------|-------------|
 | `Trigger(trigger, callback, stack=None, ...)` | Binds trigger to callback via shared result stack; returns `0` on success |
 | `Monitor(maintainer=None, poller=None, ...)` | Pure monitoring logic — all mechanisms delegated to `interface` (no `asyncio`/`threading`/`time` imports) |
+| `Feedback(receive_func=None, dispatch_func=None, manage_func=None)` | Trigger-style reflex hub: paired (feedback object, feedback function) registrations; all hub functions are delegating slots |
 
 `Monitor` default: poller = `EventLoop`, maintainer = `run_in_thread`, bookkeeping guarded by `parallel_lock`.
 
@@ -218,7 +272,7 @@ Related: `chain_probability`, `default_probability_func`, `strict_probability_fu
 | `add_event(trigger, callback=None, *, interval=None, times=-1)` | Probe until truthy → fire callback; auto-removed after `times` hits; returns handle |
 | `remove(handle)` | Remove event |
 | `run(*a, **k)` | Blocking drive |
-| `maintrain(*a, **k)` | Background thread via `run_in_thread` |
+| `maintain(*a, **k)` | Background thread via `run_in_thread` |
 | `stop()`, `wait(timeout=None)`, `is_running()` | Lifecycle control |
 | `hits(handle=None)`, `errors(handle=None)` | Statistics |
 
@@ -227,8 +281,18 @@ from cos_comparison.brain_layer.reflex import Monitor
 
 m = Monitor()
 m.add_event(lambda: obj.value > 100, on_high, interval=0.02, times=3)
-m.maintrain()  # block-free carrying through interface.run_in_thread
+m.maintain()  # block-free carrying through interface.run_in_thread
 ```
+
+`Feedback` (Trigger-style hub): `register(obj, func)` pairs a feedback
+object with the feedback function that operates on it; `receive()` (the
+hub-receive function — default **non-blocking**, returns the background
+thread) triggers the hub, `dispatch()` (the hub-feedback function —
+default synchronous) hands each feedback function its own paired object;
+errors are caught (kept on `last_error`) and the dispatch continues.
+The hub functions are delegating slots — inject a synchronous
+`receive_func` or a custom `dispatch_func` / `manage_func` to replace the
+delivery/management loop.
 
 ### Mapper
 
@@ -282,8 +346,9 @@ Generation and modification tools over wrapped data.
 | Class/Function | Description |
 |----------------|-------------|
 | `Generator(data)` | `fix(call, args=(), kwargs=None)` applies callable to wrapped data |
-| `TensorGenerator(data)` | `generate(func, args=(), kwargs=None)` — unified delegation entry running `func(self.data, ...)`; `set_point(index, value)` via core `set_item` protocol |
+| `TensorGenerator(data)` | `generate(func, args=(), kwargs=None)` — unified delegation entry running `func(self.data, ...)`; `set_point(index, value)` via core `set_item` protocol; `transform_self(func, *others, start=None, shape=None, step=None, out_start=None, out_step=None)` — self-modifying element-wise transform (core `elementwise` with output = self or a write region); returns a status code |
 | `copy_region(target, source, *, ...)` | Region fill (core `load_data` wrapper); out-of-bounds clipped; returns elements copied |
+| `transform_self(tensor, func, *others, ...)` | Module-level self-modifying element-wise transform (same semantics as the method) |
 
 ```python
 from cos_comparison.generate_layer import TensorGenerator, copy_region
@@ -297,6 +362,36 @@ tg.set_point((0, 0), 9)                              # core set_item protocol wr
 
 ---
 
+## Extension Layer
+
+Proactive plugin batch aggregation (`extension_layer.plugin`).
+
+### PluginPool
+
+`PluginPool(resources=None, plugins=None, func_pool=None)` — three keyed pools (each defaults to a list, key = index; duck-supports any keyed container):
+
+| Pool | Contents |
+|------|----------|
+| `resources` | hosted resources (shared data / contexts) |
+| `plugins` | hosted plugins (external objects, unchanged — no registration, no modification) |
+| `func_pool` | directly callable objects (functions / callables) |
+
+```python
+from cos_comparison.extension_layer.plugin import PluginPool
+
+p = PluginPool()
+p.add_plugin(0, external_plugin)          # host unchanged external plugin
+p.call_plugin(0, "method", arg)           # plugin.method(arg)
+p.add_func(0, my_function)                # direct callable
+p.call_func(0, value)                     # my_function(value)
+p.add_resource(0, ctx)                    # shared resource
+p.get_resource(0)
+```
+
+Methods: `add_resource/add_plugin/add_func(key, value)` (mappings take `c[key]=value`; sequences append); `call_func(name, *args, **kwargs)`; `call_plugin(name, method, *args, **kwargs)`; `get_plugin_attr(name, attr)`; `get_resource(name)`; `get_plugin(name)`.
+
+---
+
 ## Interface
 
 External interface abstraction (standard library only).
@@ -305,11 +400,15 @@ External interface abstraction (standard library only).
 
 | Module | Key components |
 |--------|----------------|
-| `system_api` | `command(commands)` → `(out, err, returncode)`; `Process(executable, arg_list)` — subprocess wrapper with byte-buffered stdio, background reader threads; `execute()`, `get_stdout()`, `get_stderr()`, `stop(timeout=0.5, terminate=True)` |
-| `call_api` | `BaseCallContainer`, `Module_CallContain(module_name)`, `C_CallContainer(library_path)` (ctypes argtypes/restype), `CallDict(init_dict)` with `add(tag, func)`/`call(tag, args)` |
-| `communicate_api` | `FdCommunicate`, `PIPECommunicate`, `SocketCommunicate`, `FileCommunicate` — send/recv over fds, sockets, files |
-| `parallel_api` | `thread_lock`/`process_lock`, `parallel_lock`/`parallel_rlock`, `Thread`, `Process`, `share_array`/`load_array`, `run_in_thread(target, ...)` |
+| `system_api` | `command(commands, input=None, timeout=None)` → `(out, err, returncode)`; `Process(executable, arg_list)` — subprocess wrapper with byte-buffered stdio, background reader threads; `execute()`, `get_stdout()`, `get_stderr()`, `stop(timeout=0.5, terminate=True)`; `getpid()`/`getppid()`/`kill(pid, signal)` |
+| `io_api` | `BaseIO` (ABC); `IOStream` — delegated stream container; `IOFile(path, mode, encoding)` — lazy file stream; `IOMemory(data, binary)` — in-memory BytesIO/StringIO; `read_file(path=None, fd=None, encoding=None)` / `write_file(path=None, data=None, fd=None, encoding=None)` convenience functions |
+| `database_api` | `DatabaseToolWrap(tool, connect_func, cursor_func)` — distributed DB driver abstraction; PEP 249 exception hierarchy; `DatabaseCursor`/`DatabaseConnection` wrappers |
+| `time_api` | `timestamp` / `iso_time` / `format_time` / `parse_time` / `sleep` / `elapsed`; types `TimeStamp` / `Stopwatch` / `Deadline` |
+| `call_api` | `BaseCallContainer`, `Module_CallContain(module_name)`, `C_CallContainer(library_path)` (ctypes argtypes/restype), `CDLL_CallContainer`/`WinDLL_CallContainer`, `CallDict(init_dict)` with `add(tag, func)`/`call(tag, args)` |
+| `communicate_api` | `FdCommunicate`, `PIPECommunicate`, `SocketCommunicate`, `FileCommunicate`, `IOCommunicate` — send/recv over fds, sockets, files; `Communicate` base with delegating slots |
+| `parallel_api` | `thread_lock`/`process_lock`, `parallel_lock`/`parallel_rlock`, `Thread`, `Process`, `share_array(dtype, length)`/`load_array(dtypes, sequence, length=None, start=0)`, `run_in_thread(target, args=(), kwargs=None, is_join=False, **kws)`; `thread_barrier`/`thread_bounded_semaphore`/`thread_event`/`thread_semaphore`; `SuperParallel` — grid-style layered parallel framework (scale setup `sp[1,2,3]` / `sp.grid(dim)` coordinates / `sp(*args)` invocation, `getIdx()` layer hierarchy, delegating slots); `DefaultParallel` — default process-thread two-layer super-concurrency model (1-D auto-expansion, 2-D explicit).  GPU path verified on Intel Arc (OpenCL — element-space coordinates map to work items; ~6-9x pure-compute speedup at n ≥ 10^6; benchmark data in `docs/exploration/README.md`) |
 | `async_api` | `AsyncRunner()` — blocking async host with thread-safe event injection, timeout exit, exception isolation; `EventLoop(interval=0.01)` — periodic task host |
+| `file_api` | `FileManager` with `copy`/`move`/`remove`/`read`/`write`/`list`/`info`/`hash`; `copy_path(src, dst)` / `move_path(src, dst)` / `remove_path(path)` / `make_dirs(path)`; `file_hash(path=None, fd=None, algo='sha256', chunk=65536)`; `file_info(path=None, fd=None)`; `file_match(path=None, pattern=None, fd=None, start=0, encoding=None)`; `find_files(root, pattern, recursive=True)`; `list_dir(path=None, fd=None, pattern=None, recursive=False, sort=False)` |
 
 ### Tools
 
@@ -317,8 +416,12 @@ External interface abstraction (standard library only).
 |--------|----------------|
 | `tools/context_tool` | `VoidContext()`, `IntegrateContext(*contexts)`, `AsyncIntegrateContext(*a_context)` |
 | `tools/func_tool` | `ComposalFunction` — callable composed from multiple functions sharing a stack (first/last direct, middle steps read slots); `ComposalFunctionManage` (delegated maintenance); `FuncHelper` (stdlib helper slots: partial/reduce/compose/wrap/itemgetter/attrgetter); `FuncWrap` (discard-first-arg wrapper) |
-| `tools/math_tool` | `topology` — `Graph`/`DirectedGraph` (union-find, iterative Tarjan SCC, Kahn topological sort, BFS reachability, Eulerian paths); `shortest_path_between(graph, src, dst)` (BFS, lock-safe) |
-| `tools/math_tool/fourier` | Generic multi-dimensional DFT/IDFT, recursion-free |
+| `tools/math_tool/topology` | `Graph` — `add_edge`, `components_count`, `cycle_rank`, `edges_count`, `euler_characteristic`, `is_connected`, `vertices_count`; `DirectedGraph` — `add_edge`, `strong_components` (Tarjan, iterative), `strong_components_count`, `topological_sort` (Kahn), `reachable` (BFS), `shortest_path` (BFS), `is_dag`, `is_weakly_connected`, `weak_components_count`, `in_degree`/`out_degree`, `has_eulerian_path`/`has_eulerian_circuit`, `neighbors`; `shortest_path_between(graph, src, dst)` (BFS, lock-safe); `Euler_characteristic_compute_by_cell(cell_list)` (integer protocol via `__index__` — numpy integers and index-like objects accepted, bool excluded) |
+| `tools/math_tool/fourier` | `dft(data, axis=None)` / `idft(data, axis=None)` — generic multi-dimensional DFT/IDFT, recursion-free; `power_spectrum(data, axis=None)`; `dft_kernel_real(shape, frequencies, scales=1.0, offsets=0.0, amplitudes=1.0, biases=0.0)` / `dft_kernel_imag(...)` — kernel generation for matched filtering; protocol-style throughout (sequence protocol for nested data / axes / shape, integer protocol for shape/axis, float→complex protocol for value splitting, sequence-vs-scalar broadcast detection — numpy scalars and custom sequences accepted, identical Python / C behaviour) |
+| `tools/math_tool/linear_algebra` | Dimension-generic duck-typed ops: `dot` / `norm` / `normalize` / `scale` / `add` / `multiply` / `power` / `clip` / `flatten` / `tensor_sum` / `tensor_mean` — tensor out via the `output` keyword, integer status return; identical Python / C behaviour |
+| `tools/math_tool/unit_map` | `UnitMap` — run-folding unit mapper: any objects as units (duck), consecutive-equal runs fold into single real flag elements (variable-length runs → fixed-length elements, ready for tensor mapping); structure signatures / deep equality run through the sequence / mapping / set protocols with mutability labels (`list != tuple`, `set != frozenset` preserved, custom containers and subclasses accepted); instance-held cumulative content table with query (`flag_of`) / decode compatibility surface; stateful output (`put(output=None, buffering=None)` — file-pointer continuation), `add(*seq)` input, `get_state`/`set_state`/`clear`; frequency statistics (`total()` / `count(obj)` / `runs(obj)` / `most_common(k)` / `count_vector()`) — count-based (no normalization), dynamic (no shared global counter, safe under concurrent adds, live with the open pending run); `window_units`/`map_data` with a `probe_dim` dimension-probe limit (default 1 — atomic-scale guard: nested rows stay atomic units; explicit N-D needs `probe_dim=k`); fully iterative (windows, content-signature folding, deep equality — no recursion); appending is a recurrence (adding data after a completed add only processes the new part); identical Python / C behaviour (C99, strict-mode checked) |
+
+> All math_tool C extensions declare `Py_MOD_GIL_NOT_USED` (free-threaded / no-GIL builds on Python 3.13+, skipped on older interpreters) and pass strict-mode portability checks with MSVC `/Wall /WX`, MinGW-w64 GCC and Linux GCC.
 
 > `cos_comparison.interface` imports cleanly in a fresh interpreter; `EventLoop`, `run_in_thread` and integrated locks are exercised by `tests/test_layers.py`.
 
@@ -343,7 +446,6 @@ Unified data carrier interfaces.
 ## Test Tools
 
 Stable and fully working.
-
 | Tool | Description |
 |------|-------------|
 | `Timer(start=0.0, timer=perf_count)` | `mark()`, `get_time()`, `reset()` — high-resolution timing |

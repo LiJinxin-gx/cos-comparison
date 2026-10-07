@@ -1,12 +1,22 @@
 [build-system]
+# setuptools>=61 is the low-version floor for PEP 621 [project] metadata;
+# newer setuptools also works (reliable fallback chain, no hard upper pin).
+# The SPDX `license` field below is understood by setuptools>=77; setup.py
+# feeds older setuptools a temporary legacy-compatible copy (see setup.py).
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cos-comparison"
-version = "0.4.4"
-description = "Local similarity comparison for feature extraction – biologically inspired, zero‑training edge/pattern detection, multi-backend acceleration."
+version = "0.5.3"
+description = "Local similarity comparison for feature extraction - biologically inspired, zero-training edge/pattern detection, multi-backend acceleration."
 readme = "README.md"
+# Modern SPDX license metadata (PEP 639).  The PEP 621 table form
+# (`license = {text = ...}`) is deprecated on setuptools>=77; this string
+# form needs setuptools>=77, while the Python 3.8 floor allows 61 - so
+# setup.py installs a build-time shim that hands pre-77 setuptools a
+# temporary legacy-compatible sibling copy.  This file (and every sdist)
+# always keeps the modern form.
 license = "MIT"
 license-files = ["LICENSE.txt"]
 authors = [
@@ -41,35 +51,33 @@ Documentation = "https://cos-comparison.readthedocs.io/"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cos_comparison*", "explore*"]
+include = ["cos_comparison*"]
 exclude = ["tests*", "dist*", "*.egg-info*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 cos_comparison = [
     # Core configuration
     "core/config.json",
-    # C source files (for reference / manual compilation)
-    "core/cos_comparison_c/include/*.c",
-    "core/cos_comparison_c/include/*.h",
+    # C-family source files (for reference / manual compilation);
+    # open extension set so extended toolchains/platforms ship as-is
     "core/include/*.c",
     "core/include/*.h",
-    # Compiled shared libraries (ctypes)
-    "core/cos_comparison_c/*.dll",
-    "core/cos_comparison_c/*.so",
-    "core/cos_comparison_c/*.dylib",
-    # Compiled Python extensions (pydll)
-    "core/*.pyd",
-    "core/*.so",
-    "core/*.dylib",
-    # Type hints
-    "py.typed",
-    #all file
-    "**/**"
-]
-explore = [
-    "*.pyw",
-    "*.md",
-    "*.json",
+    "**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.cu",
+    "**/*.h", "**/*.hpp", "**/*.hh", "**/*.hxx", "**/*.cuh",
+    "**/*.inl", "**/*.inc", "**/*.m", "**/*.mm",
+    # Compiled extension artifacts (open platform set: Windows .pyd/.dll,
+    # Unix .so (+ versioned .so.*)/.sl, macOS .dylib)
+    "**/*.pyd",
+    "**/*.so",
+    "**/*.so.*",
+    "**/*.dylib",
+    "**/*.dll",
+    "**/*.sl",
+    # Type stubs
+    "**/*.pyi",
+    # Version file (runtime version source of truth)
+    "VERSION.txt",
 ]
 
 [tool.pytest.ini_options]

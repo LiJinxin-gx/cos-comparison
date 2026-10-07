@@ -20,9 +20,8 @@ class TestTensorBasics(unittest.TestCase):
         self.assertEqual(v[2, 3], 7.0)
 
     def test_scalar_create(self):
-        # scalar tensors (shape=()) work identically on every backend
-        # since v0.4.4 (previously: ctypes returned a bare float, pydll
-        # corrupted the heap at interpreter exit).
+        # scalar tensors (shape=()) work on every backend since v0.4.4
+        # (ctypes: bare float; pydll: heap corruption at exit)
         v = make((), default=5.0)
         self.assertEqual(v.shape, ())
         self.assertEqual(v.dimension, 0)
@@ -193,8 +192,8 @@ class TestToolChain(unittest.TestCase):
         self.assertEqual(core.get_item(v, (1, 1)), 7.0)
 
     def test_default_contain_read(self):
-        # item assignment is not supported on any backend (v0.4.1);
-        # lookup falls back to the default value
+        # item assignment unsupported (v0.4.1): lookup falls back to
+        # the default value
         dc = core.default_contain(5.0)
         self.assertEqual(len(dc), 1)
         self.assertEqual(dc["anything"], 5.0)

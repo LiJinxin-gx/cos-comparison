@@ -32,6 +32,6 @@ The core principles are:
 8. Full determinism and interpretability
       Every output value has a clear geometric meaning (similarity between two local patches). The effect of every parameter (window size, displacement, step, similarity measure) is perfectly linear and predictable – no black‑box behaviour.
 9. Modular, pluggable architecture
-      The framework is backend-agnostic: pure Python (reference, zero dependency), Python C extension (maximum performance, free-threaded no-GIL support), and ctypes pure C backend (no Python C API dependency) share exactly the same API. Fallback priorities can be set without changing user code, with automatic graceful degradation if compilation fails. NumPy arrays and other duck-typed tensor types are natively supported without a dedicated backend.
+      The framework is backend-agnostic: pure Python (reference, zero dependency) and the Python C extension (maximum performance, free-threaded no-GIL support) share exactly the same API. Fallback priorities can be set without changing user code, with automatic graceful degradation if compilation fails. External engines (GPU / parallel) plug in through the iterate slot without modifying the package. NumPy arrays and other duck-typed tensor types are natively supported without a dedicated backend.
 
 These principles together form a biologically plausible, mathematically transparent, and computationally lightweight alternative to deep learning for low‑level feature extraction, unsupervised structure detection, and attention‑guided processing.

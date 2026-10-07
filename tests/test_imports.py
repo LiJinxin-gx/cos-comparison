@@ -48,7 +48,7 @@ MODULES = [
 
 class TestImports(unittest.TestCase):
     def setUp(self):
-        self.pkg_path = testutil.check_local_env()
+        testutil.check_local_env()
 
     def test_all_modules_import(self):
         failed = []
@@ -62,8 +62,8 @@ class TestImports(unittest.TestCase):
     def test_version_consistency(self):
         v = cos_comparison.__version__.strip()
         self.assertRegex(v, r"^\d+\.\d+\.\d+$", v)
-        self.assertTrue(cos_comparison.version_tuple[:3],
-                        cos_comparison.version_tuple)
+        parsed = tuple(int(part) for part in v.split("."))
+        self.assertEqual(cos_comparison.version_tuple[:3], parsed)
 
     def test_core_exports(self):
         for name in ("create_void_list", "load_as_default_data",

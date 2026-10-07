@@ -1,4 +1,5 @@
 """system_api tests: file management (explicit-stack, no recursion)."""
+import hashlib
 import os
 import tempfile
 import unittest
@@ -62,7 +63,8 @@ class TestFileBasics(unittest.TestCase):
     def test_file_hash(self):
         p = os.path.join(self.dir, "d.txt")
         write_file(p, b"hashme")
-        self.assertEqual(file_hash(p), file_hash(p))
+        self.assertEqual(file_hash(p),
+                         hashlib.sha256(b"hashme").hexdigest())
         self.assertEqual(len(file_hash(p, algo="md5")), 32)
 
 
@@ -103,7 +105,7 @@ class TestDirOps(unittest.TestCase):
         self.assertFalse(os.path.exists(self.dir))
 
     def test_copy_tree(self):
-        dst = os.path.join(tempfile.gettempdir(), "sys_copy_dst")
+        dst = self.dir + "_copy"
         remove_path(dst)
         try:
             _make_tree(self.dir, depth=3)
@@ -139,7 +141,9 @@ class TestDeepNoRecursion(unittest.TestCase):
 
     def test_deep_tree_remove(self):
         root = tempfile.mkdtemp(prefix="sysdeep_")
-        depth = 40                       # ~80-char path, under MAX_PATH
+        # POSIX keeps going past the default recursion limit (Windows
+        # paths stay short because of MAX_PATH)
+        depth = 1200 if os.name != "nt" else 40
         current = root
         for i in range(depth):
             current = os.path.join(current, "a")
@@ -152,9 +156,13 @@ class TestDeepNoRecursion(unittest.TestCase):
 class TestFileManager(unittest.TestCase):
     """Delegated container: default impls and injection."""
 
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sys_fm_")
+        self.addCleanup(remove_path, self.dir)
+
     def test_default_ops(self):
         fm = FileManager()
-        p = os.path.join(tempfile.gettempdir(), "sys_fm.txt")
+        p = os.path.join(self.dir, "fm.txt")
         remove_path(p)
         try:
             fm.write(p, b"data")
@@ -172,6 +180,16 @@ class TestFileManager(unittest.TestCase):
                          calls.append(path) or "injected")
         self.assertEqual(fm.read("/x"), "injected")
         self.assertEqual(calls, ["/x"])
+
+    def test_falsy_injected_slot_kept(self):
+        class FalsyRead:
+            def __bool__(self):
+                return False
+            def __call__(self, manager, path, encoding=None):
+                return "kept"
+
+        fm = FileManager(read_func=FalsyRead())
+        self.assertEqual(fm.read("/x"), "kept")
 
 
 class TestFileMatch(unittest.TestCase):
@@ -232,6 +250,7 @@ class TestFileDescriptor(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "os.listdir(fd) unsupported on Windows")
     def test_list_dir_fd(self):
+        write_file(self.path, b"1")
         write_file(os.path.join(self.dir, "x.txt"), b"1")
         fd = os.open(self.dir, os.O_RDONLY)
         try:

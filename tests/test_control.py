@@ -181,6 +181,11 @@ class TestControlFlowDriver(unittest.TestCase):
         d[0, 1] = lambda: 99
         self.assertEqual(_run(d), [1, 99])
 
+    def test_one_tuple_index_matches_scalar(self):
+        d = ControlFlowDriver([Sequence([lambda: 1])])
+        d[0,] = lambda: 9
+        self.assertEqual(_run(d), [9])
+
     def test_nested_driver(self):
         inner = ControlFlowDriver([Sequence([lambda: 1])])
         d = ControlFlowDriver([inner, lambda: 2])

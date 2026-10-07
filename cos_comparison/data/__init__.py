@@ -2,6 +2,7 @@
 Provide unified data carrier interfaces that decouple data carrying from data operations.
 """
 
+from .. import core
 from . import tensor
 
 class DataWrap:
@@ -15,9 +16,11 @@ class DataWrap:
     def __setitem__(self,index,value):
         self.data[index] = value
     def __get_item__(self,*index):
-        return self.data.__get_item__(*index)
+        # core protocol semantics: __get_item__ authoritative when present,
+        # plain indexing fallback otherwise (never a missing-method error)
+        return core.get_item(self.data,index)
     def __set_item__(self,index,value):
-        self[index] = value
+        return core.set_item(self.data,index,value)
     def process(self,caller,args=(),kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         return caller(self.data,*args,**kwargs)

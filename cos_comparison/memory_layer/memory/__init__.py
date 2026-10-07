@@ -6,6 +6,7 @@ various storage media are supported through flexible rule definitions.
 from .basememory import *
 from .database_memory import *
 from .inner_memory import *
+from .io_memory import *
 
 class MappingBase:
     """Mapping-protocol base: keys() via an injected delegate (keys_func
@@ -24,9 +25,9 @@ class MappingBase:
 
 class MemoryWrap(MappingBase):
     """
-    It wrap kinds of memory to provide Unified Operation Interfaces.
-    It also support hierarchical tagging of memory carrier information such as level,
-    also supporting short-term and long-term memory.
+    Wraps various memories behind unified operation interfaces, with
+    carrier metadata tags (name / level / id) supporting hierarchical
+    organization such as short-term vs long-term memory.
     """
     __slots__ = ("memory_body","memory_type","name","level","id","keys_func")
     def __init__(self,memory_body=None,memory_type=None,args=(),kwargs=None,name="",level=0,
@@ -47,7 +48,7 @@ class MemoryWrap(MappingBase):
         """Default keys (Python mapping protocol): carrier keys() when
         supported; index keys for sized sequences; else empty."""
         source = getattr(self.memory_body, "keys", None)
-        if source is not None:
+        if callable(source):
             return source()
         try:
             return range(len(self.memory_body))
@@ -101,7 +102,7 @@ class MemoryWrapMap(MemoryWrapPool, MappingBase):
         """Default keys (Python mapping protocol): carrier keys() when
         supported; index keys for sized sequences; else empty."""
         source = getattr(self.pool, "keys", None)
-        if source is not None:
+        if callable(source):
             return source()
         try:
             return range(len(self.pool))
@@ -109,7 +110,11 @@ class MemoryWrapMap(MemoryWrapPool, MappingBase):
             return ()
     def __contains__(self,element):
         pool = self.pool
-        return any( (pool[k]==element for k in pool) )
+        try:
+            values = pool.values()
+        except AttributeError:
+            values = pool
+        return any(value==element for value in values)
     def add(self,index,memorywrap):
         super().set(index,memorywrap)
     def get_by_name(self,name):

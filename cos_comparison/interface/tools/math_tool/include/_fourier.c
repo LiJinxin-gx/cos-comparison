@@ -10,6 +10,13 @@
  * every path, portable M_PI fallback.
  */
 #define PY_SSIZE_T_CLEAN
+#ifdef _MSC_VER
+/* CPython extension ABI patterns under /Wall (see cos_comparison_pydll.c):
+   C4191 method-table casts, C4232 PyType_GenericNew address,
+   C4820 struct padding; C5045/C4711/C4710 are /Wall performance hints. */
+#pragma warning(push)
+#pragma warning(disable: 4191 4232 4820 5045 4711 4710)
+#endif
 #include <Python.h>
 #include <math.h>
 #include <stdlib.h>
@@ -23,7 +30,7 @@
  * 1-D trig transform on C double arrays (in place)
  * ================================================================== */
 
-static void _dft_1d(double *re, double *im, Py_ssize_t n, double sign) {
+static void dft_1d(double *re, double *im, Py_ssize_t n, double sign) {
     if (n <= 1) return;
     double *out_re = (double*)malloc((size_t)n * sizeof(double));
     double *out_im = (double*)malloc((size_t)n * sizeof(double));
@@ -54,7 +61,16 @@ static void _dft_1d(double *re, double *im, Py_ssize_t n, double sign) {
  * Nested list helpers (list fast path, sequence fallback)
  * ================================================================== */
 
-static PyObject *_get_nested(PyObject *data, const long *idx, int dim) {
+/* Sequence protocol: sized + sequence, text excluded (numeric scalars
+ * are not sized and fall through). */
+static int is_seq_proto(PyObject *obj) {
+    if (PyUnicode_Check(obj) || PyBytes_Check(obj)) return 0;
+    if (!PySequence_Check(obj)) return 0;
+    if (PyObject_Length(obj) < 0) { PyErr_Clear(); return 0; }
+    return 1;
+}
+
+static PyObject *get_nested(PyObject *data, const long *idx, int dim) {
     PyObject *obj = data;
     for (int i = 0; i < dim; ++i) {
         if (PyList_Check(obj)) {
@@ -73,14 +89,8 @@ static PyObject *_get_nested(PyObject *data, const long *idx, int dim) {
     return obj;
 }
 
-static PyObject *_split(PyObject *value, double *re, double *im) {
-    if (PyComplex_Check(value)) {
-        *re = PyComplex_RealAsDouble(value);
-        *im = PyComplex_ImagAsDouble(value);
-        return PyErr_Occurred() ? NULL : value;
-    }
-    if (PySequence_Check(value) && !PyBytes_Check(value) &&
-        !PyUnicode_Check(value)) {
+static PyObject *split(PyObject *value, double *re, double *im) {
+    if (is_seq_proto(value)) {
         PyObject *a = PySequence_GetItem(value, 0);
         PyObject *b = PySequence_GetItem(value, 1);
         if (!a || !b) { Py_XDECREF(a); Py_XDECREF(b); return NULL; }
@@ -89,13 +99,20 @@ static PyObject *_split(PyObject *value, double *re, double *im) {
         Py_DECREF(a); Py_DECREF(b);
         return PyErr_Occurred() ? NULL : value;
     }
+    /* float protocol first, complex protocol as fallback (duck numeric) */
     *re = PyFloat_AsDouble(value);
-    *im = 0.0;
+    if (!PyErr_Occurred()) {
+        *im = 0.0;
+        return value;
+    }
+    PyErr_Clear();
+    *re = PyComplex_RealAsDouble(value);
+    *im = PyComplex_ImagAsDouble(value);
     return PyErr_Occurred() ? NULL : value;
 }
 
 /* shape inference: walk nested sequences until a non-sequence */
-static PyObject *_shape_of(PyObject *data) {
+static PyObject *shape_of(PyObject *data) {
     PyObject *shape = PyList_New(0);
     if (!shape) return NULL;
     PyObject *obj = data;
@@ -112,7 +129,7 @@ static PyObject *_shape_of(PyObject *data) {
             return NULL;
         }
         if (n == 0) break;
-        obj = _get_nested(obj, (long[]){0}, 1);
+        obj = get_nested(obj, (long[]){0}, 1);
         if (!obj) { Py_DECREF(shape); return NULL; }
         if (++guard > 10000) { Py_DECREF(shape); break; }
     }
@@ -120,7 +137,7 @@ static PyObject *_shape_of(PyObject *data) {
 }
 
 /* normalize axis argument into a list of normalized axes */
-static PyObject *_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *dim_out) {
+static PyObject *resolve_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *dim_out) {
     Py_ssize_t dim = PyList_GET_SIZE(shape_list);
     *dim_out = dim;
     PyObject *axes = PyList_New(0);
@@ -133,8 +150,10 @@ static PyObject *_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *dim_out
             }
         return axes;
     }
-    if (PyLong_Check(axis)) {
-        Py_ssize_t a = PyLong_AsSsize_t(axis);
+    PyObject *axis_idx = PyNumber_Index(axis);
+    if (axis_idx) {
+        Py_ssize_t a = PyLong_AsSsize_t(axis_idx);
+        Py_DECREF(axis_idx);
         if (PyErr_Occurred()) { Py_DECREF(axes); return NULL; }
         a %= dim;
         if (a < 0) a += dim;
@@ -144,6 +163,7 @@ static PyObject *_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *dim_out
         }
         return axes;
     }
+    PyErr_Clear();
     PyObject *it = PyObject_GetIter(axis);
     if (!it) { Py_DECREF(axes); return NULL; }
     PyObject *item;
@@ -165,7 +185,7 @@ static PyObject *_axes(PyObject *shape_list, PyObject *axis, Py_ssize_t *dim_out
 
 /* apply the 1-D transform along the given axis (odometer over fixed
  * coords); data must be a mutable nested list */
-static int _axes_transform_one(PyObject *data, PyObject *shape_list,
+static int axes_transform_one(PyObject *data, PyObject *shape_list,
                                Py_ssize_t axis, double sign) {
     Py_ssize_t dim = PyList_GET_SIZE(shape_list);
     Py_ssize_t size = PyLong_AsSsize_t(PyList_GET_ITEM(shape_list, axis));
@@ -216,12 +236,12 @@ static int _axes_transform_one(PyObject *data, PyObject *shape_list,
                 free(fixed); free(re); free(im);
                 return -1;
             }
-            if (_split(obj, &re[k], &im[k]) == NULL) {
+            if (split(obj, &re[k], &im[k]) == NULL) {
                 free(fixed); free(re); free(im);
                 return -1;
             }
         }
-        _dft_1d(re, im, size, sign);
+        dft_1d(re, im, size, sign);
         /* write back complex values */
         for (Py_ssize_t k = 0; k < size; ++k) {
             long buf[32];
@@ -279,8 +299,8 @@ static int _axes_transform_one(PyObject *data, PyObject *shape_list,
     return 0;
 }
 
-/* deep mutable copy of data by shape (iterative, no recursion) */
-static PyObject *_mutable(PyObject *data, PyObject *shape_list) {
+/* deep mutable copy of data by shape (iterative) */
+static PyObject *deep_mutable(PyObject *data, PyObject *shape_list) {
     Py_ssize_t dim = PyList_GET_SIZE(shape_list);
     if (dim == 0) {
         Py_INCREF(data);
@@ -341,22 +361,48 @@ static PyObject *_mutable(PyObject *data, PyObject *shape_list) {
     return root;
 }
 
-/* scale every leaf by factor (iterative) */
-static PyObject *_scale(PyObject *data, double factor) {
-    if (!PyList_Check(data)) {
-        return PyFloat_FromDouble(PyFloat_AsDouble(data) * factor);
+/* scale one leaf through the float / complex protocols (py _scale parity:
+ * complex leaves stay complex) */
+static int scale_leaf(PyObject *item, double factor, PyObject **out) {
+    PyObject *f = PyNumber_Float(item);
+    if (f) {
+        double v = PyFloat_AsDouble(f);
+        Py_DECREF(f);
+        if (PyErr_Occurred()) return -1;
+        *out = PyFloat_FromDouble(v * factor);
+        return *out ? 0 : -1;
     }
-    Py_ssize_t n = PyList_GET_SIZE(data);
+    PyErr_Clear();
+    double r = PyComplex_RealAsDouble(item);
+    double i = PyComplex_ImagAsDouble(item);
+    if (PyErr_Occurred()) return -1;
+    *out = PyComplex_FromDoubles(r * factor, i * factor);
+    return *out ? 0 : -1;
+}
+
+/* scale every leaf by factor (iterative; sequence + complex protocols) */
+static PyObject *scale(PyObject *data, double factor) {
+    if (!is_seq_proto(data)) {
+        PyObject *out = NULL;
+        if (scale_leaf(data, factor, &out) < 0) return NULL;
+        return out;
+    }
+    PyObject *work = PyList_Check(data) ? (Py_INCREF(data), data)
+                                        : PySequence_List(data);
+    if (!work) return NULL;
+    Py_ssize_t n = PyList_GET_SIZE(work);
     PyObject *root = PyList_New(n);
-    if (!root) return NULL;
+    if (!root) { Py_DECREF(work); return NULL; }
     PyObject *stack = PyList_New(0);
-    if (!stack) { Py_DECREF(root); return NULL; }
-    PyObject *init = PyTuple_Pack(2, data, root);
+    if (!stack) { Py_DECREF(work); Py_DECREF(root); return NULL; }
+    PyObject *init = PyTuple_Pack(2, work, root);
     if (!init || PyList_Append(stack, init) < 0) {
-        Py_XDECREF(init); Py_DECREF(root); Py_DECREF(stack);
+        Py_XDECREF(init); Py_DECREF(work);
+        Py_DECREF(root); Py_DECREF(stack);
         return NULL;
     }
     Py_DECREF(init);
+    Py_DECREF(work);   /* the frame holds the reference now */
     while (PyList_GET_SIZE(stack) > 0) {
         PyObject *top = PyList_GET_ITEM(stack, PyList_GET_SIZE(stack) - 1);
         Py_INCREF(top);
@@ -368,21 +414,28 @@ static PyObject *_scale(PyObject *data, double factor) {
         Py_ssize_t m = PyList_GET_SIZE(src);
         for (Py_ssize_t i = 0; i < m; ++i) {
             PyObject *item = PyList_GET_ITEM(src, i);
-            if (PyList_Check(item)) {
-                PyObject *sub = PyList_New(PyList_GET_SIZE(item));
-                if (!sub) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+            if (is_seq_proto(item)) {
+                PyObject *sub_src = PyList_Check(item)
+                    ? (Py_INCREF(item), item) : PySequence_List(item);
+                if (!sub_src) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+                PyObject *sub = PyList_New(PyList_GET_SIZE(sub_src));
+                if (!sub) {
+                    Py_DECREF(sub_src); Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
                 PyList_SET_ITEM(dst, i, sub);
-                PyObject *frame = PyTuple_Pack(2, item, sub);
+                PyObject *frame = PyTuple_Pack(2, sub_src, sub);
+                Py_DECREF(sub_src);
                 if (!frame || PyList_Append(stack, frame) < 0) {
                     Py_XDECREF(frame); Py_DECREF(root); Py_DECREF(stack);
                     return NULL;
                 }
                 Py_DECREF(frame);
             } else {
-                double v = PyFloat_AsDouble(item);
-                if (PyErr_Occurred()) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
-                PyObject *scaled = PyFloat_FromDouble(v * factor);
-                if (!scaled) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+                PyObject *scaled = NULL;
+                if (scale_leaf(item, factor, &scaled) < 0) {
+                    Py_DECREF(root); Py_DECREF(stack); return NULL;
+                }
                 PyList_SET_ITEM(dst, i, scaled);
             }
         }
@@ -391,24 +444,47 @@ static PyObject *_scale(PyObject *data, double factor) {
     return root;
 }
 
-/* walk every leaf -> |x|^2 (iterative) */
-static PyObject *_spectrum_walk(PyObject *obj) {
-    if (!PyList_Check(obj)) {
-        double v = PyFloat_AsDouble(obj);
-        if (PyErr_Occurred()) return NULL;
-        return PyFloat_FromDouble(v * v);
+/* |leaf|^2 through the float / complex protocols */
+static int leaf_power(PyObject *obj, double *out) {
+    PyObject *f = PyNumber_Float(obj);
+    if (f) {
+        double v = PyFloat_AsDouble(f);
+        Py_DECREF(f);
+        if (PyErr_Occurred()) return -1;
+        *out = v * v;
+        return 0;
     }
-    Py_ssize_t n = PyList_GET_SIZE(obj);
+    PyErr_Clear();
+    double r = PyComplex_RealAsDouble(obj);
+    double i = PyComplex_ImagAsDouble(obj);
+    if (PyErr_Occurred()) return -1;
+    *out = r * r + i * i;
+    return 0;
+}
+
+/* walk every leaf -> |x|^2 (iterative; sequence + complex protocols) */
+static PyObject *spectrum_walk(PyObject *obj) {
+    if (!is_seq_proto(obj)) {
+        double v;
+        if (leaf_power(obj, &v) < 0) return NULL;
+        return PyFloat_FromDouble(v);
+    }
+    PyObject *work = PyList_Check(obj) ? (Py_INCREF(obj), obj)
+                                       : PySequence_List(obj);
+    if (!work) return NULL;
+    Py_ssize_t n = PyList_GET_SIZE(work);
     PyObject *root = PyList_New(n);
-    if (!root) return NULL;
+    if (!root) { Py_DECREF(work); return NULL; }
     PyObject *stack = PyList_New(0);
-    if (!stack) { Py_DECREF(root); return NULL; }
-    PyObject *init = PyTuple_Pack(2, obj, root);
+    if (!stack) { Py_DECREF(work); Py_DECREF(root); return NULL; }
+    PyObject *init = PyTuple_Pack(2, work, root);
     if (!init || PyList_Append(stack, init) < 0) {
-        Py_XDECREF(init); Py_DECREF(root); Py_DECREF(stack);
+        Py_XDECREF(init); Py_DECREF(work);
+        Py_DECREF(root); Py_DECREF(stack);
         return NULL;
     }
     Py_DECREF(init);
+    Py_DECREF(work);   /* the frame holds the reference now */
     while (PyList_GET_SIZE(stack) > 0) {
         PyObject *top = PyList_GET_ITEM(stack, PyList_GET_SIZE(stack) - 1);
         Py_INCREF(top);
@@ -420,20 +496,30 @@ static PyObject *_spectrum_walk(PyObject *obj) {
         Py_ssize_t m = PyList_GET_SIZE(src);
         for (Py_ssize_t i = 0; i < m; ++i) {
             PyObject *item = PyList_GET_ITEM(src, i);
-            if (PyList_Check(item)) {
-                PyObject *sub = PyList_New(PyList_GET_SIZE(item));
-                if (!sub) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+            if (is_seq_proto(item)) {
+                PyObject *sub_src = PyList_Check(item)
+                    ? (Py_INCREF(item), item) : PySequence_List(item);
+                if (!sub_src) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
+                PyObject *sub = PyList_New(PyList_GET_SIZE(sub_src));
+                if (!sub) {
+                    Py_DECREF(sub_src); Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
                 PyList_SET_ITEM(dst, i, sub);
-                PyObject *frame = PyTuple_Pack(2, item, sub);
+                PyObject *frame = PyTuple_Pack(2, sub_src, sub);
+                Py_DECREF(sub_src);
                 if (!frame || PyList_Append(stack, frame) < 0) {
                     Py_XDECREF(frame); Py_DECREF(root); Py_DECREF(stack);
                     return NULL;
                 }
                 Py_DECREF(frame);
             } else {
-                double v = PyFloat_AsDouble(item);
-                if (PyErr_Occurred()) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
-                PyObject *sq = PyFloat_FromDouble(v * v);
+                double v;
+                if (leaf_power(item, &v) < 0) {
+                    Py_DECREF(root); Py_DECREF(stack);
+                    return NULL;
+                }
+                PyObject *sq = PyFloat_FromDouble(v);
                 if (!sq) { Py_DECREF(root); Py_DECREF(stack); return NULL; }
                 PyList_SET_ITEM(dst, i, sq);
             }
@@ -447,18 +533,18 @@ static PyObject *_spectrum_walk(PyObject *obj) {
  * dft / idft / power_spectrum
  * ================================================================== */
 
-static PyObject *_dft_impl(PyObject *data, PyObject *axis, double sign) {
-    PyObject *shape = _shape_of(data);
+static PyObject *dft_impl(PyObject *data, PyObject *axis, double sign) {
+    PyObject *shape = shape_of(data);
     if (!shape) return NULL;
     Py_ssize_t dim = 0;
-    PyObject *axes = _axes(shape, axis, &dim);
+    PyObject *axes = resolve_axes(shape, axis, &dim);
     if (!axes) { Py_DECREF(shape); return NULL; }
-    PyObject *work = _mutable(data, shape);
+    PyObject *work = deep_mutable(data, shape);
     if (!work) { Py_DECREF(shape); Py_DECREF(axes); return NULL; }
     for (Py_ssize_t a = 0; a < PyList_GET_SIZE(axes); ++a) {
         Py_ssize_t axis_i = PyLong_AsSsize_t(PyList_GET_ITEM(axes, a));
         if (PyErr_Occurred() ||
-            _axes_transform_one(work, shape, axis_i, sign) < 0) {
+            axes_transform_one(work, shape, axis_i, sign) < 0) {
             Py_DECREF(shape); Py_DECREF(axes); Py_DECREF(work);
             return NULL;
         }
@@ -475,7 +561,7 @@ static PyObject *py_dft(PyObject *self, PyObject *args, PyObject *kwargs) { (voi
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist,
                                      &data, &axis))
         return NULL;
-    return _dft_impl(data, axis, -1.0);
+    return dft_impl(data, axis, -1.0);
 }
 
 static PyObject *py_idft(PyObject *self, PyObject *args, PyObject *kwargs) { (void)self;
@@ -485,7 +571,7 @@ static PyObject *py_idft(PyObject *self, PyObject *args, PyObject *kwargs) { (vo
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist,
                                      &data, &axis))
         return NULL;
-    PyObject *shape = _shape_of(data);
+    PyObject *shape = shape_of(data);
     if (!shape) return NULL;
     double total = 1.0;
     for (Py_ssize_t i = 0; i < PyList_GET_SIZE(shape); ++i) {
@@ -494,9 +580,9 @@ static PyObject *py_idft(PyObject *self, PyObject *args, PyObject *kwargs) { (vo
         total *= (double)s;
     }
     Py_DECREF(shape);
-    PyObject *work = _dft_impl(data, axis, 1.0);
+    PyObject *work = dft_impl(data, axis, 1.0);
     if (!work) return NULL;
-    return _scale(work, 1.0 / total);
+    return scale(work, 1.0 / total);
 }
 
 static PyObject *py_power_spectrum(PyObject *self, PyObject *args,
@@ -507,16 +593,16 @@ static PyObject *py_power_spectrum(PyObject *self, PyObject *args,
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist,
                                      &data, &axis))
         return NULL;
-    PyObject *work = _dft_impl(data, axis, -1.0);
+    PyObject *work = dft_impl(data, axis, -1.0);
     if (!work) return NULL;
-    return _spectrum_walk(work);
+    return spectrum_walk(work);
 }
 
 /* ==================================================================
  * dft_kernel_real / dft_kernel_imag
  * ================================================================== */
 
-static int _axis_param(PyObject *obj, double **out, Py_ssize_t dim, double dflt) {
+static int axis_param(PyObject *obj, double **out, Py_ssize_t dim, double dflt) {
     *out = NULL;
     if (obj == Py_None) {
         *out = (double*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(double));
@@ -524,7 +610,7 @@ static int _axis_param(PyObject *obj, double **out, Py_ssize_t dim, double dflt)
         for (Py_ssize_t i = 0; i < dim; ++i) (*out)[i] = dflt;
         return 0;
     }
-    if (PyNumber_Check(obj)) {
+    if (!is_seq_proto(obj) && PyNumber_Check(obj)) {
         double v = PyFloat_AsDouble(obj);
         if (PyErr_Occurred()) return -1;
         *out = (double*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(double));
@@ -562,7 +648,7 @@ static int _axis_param(PyObject *obj, double **out, Py_ssize_t dim, double dflt)
     return 0;
 }
 
-static int _element_param(PyObject *obj, double **out, long long total, double dflt) {
+static int element_param(PyObject *obj, double **out, long long total, double dflt) {
     *out = NULL;
     if (obj == Py_None) {
         *out = (double*)malloc((size_t)total * sizeof(double));
@@ -570,7 +656,7 @@ static int _element_param(PyObject *obj, double **out, long long total, double d
         for (long long i = 0; i < total; ++i) (*out)[i] = dflt;
         return 0;
     }
-    if (PyNumber_Check(obj)) {
+    if (!is_seq_proto(obj) && PyNumber_Check(obj)) {
         double v = PyFloat_AsDouble(obj);
         if (PyErr_Occurred()) return -1;
         *out = (double*)malloc((size_t)total * sizeof(double));
@@ -605,24 +691,27 @@ static int _element_param(PyObject *obj, double **out, long long total, double d
     return 0;
 }
 
-static PyObject *_kernel_impl(PyObject *shape_arg, PyObject *freq_arg,
+static PyObject *kernel_impl(PyObject *shape_arg, PyObject *freq_arg,
                               int use_cos, PyObject *scales,
                               PyObject *offsets, PyObject *amplitudes,
                               PyObject *biases) {
-    /* normalize shape / frequencies */
+    /* normalize shape / frequencies (integer protocol first) */
     PyObject *shape_list;
-    PyObject *freq_list;    if (PyLong_Check(shape_arg)) {
+    PyObject *freq_list;
+    PyObject *shape_idx = PyNumber_Index(shape_arg);
+    if (shape_idx) {
         shape_list = PyList_New(1);
         freq_list = PyList_New(1);
         if (!shape_list || !freq_list) {
+            Py_XDECREF(shape_idx);
             Py_XDECREF(shape_list); Py_XDECREF(freq_list);
             return NULL;
         }
-        Py_INCREF(shape_arg);
-        PyList_SET_ITEM(shape_list, 0, shape_arg);
+        PyList_SET_ITEM(shape_list, 0, shape_idx);
         Py_INCREF(freq_arg);
         PyList_SET_ITEM(freq_list, 0, freq_arg);
     } else {
+        PyErr_Clear();
         shape_list = PySequence_List(shape_arg);
         freq_list = PySequence_List(freq_arg);
     }    if (!shape_list || !freq_list) {
@@ -658,10 +747,10 @@ static PyObject *_kernel_impl(PyObject *shape_arg, PyObject *freq_arg,
             return NULL;
         }
         total *= (long long)n;
-    }    double *sc = NULL, *off = NULL, *amp = NULL, *bia = NULL;    if (_axis_param(scales, &sc, dim, 1.0) < 0 ||
-        _axis_param(offsets, &off, dim, 0.0) < 0 ||
-        _element_param(amplitudes, &amp, total, 1.0) < 0 ||
-        _element_param(biases, &bia, total, 0.0) < 0) {
+    }    double *sc = NULL, *off = NULL, *amp = NULL, *bia = NULL;    if (axis_param(scales, &sc, dim, 1.0) < 0 ||
+        axis_param(offsets, &off, dim, 0.0) < 0 ||
+        element_param(amplitudes, &amp, total, 1.0) < 0 ||
+        element_param(biases, &bia, total, 0.0) < 0) {
         free(sc); free(off); free(amp); free(bia);
         Py_DECREF(shape_list); Py_DECREF(freq_list);
         return NULL;
@@ -846,7 +935,7 @@ static PyObject *py_dft_kernel_real(PyObject *self, PyObject *args,
                                      &shape, &frequencies, &scales,
                                      &offsets, &amplitudes, &biases))
         return NULL;
-    return _kernel_impl(shape, frequencies, 1, scales, offsets,
+    return kernel_impl(shape, frequencies, 1, scales, offsets,
                         amplitudes, biases);
 }
 
@@ -861,7 +950,7 @@ static PyObject *py_dft_kernel_imag(PyObject *self, PyObject *args,
                                      &shape, &frequencies, &scales,
                                      &offsets, &amplitudes, &biases))
         return NULL;
-    return _kernel_impl(shape, frequencies, 0, scales, offsets,
+    return kernel_impl(shape, frequencies, 0, scales, offsets,
                         amplitudes, biases);
 }
 
@@ -883,13 +972,21 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+static PyModuleDef_Slot module_slots[] = {
+#if defined(Py_mod_gil) && defined(Py_MOD_GIL_NOT_USED)
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_fourier",
     "C99 optimized Fourier transforms and DFT kernels (math_tool).",
     0,
     methods,
-    NULL, NULL, NULL, NULL
+    module_slots,
+    NULL, NULL, NULL
 };
 
 PyMODINIT_FUNC PyInit__fourier(void);
@@ -897,3 +994,7 @@ PyMODINIT_FUNC PyInit__fourier(void);
 PyMODINIT_FUNC PyInit__fourier(void) {
     return PyModuleDef_Init(&moduledef);
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

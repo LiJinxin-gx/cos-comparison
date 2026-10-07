@@ -1,5 +1,5 @@
 """
-It provides the ability to aggregate the functionality across different layers of the module.
+Aggregate the functionality across the module's different layers.
 """
 
 from .docker import *

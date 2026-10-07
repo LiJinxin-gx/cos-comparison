@@ -24,10 +24,16 @@ class IterWrap:
     __slots__ = ("iter_func", "iterable", "next_func")
     def __init__(self, iterable=(), iter_func=None, next_func=None):
         self.iterable = iterable
-        self.iter_func = iter_func if iter_func else iter
-        self.next_func = next_func if next_func else next
+        self.iter_func = iter_func if iter_func is not None else iter
+        self.next_func = next_func if next_func is not None else next
     def __iter__(self):
-        return self.iter_func(self.iterable)
+        source = self.iter_func(self.iterable)
+        next_func = self.next_func
+        while True:
+            try:
+                yield next_func(source)
+            except StopIteration:
+                return
 
 
 class IterChain:
@@ -73,9 +79,14 @@ class IterZip:
 
 
 class IterWindow:
-    """Sliding-window iteration over an iterable."""
+    """Sliding-window iteration over an iterable (step may exceed size:
+    whole windows are then skipped between yields)."""
     __slots__ = ("it", "size", "step", "window")
     def __init__(self, iterable, size, step=1):
+        if size < 1:
+            raise ValueError("IterWindow size must be a positive integer")
+        if step < 1:
+            raise ValueError("IterWindow step must be a positive integer")
         self.it = iter(iterable)
         self.size = size
         self.step = step
@@ -91,8 +102,15 @@ class IterWindow:
         if len(self.window) < self.size:
             raise StopIteration
         out = list(self.window)
-        advance = min(self.step, len(self.window))
-        self.window = self.window[advance:]
+        if self.step < self.size:
+            self.window = self.window[self.step:]
+        else:
+            self.window = []
+            for _ in range(self.step - self.size):
+                try:
+                    next(self.it)
+                except StopIteration:
+                    break
         return out
 
 
@@ -156,6 +174,8 @@ def iter_group(iterable, key_func):
 
 def iter_batch(iterable, size):
     """Yield batches of fixed size."""
+    if size < 1:
+        raise ValueError("iter_batch size must be a positive integer")
     batch = []
     for item in iterable:
         batch.append(item)
@@ -167,15 +187,26 @@ def iter_batch(iterable, size):
 
 
 def iter_cycle(*iterables):
-    """Yield items cycling through iterables forever (caller breaks)."""
+    """Yield items cycling through iterables forever (caller breaks);
+    sources are re-iterated on exhaustion, empty ones are dropped."""
     sources = [iter(it) for it in iterables]
     if not sources:
         return
     index = 0
     while True:
         try:
-            yield next(sources[index])
+            item = next(sources[index])
         except StopIteration:
-            sources[index] = iter(iterables[index])
-            continue
+            fresh = iter(iterables[index])
+            try:
+                item = next(fresh)
+            except StopIteration:
+                del sources[index]
+                iterables = iterables[:index] + iterables[index + 1:]
+                if not sources:
+                    return
+                index %= len(sources)
+                continue
+            sources[index] = fresh
+        yield item
         index = (index + 1) % len(sources)

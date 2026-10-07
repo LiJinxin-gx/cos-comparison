@@ -9,10 +9,22 @@ class Transaction:
         self.key , self.value = key , value
         self.nesting , self.create = nesting , create
     def __iter__(self):
-        for attr in self.__class__.__slots__:
-            yield getattr(self,attr)
+        seen = set()
+        for cls in reversed(self.__class__.__mro__):
+            for name in getattr(cls,"__slots__",()):
+                if name not in seen:
+                    seen.add(name)
+                    yield getattr(self,name)
     def __hash__(self):
-        return hash(tuple(self))
+        parts = []
+        for value in self:
+            try:
+                hash(value)
+            except TypeError:
+                parts.append(repr(value))
+            else:
+                parts.append(value)
+        return hash(tuple(parts))
 
 class MapMemory(Memory):
     __slots__ = ("cache","close_commit","closer")
@@ -41,7 +53,7 @@ class MapMemory(Memory):
             for k in keys:
                 try:
                     obj = obj[k]
-                except:
+                except (AttributeError, LookupError, TypeError):
                     if create:
                         if create_hook is not None:
                             obj[k] = create_hook(type(obj))
@@ -60,8 +72,8 @@ class MapMemory(Memory):
                 self.real_save(*self.cache[applied])
                 applied += 1
         finally:
-            # always drop the applied entries so a retry never re-applies
-            # them; the failing entry (and everything after it) stays queued.
+            # drop the applied entries so a retry never re-applies them;
+            # the failing entry (and everything after it) stays queued.
             self.cache = self.cache[applied:]
     def rollback(self):
         self.cache = []

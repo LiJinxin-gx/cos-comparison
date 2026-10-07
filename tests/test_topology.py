@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Directed graph (topology) tests for cos_comparison.interface.tools.math_tool.
 
 Covers the DirectedGraph class: counts, degrees, weak/strong connectivity,
@@ -362,7 +361,10 @@ class TestDirectedGraphLockAndIsolation(unittest.TestCase):
             self.assertEqual(g.vertices_count(), 2)
 
     def test_independent_from_graph(self):
-        from cos_comparison.interface.tools.math_tool.topology import DirectedGraph, Graph
+        from cos_comparison.interface.tools.math_tool.topology import (
+            DirectedGraph,
+            Graph,
+        )
         d = DirectedGraph()
         d.add_edge("a", "b")
         u = Graph()
@@ -372,6 +374,102 @@ class TestDirectedGraphLockAndIsolation(unittest.TestCase):
         self.assertEqual(d.edges_count(), 1)
         self.assertEqual(u.edges_count(), 1)
         self.assertNotEqual(type(d), type(u))
+
+
+class TestEulerCellProtocol(unittest.TestCase):
+    """Euler cell scans accept the integer protocol (__index__) and
+    one-shot iterables (generators) must behave like lists."""
+
+    @staticmethod
+    def _euler():
+        from cos_comparison.interface.tools.math_tool.topology import (
+            Euler_characteristic_compute_by_cell,
+        )
+        return Euler_characteristic_compute_by_cell
+
+    def test_generator_cells(self):
+        euler = self._euler()
+        self.assertEqual(euler(i for i in [1, 2, 3, 4]), -2)
+
+    def test_big_int_generator(self):
+        euler = self._euler()
+        self.assertEqual(euler(x for x in [10 ** 30, 3, 10 ** 30]),
+                         2 * 10 ** 30 - 3)
+
+    def test_index_protocol_cells(self):
+        class Cell:
+            def __init__(self, value):
+                self.value = value
+
+            def __index__(self):
+                return self.value
+
+        euler = self._euler()
+        self.assertEqual(euler([Cell(3), Cell(4), Cell(2)]), 1)
+
+    def test_bool_and_float_cells_rejected(self):
+        euler = self._euler()
+        with self.assertRaises(TypeError):
+            euler([True])
+        with self.assertRaises(TypeError):
+            euler([1.5])
+
+
+class TestBackendParity(unittest.TestCase):
+    """The compiled _topology and the pure reference agree on the
+    documented algorithmic surface.  The per-test dotted imports above
+    resolve the pure module file; this class pins the compiled twin (the
+    package alias used when the extension is built)."""
+
+    def setUp(self):
+        try:
+            from cos_comparison.interface.tools.math_tool import (
+                _topology as _c_topology,
+            )
+        except ImportError:
+            self.skipTest("C extension not built")
+        import importlib
+        _py_topology = importlib.import_module(
+            "cos_comparison.interface.tools.math_tool.topology")
+        self.mods = (_py_topology, _c_topology)
+
+    @staticmethod
+    def _mixed(mod):
+        g = mod.DirectedGraph()
+        for edge in (("a", "b"), ("b", "c"), ("a", "b"), ("c", "a"),
+                     ("c", "c"), ("d", "c")):
+            g.add_edge(*edge)
+        return g
+
+    @staticmethod
+    def _dag(mod):
+        g = mod.DirectedGraph()
+        for edge in (("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"),
+                     ("d", "e")):
+            g.add_edge(*edge)
+        return g
+
+    @staticmethod
+    def _snapshot(g, vertex):
+        order = g.topological_sort()
+        return (
+            g.vertices_count(), g.edges_count(),
+            g.weak_components_count(), g.is_weakly_connected(),
+            g.strong_components_count(), g.is_dag(),
+            g.in_degree(vertex), g.out_degree(vertex),
+            sorted(map(str, g.neighbors(vertex))),
+            g.reachable("a", "d"), g.reachable("d", "a"),
+            None if order is None else sorted(map(str, order)),
+            g.has_eulerian_path(), g.has_eulerian_circuit(),
+        )
+
+    def test_mixed_graph_surface(self):
+        snaps = [self._snapshot(self._mixed(m), "c") for m in self.mods]
+        self.assertEqual(snaps[0], snaps[1], "pure/C topology diverge")
+
+    def test_dag_surface(self):
+        snaps = [self._snapshot(self._dag(m), "d") for m in self.mods]
+        self.assertEqual(snaps[0], snaps[1], "pure/C topology diverge")
 
 
 if __name__ == "__main__":

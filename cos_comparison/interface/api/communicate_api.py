@@ -36,11 +36,11 @@ class Communicate(BaseCommunicate):
                  close_func=None):
         self.obj = obj
         self.target = target
-        self.send_func = send_func if send_func else no_done
-        self.sendto_func = sendto_func if sendto_func else no_done
-        self.recv_func = recv_func if recv_func else no_done
-        self.recvfrom_func = recvfrom_func if recvfrom_func else no_done
-        self.close_func = close_func if close_func else no_done
+        self.send_func = send_func if send_func is not None else no_done
+        self.sendto_func = sendto_func if sendto_func is not None else no_done
+        self.recv_func = recv_func if recv_func is not None else no_done
+        self.recvfrom_func = recvfrom_func if recvfrom_func is not None else no_done
+        self.close_func = close_func if close_func is not None else no_done
     def send(self,*args,**kwargs):
         return self.send_func(self,*args,**kwargs)
     def sendto(self,*args,**kwargs):
@@ -56,9 +56,9 @@ class IOCommunicate(Communicate):
     __slots__ = ("mode","reader","writer","closer")
     def __init__(self,obj=None,target=None,mode="rb",reader=None,writer=None,closer=None):
         self.mode = mode
-        self.reader = reader if reader else no_done
-        self.writer = writer if writer else no_done
-        self.closer = closer if closer else no_done
+        self.reader = reader if reader is not None else no_done
+        self.writer = writer if writer is not None else no_done
+        self.closer = closer if closer is not None else no_done
         
         send_func = lambda self,data : self.writer(self.target,data)
         sendto_func = lambda self,data,target_fd : self.writer(target_fd,data)
@@ -80,9 +80,9 @@ class FdCommunicate(IOCommunicate):
     def __init__(self,fd=None,target_fd=None,mode="rb",
                  reader=None,writer=None,closer=None):
         super().__init__(obj=fd,target=target_fd,mode=mode,
-                         reader = reader if reader else os.read,
-                         writer = writer if writer else os.write,
-                         closer = closer if closer else os.close)
+                         reader = reader if reader is not None else os.read,
+                         writer = writer if writer is not None else os.write,
+                         closer = closer if closer is not None else os.close)
 
 class PIPECommunicate(FdCommunicate):
     __slots__ = ()
@@ -118,8 +118,12 @@ class SocketCommunicate(IOCommunicate):
 
 class FileCommunicate(IOCommunicate):
     __slots__ = ()
-    def __init__(self,file_path,mode="rb",buffering=-1):
-        obj = open(file_path,mode,buffering=buffering)
+    def __init__(self,file_path,mode="rb",buffering=-1,encoding=None):
+        # text modes are locale-independent by default (UTF-8); pass an
+        # explicit encoding to override, binary modes ignore it
+        if encoding is None and "b" not in mode:
+            encoding = "utf-8"
+        obj = open(file_path,mode,buffering=buffering,encoding=encoding)
         io_type = type(obj)
         super().__init__(obj=obj,target = obj,
                          reader=io_type.read,

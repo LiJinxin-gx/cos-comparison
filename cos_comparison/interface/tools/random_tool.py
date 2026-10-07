@@ -81,9 +81,10 @@ class RandomToolBase(ABC):
 
     def choice(self, seq):
         """Return a single random element from a non-empty sequence."""
-        if not seq:
+        n = len(seq)
+        if n == 0:
             raise IndexError("choice() cannot select from an empty sequence")
-        return seq[self._randbelow(len(seq))]
+        return seq[self._randbelow(n)]
 
     def shuffle(self, seq):
         """Shuffle a mutable sequence in place (iterative Fisher-Yates)."""
@@ -114,12 +115,12 @@ class RandomToolBase(ABC):
             raise ValueError("choices() k must be non-negative")
         n = len(population)
         if weights is None:
-            if not population:
+            if n == 0:
                 raise IndexError("choices() cannot select from an empty sequence")
             return [self.choice(population) for _ in range(k)]
         if len(weights) != n:
             raise ValueError("weights must match the length of population")
-        if not population:
+        if n == 0:
             raise ValueError("choices() cannot select from an empty weighted sequence")
         return [population[self._weighted_index(weights)] for _ in range(k)]
 

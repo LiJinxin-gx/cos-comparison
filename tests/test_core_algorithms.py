@@ -16,13 +16,12 @@ def block(size, value=1.0):
 
 
 def mod_2(A, B):
-    """cosine-modulated similarity from the README formula."""
+    """Window cosmod through the real kernel: the vector norms and dot
+    product are hand-computed here, then combined by ``core._cosmod``."""
     dot = sum(a * b for a, b in zip(A, B))
     n2a = sum(a * a for a in A)
     n2b = sum(b * b for b in B)
-    if n2a + n2b == 0.0:
-        return 0.0
-    return 2.0 * dot / (n2a + n2b)
+    return core._cosmod(n2a, n2b, dot, "t")
 
 
 class TestCosmodFormula(unittest.TestCase):
@@ -85,13 +84,14 @@ class TestPassive(unittest.TestCase):
     def test_window_size_default(self):
         v = block((4, 4))
         r = core.cos_comparison_passive(v)
-        self.assertEqual(r.shape, (3, 4))  # window (1,1), d (0,0)
+        self.assertEqual(r.shape, (3, 4))  # window (1,1), d (1,0)
 
     def test_1d(self):
         v = core.create_void_list((8,))
         v[0], v[1], v[2] = 1.0, 1.0, 1.0
         r = core.cos_comparison_passive(v, window_size=(3,))
-        self.assertGreater(r.shape[0], 0)
+        # (8 - 3 - 1 + 1) = 5 outputs along the default d=(1,0) axis
+        self.assertEqual(r.shape, (5,))
 
     def test_return_callback(self):
         v = block((5, 5))
@@ -263,13 +263,6 @@ class TestElementwise(unittest.TestCase):
     duck typing, positional-only func call, integrated get_item/set_item,
     iterative, strict same shape, numeric result enforced."""
 
-    def _pair(self, values, shape, out_values=None):
-        a = core.vector_map_as_tensor(vector=list(values), shape=shape)
-        out = core.vector_map_as_tensor(
-            vector=[0.0] * (out_values if out_values is None else len(out_values)),
-            shape=shape)
-        return a, out
-
     def test_unary_returns_zero(self):
         a = core.vector_map_as_tensor(vector=[1.0, 2.0, 3.0], shape=(3,))
         out = core.vector_map_as_tensor(vector=[0.0, 0.0, 0.0], shape=(3,))
@@ -352,5 +345,179 @@ class TestElementwise(unittest.TestCase):
             core.elementwise(func=lambda x: x, output=out)
 
 
+class TestPositionCallbacks(unittest.TestCase):
+    """position_map / elementwise_position: position-driven element
+    callbacks - real traversal, logical callback coordinates (origin /
+    per-dimension scale), duck write via set_item."""
+
+    def test_position_map_basic(self):
+        from cos_comparison.core.cos_comparison import position_map
+        out = [0.0] * 5
+        self.assertEqual(position_map(out, lambda pos: pos[0] * 10), 0)
+        self.assertEqual(out, [0.0, 10.0, 20.0, 30.0, 40.0])
+
+    def test_position_map_2d(self):
+        from cos_comparison.core.cos_comparison import position_map
+        out = [[0.0] * 2, [0.0] * 2]
+        self.assertEqual(position_map(
+            out, lambda pos: pos[0] + pos[1] * 0.1), 0)
+        self.assertEqual(out, [[0.0, 0.1], [1.0, 1.1]])
+
+    def test_position_map_region(self):
+        from cos_comparison.core.cos_comparison import position_map
+        out = [0.0] * 4
+        self.assertEqual(position_map(out, lambda pos: 1.0,
+                                      start=(1,), shape=(2,), step=(1,)), 0)
+        self.assertEqual(out, [0.0, 1.0, 1.0, 0.0])
+
+    def test_position_map_logical_coordinates(self):
+        from cos_comparison.core.cos_comparison import position_map
+        got = []
+        position_map([0.0] * 4, lambda pos: got.append(pos) or 0.0,
+                     origin=(10,), scale=(2,))
+        self.assertEqual(got, [(-10,), (-8,), (-6,), (-4,)])
+
+    def test_position_map_callback_error_skipped(self):
+        from cos_comparison.core.cos_comparison import position_map
+        out = [0.0] * 3
+
+        def bad(pos):
+            if pos[0] == 1:
+                raise ValueError("boom")
+            return pos[0]
+
+        self.assertEqual(position_map(out, bad), 0)
+        self.assertEqual(out, [0.0, 0.0, 2.0])
+
+    def test_elementwise_position_basic(self):
+        from cos_comparison.core.cos_comparison import elementwise_position
+        out = [0.0] * 3
+        self.assertEqual(elementwise_position(
+            out, [1, 2, 3], [10, 20, 30],
+            callback=lambda els, pos: sum(els)), 0)
+        self.assertEqual(out, [11, 22, 33])
+
+    def test_elementwise_position_self_writeback(self):
+        from cos_comparison.core.cos_comparison import elementwise_position
+        out = [0.0] * 3
+        self.assertEqual(elementwise_position(
+            out, [1, 2, 3], callback=lambda els, pos: els[0] * 2), 0)
+        self.assertEqual(out, [2, 4, 6])
+
+
+    def test_position_map_integer_logical(self):
+        from cos_comparison.core.cos_comparison import position_map
+        got = []
+        position_map([0.0] * 3, lambda pos: got.append(pos) or 0.0,
+                     origin=(2,), scale=(1,))
+        self.assertEqual(got, [(-2,), (-1,), (0,)])
+        self.assertTrue(all(type(p[0]) is int for p in got))
+
+    def test_fractional_scale(self):
+        from cos_comparison.core.cos_comparison import position_map
+        got = []
+        position_map([0.0] * 3, lambda pos: got.append(pos) or 0.0,
+                     origin=(10,), scale=(0.5,))
+        self.assertEqual(got, [(-10,), (-9.5,), (-9,)])
+        self.assertEqual([type(p[0]) for p in got],
+                         [int, float, int])  # integral values stay int
+
+    def test_zero_scale_valid(self):
+        from cos_comparison.core.cos_comparison import position_map
+        got = []
+        out = [0.0] * 2
+        self.assertEqual(position_map(
+            out, lambda pos: got.append(pos) or 0.0,
+            origin=(3,), scale=(0,)), 0)
+        self.assertEqual(got, [(-3,), (-3,)])
+
+
+class TestAcrossBackendsPosition(unittest.TestCase):
+    """Position callbacks consistent across every available backend."""
+
+    def test_position_consistent_backends(self):
+        import cos_comparison.core.cos_comparison as _py
+        from cos_comparison import core
+        old = core.get_active_backend()
+        if old is not None:
+            self.addCleanup(core.set_mode, old)
+        checked = 0
+        for name in core.get_available_backends():
+            try:
+                core.set_mode([name])
+            except ImportError:
+                continue  # optional compiled backend not built
+            checked += 1
+            op = [0.0] * 4
+            st = core.position_map(op, lambda pos: pos[0] * 3)
+            self.assertEqual(st, 0)
+            ep = [0.0] * 3
+            est = core.elementwise_position(
+                ep, [1, 2, 3], callback=lambda e, p: e[0] + 1)
+            self.assertEqual(est, 0)
+            pout = [0.0] * 4
+            _py.position_map(pout, lambda pos: pos[0] * 3)
+            self.assertEqual(op, pout)
+        self.assertGreaterEqual(checked, 1)
+
+
+class TestReloadHooks(unittest.TestCase):
+    """The bound __cos_comparison_passive__ / __cos_comparison_active__
+    reload hooks receive the call's extra arguments (data is the bound
+    self) and may delegate back; the result must match the direct call."""
+
+    class PassiveHook:
+        def __init__(self, base, call=None):
+            self.base = base
+            self.call = call if call is not None else core.cos_comparison_passive
+
+        def __cos_comparison_passive__(self, *args, **kwargs):
+            return self.call(self.base, *args, **kwargs)
+
+    class ActiveHook:
+        def __init__(self, base, call=None):
+            self.base = base
+            self.call = call if call is not None else core.cos_comparison_active
+
+        def __cos_comparison_active__(self, *args, **kwargs):
+            return self.call(self.base, *args, **kwargs)
+
+    def test_passive_hook_delegates(self):
+        base = [1.0, 2.0, 3.0, 4.0]
+        direct = core.cos_comparison_passive(base, window_size=(2,), d=(0,))
+        via = core.cos_comparison_passive(self.PassiveHook(base),
+                                          window_size=(2,), d=(0,))
+        self.assertEqual(list(direct), list(via))
+
+    def test_active_hook_delegates(self):
+        base = [1.0, 2.0, 3.0, 4.0]
+        kernel = [1.0, 0.5]
+        direct = core.cos_comparison_active(base, kernel=kernel)
+        via = core.cos_comparison_active(self.ActiveHook(base), kernel=kernel)
+        self.assertEqual(list(direct), list(via))
+
+    def test_passive_hook_python_reference(self):
+        import cos_comparison.core.cos_comparison as _py
+
+        base = [1.0, 2.0, 3.0, 4.0]
+        direct = _py.cos_comparison_passive(base, window_size=(2,), d=(0,))
+        via = _py.cos_comparison_passive(
+            self.PassiveHook(base, call=_py.cos_comparison_passive),
+            window_size=(2,), d=(0,))
+        self.assertEqual(list(direct), list(via))
+
+    def test_active_hook_python_reference(self):
+        import cos_comparison.core.cos_comparison as _py
+
+        base = [1.0, 2.0, 3.0, 4.0]
+        kernel = [1.0, 0.5]
+        direct = _py.cos_comparison_active(base, kernel=kernel)
+        via = _py.cos_comparison_active(
+            self.ActiveHook(base, call=_py.cos_comparison_active),
+            kernel=kernel)
+        self.assertEqual(list(direct), list(via))
+
+
 if __name__ == "__main__":
     unittest.main()
+

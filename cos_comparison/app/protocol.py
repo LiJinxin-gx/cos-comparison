@@ -1,14 +1,14 @@
 """
 Default function interfaces for the Docker container (protocol style).
 
-Provides a complete set of default functions so a bare Docker is runnable:
-reading and running are decoupled (read_* parses an arrangement,
-submit_* hands it to the docker, run() executes it); the default reader
-uses the unified instruction file protocol shared with shell/batch; the
-default run is driven by the brain-layer control flow and the
-action-layer operate flow.  Every method is a *default interface*: the
-Docker instance binds its corresponding attribute to this method;
-replacing an attribute (or the whole manager) replaces that interface.
+Provides the complete default function set so a bare Docker is runnable:
+reading and running are decoupled (read_* parses an arrangement, submit_*
+hands it to the docker, run() executes it); the default reader uses the
+unified instruction-file protocol shared with shell/batch; the default run
+is driven by the brain-layer control flow and the action-layer operate
+flow.  Every method is a *default interface*: the Docker instance binds
+its corresponding attribute to this method; replacing an attribute (or the
+whole manager) replaces that interface.
 """
 
 import inspect
@@ -26,8 +26,12 @@ from ..shell_tool.shell import (
     UnpackRef,
     parse_instruction_file,
 )
+from ..shell_tool.value import (
+    ValueCode,
+    ValueEnv,
+)
 
-__all__ = ("DataRef", "DockerProtocol", "subdocker")
+__all__ = ("DataRef", "DockerProtocol", "SuspendSnapshot", "subdocker")
 
 
 class DockerProtocol:
@@ -44,17 +48,55 @@ class DockerProtocol:
         docker.error = exc
         return 0
 
+    # ---------- suspend / resume (step-boundary snapshot) ----------
+
+    def suspend(self, docker, *args, **kwargs):
+        """Suspend: request a stop at the next step boundary, wait for the
+        running execution to finish, and return a snapshot (SuspendSnapshot
+        export)."""
+        docker.suspended = True
+        handle = getattr(docker, "_run_handle", None)
+        if handle is not None:
+            handle.wait(*args, **kwargs)
+        return SuspendSnapshot(
+            data_pool=_copy_pool(docker.data_pool),
+            operate_pool=_copy_pool(docker.operate_pool),
+            interface_pool=_copy_pool(docker.interface_pool),
+            extension_pool=_copy_pool(docker.extension_pool),
+            function_pool=_copy_pool(docker.function_pool),
+            done_steps=docker.done_steps,
+            error=docker.error,
+            terminated=docker.terminated,
+            suspended=docker.suspended,
+            manager=docker.manager,
+            namespace=docker.namespace,
+            worker=docker.worker)
+
+    def resume(self, docker, snapshot=None, *args, **kwargs):
+        """Resume: load a snapshot back onto the docker (pools, cursor and
+        flags); the next run/start continues after the recorded cursor
+        (already-done steps are skipped, their side effects kept)."""
+        if snapshot is None:
+            return 0
+        for name in SuspendSnapshot.__slots__:
+            if name != "suspended":
+                setattr(docker, name, getattr(snapshot, name))
+        docker.suspended = False
+        docker._resume_from = snapshot.done_steps
+        return 1
+
     # ---------- reading (parses an arrangement from a source) ----------
 
     def read_operate_flow(self, docker, source=None, *args, **kwargs):
-        """Read the operate flow.  With *source* given (text, or a file
-        path) the default reader parses the imperative shell format:
+        """Read the operate flow.  With *source* given (a readable object
+        exposing ``read()``, or the text itself) the default reader parses
+        the imperative shell format:
 
             func arg1 arg2 -kw value -> result_pos
 
-        one operation per line; ``data<N>`` becomes DataRef(N) (data_pool
-        index references).  Without *source* it reads the arrangement
-        already submitted (iterate docker.operate_pool)."""
+        one operation per line; ``data<N>`` becomes DataRef(N) (a data_pool
+        index reference).  Without *source* it reads the arrangement
+        already submitted (docker.operate_pool)."""
         if source is None:
             return list(docker.operate_pool)
         if hasattr(source, "read"):
@@ -73,9 +115,9 @@ class DockerProtocol:
     # ---------- submit (hand an arrangement to the docker) ----------
 
     def submit_operate_flow(self, docker, items, *args, **kwargs):
-        """Submit operate items to the docker (the generic interface used
-        by reading logic to commit an operate arrangement; duck: any
-        iterable of items)."""
+        """Submit operate items to the docker (generic interface used by
+        reading logic to commit an operate arrangement; duck: any iterable
+        of items)."""
         for item in items:
             docker.operate_pool.append(item)
         return 0
@@ -94,11 +136,19 @@ class DockerProtocol:
         on a background worker, each storing its result at
         data_pool[result_pos].  Exceptions terminate by default (the
         maintainer decides whether to catch); the stop flag
-        (docker.terminated) is checked before each step."""
+        (docker.terminated) is checked before each step.  After resume()
+        the already-done steps (docker._resume_from) are skipped."""
+        resume_from = getattr(docker, "_resume_from", 0) or 0
+        docker._resume_from = 0
+        if not resume_from:
+            docker.done_steps = 0
         steps = self._build_steps(docker)
+        if resume_from:
+            steps = steps[resume_from:]
         driver = ExecuterDriver(
             caller_list=steps,
             worker_func=getattr(docker, "worker", None))
+        docker._run_handle = driver
         driver.call_all()
         return driver
 
@@ -132,13 +182,38 @@ class DockerProtocol:
         return thread
 
 
+class SuspendSnapshot:
+    """Docker suspend state: shallow pool copies, the run cursor
+    (done_steps), flags, and configuration references (manager / namespace
+    / worker) for same-process resume."""
+    __slots__ = ("data_pool", "done_steps", "error", "extension_pool",
+                 "function_pool", "interface_pool", "manager", "namespace",
+                 "operate_pool", "suspended", "terminated", "worker")
+    def __init__(self, **state):
+        for name in self.__slots__:
+            setattr(self, name, state.get(name))
+
+
+def _copy_pool(pool):
+    """Shallow-copy a duck pool (dict / sequence); other carriers are kept
+    as-is."""
+    if isinstance(pool, dict):
+        return pool.copy()
+    try:
+        return pool[:]
+    except TypeError:
+        return pool
+
+
 def _step(fn, docker, packed, pos):
-    """One executable step: run fn (with data injection decided by the
-    function itself), resolve DataRef args, store the result at the
-    target position of data_pool.  An exception terminates the run by
-    default (stored via store_error, docker.terminated set)."""
+    """One executable step: run fn (data injection decided by the function
+    itself), resolve DataRef args, store the result at the target data_pool
+    position.  An exception terminates the run by default (store_error +
+    docker.terminated); a suspend request (docker.suspended) stops the run
+    cleanly at this boundary."""
     def execute():
-        if getattr(docker, "terminated", False):
+        if getattr(docker, "terminated", False) or \
+                getattr(docker, "suspended", False):
             return None
         try:
             if packed is None:
@@ -146,37 +221,64 @@ def _step(fn, docker, packed, pos):
             else:
                 args, kwargs = packed
                 args, kwargs = _prepare_args(
-                    args, kwargs, docker.data_pool)
+                    args, kwargs, docker.data_pool, _docker_env(docker))
                 result = _apply_unpacked(fn, args, kwargs, docker)
         except Exception as exc:  # default termination (maintainer decides)
             docker.store_error(exc)
             docker.terminated = True
             raise
         _set_data(docker.data_pool, pos, result)
+        docker.done_steps += 1
         return result
     return execute
 
-def _resolve_arg(value, data):
-    """Resolve DataRef variable references against the data pool."""
+def _resolve_arg(value, data, env=None):
+    """Resolve one argument value: compiled ValueCode executes against
+    the docker environment; DataRef variable references resolve against
+    the data pool; anything else passes through."""
+    if isinstance(value, ValueCode):
+        if env is None:
+            raise ValueError("compiled value needs an environment")
+        return value.execute(env)
     if isinstance(value, DataRef):
         return value.resolve(data)
     return value
 
 
-def _prepare_args(args, kwargs, data):
-    """Prepare a call (app layer, self-contained): resolve DataRef
-    variables and expand the unpack markers (``%`` sequence unpack into
-    positional arguments, ``%%`` mapping unpack into keyword
-    arguments)."""
+def _docker_env(docker):
+    """The execution environment for compiled values: the data pool as
+    the data region, the docker namespace as the name resolver, and the
+    shared shell variable tables for the pointer/word forms."""
+    from ..shell_tool.shell import variable_indexes, variables
+    return ValueEnv(data=docker.data_pool,
+                    vars=variables(),
+                    resolve=lambda name: _resolve_func(name, docker),
+                    var_index=variable_indexes())
+
+
+def _prepare_args(args, kwargs, data, env=None):
+    """Prepare a call (app layer, self-contained): execute compiled
+    values and resolve DataRef variables and expand the unpack markers
+    (``%`` sequence unpack into positional arguments, ``%%`` mapping
+    unpack into keyword arguments)."""
     flat = []
     for a in args:
-        if isinstance(a, UnpackRef):
-            flat.extend(_resolve_arg(a.value, data))
+        if isinstance(a, ValueCode):
+            value = a.execute(env)
+            if a.kind == "unpack":
+                flat.extend(value)
+            elif a.kind == "unpack_map":
+                kwargs.update(value)
+            else:
+                flat.append(value)
+        elif isinstance(a, UnpackRef):
+            value = _resolve_arg(a.value, data, env)
+            flat.extend(value)
         elif isinstance(a, UnpackMapRef):
-            kwargs.update(_resolve_arg(a.value, data))
+            kwargs.update(_resolve_arg(a.value, data, env))
         else:
-            flat.append(_resolve_arg(a, data))
-    kwargs = {k: _resolve_arg(v, data) for k, v in kwargs.items()}
+            flat.append(_resolve_arg(a, data, env))
+    kwargs = {k: _resolve_arg(v, data, env) for k, v in kwargs.items()}
     return flat, kwargs
 
 
@@ -193,8 +295,8 @@ def _parse_shell_flow(text, docker):
 def subdocker(docker, flow, data=None, timeout=None):
     """External delegation: create a child Docker (copies the parent's
     pools, reuses its manager / namespace / worker), read ``flow``
-    (instruction text or an operate item list), run synchronously
-    (waited), and return its data_pool.  A child error raises."""
+    (instruction text or an operate item list), run synchronously, and
+    return its data_pool.  A child error raises."""
     from .docker import Docker
     sub = Docker(
         data_pool=dict(docker.data_pool) if data is None else data,
@@ -215,14 +317,23 @@ def subdocker(docker, flow, data=None, timeout=None):
 
 
 def _control_closure(docker, cond):
-    """Wrap a deferred condition call (fn, args, kwargs) into a runtime
-    closure bound to the docker: DataRef variables resolve against the
-    data pool on every call (loop conditions see fresh data); returns
+    """Wrap a deferred condition into a runtime closure bound to the
+    docker: a compiled ValueCode condition or a classic (fn, args,
+    kwargs) deferred call - DataRef variables resolve against the data
+    pool on every call (loop conditions see fresh data); returns
     truthiness."""
+    if isinstance(cond, ValueCode):
+        env = _docker_env(docker)
+
+        def run():
+            return bool(cond.execute(env))
+
+        return run
     fn, args, kwargs = cond
 
     def run():
-        rargs, rkwargs = _prepare_args(args, kwargs, docker.data_pool)
+        env = _docker_env(docker)
+        rargs, rkwargs = _prepare_args(args, kwargs, docker.data_pool, env)
         return bool(_apply_unpacked(fn, rargs, rkwargs, docker))
 
     return run
@@ -236,7 +347,8 @@ def _prepare_control(fn, args, docker):
     if fn not in (IF, WHILE):
         return args
     cond = args[0]
-    if isinstance(cond, tuple) and len(cond) == 3:
+    if isinstance(cond, tuple) and len(cond) == 3 \
+            or isinstance(cond, ValueCode):
         cond = _control_closure(docker, cond)
     if fn is IF:
         true_items, false_items = args[1], args[2]
@@ -249,23 +361,87 @@ def _prepare_control(fn, args, docker):
 
 
 def _items_runner(docker, items):
-    """Wrap a branch's item list as a runnable closure: a brain-layer
-    Sequence flattened at run time, each step executed against the docker
-    (nested control-flow items wrapped the same way); returns the last
-    step result."""
+    """Wrap a branch's item list as a runnable closure on an explicit
+    frame stack: the brain-layer Sequence flattens at run time, nested
+    IF/WHILE items expand onto the stack, each step runs against the
+    docker; returns the last step result."""
     flow = Sequence(items)
+    env = _docker_env(docker)
+    frames = []
+
+    def wrap_cond(cond):
+        if isinstance(cond, tuple) and len(cond) == 3 \
+                or isinstance(cond, ValueCode):
+            return _control_closure(docker, cond)
+        return cond
+
+    def finish_pending(parent, result):
+        pending = parent[-1]
+        if pending is None:
+            return
+        parent[-1] = None
+        _set_data(docker.data_pool, pending[0], result)
+        parent[-2] = result
+
+    def handle(item):
+        fn, args, kwargs, pos = _unpack(item)
+        frame = frames[-1]
+        if fn is IF:
+            cond = wrap_cond(args[0])
+            _cond, true_items, false_items = args
+            branch = true_items if bool(cond()) else false_items
+            if not branch:
+                _set_data(docker.data_pool, pos, None)
+                frame[-2] = None
+                return None
+            frame[-1] = (pos,)
+            return ["items", ControlFlatten()(Sequence(branch)), None, None]
+        if fn is WHILE:
+            cond = wrap_cond(args[0])
+            _cond, body_items = args
+            frame[-1] = (pos,)
+            return ["while", cond, body_items, None, 0, None, None]
+        rargs, rkwargs = _prepare_args(args, kwargs, docker.data_pool, env)
+        result = _apply_unpacked(fn, rargs, rkwargs, docker)
+        _set_data(docker.data_pool, pos, result)
+        frame[-2] = result
+        return None
 
     def run():
+        frames[:] = [["items", ControlFlatten()(flow), None, None]]
         last = None
-        for item in ControlFlatten()(flow):
-            if item is None:
-                continue
-            fn, args, kwargs, pos = _unpack(item)
-            args = _prepare_control(fn, args, docker)
-            args, kwargs = _prepare_args(args, kwargs, docker.data_pool)
-            result = _apply_unpacked(fn, args, kwargs, docker)
-            _set_data(docker.data_pool, pos, result)
-            last = result
+        while frames:
+            frame = frames[-1]
+            if frame[0] == "while":
+                if frame[3] is None:
+                    if not bool(frame[1]()):
+                        frames.pop()
+                        if frames:
+                            finish_pending(frames[-1], frame[4])
+                        continue
+                    frame[3] = ControlFlatten()(Sequence(frame[2]))
+                try:
+                    item = next(frame[3])
+                except StopIteration:
+                    frame[3] = None
+                    frame[4] += 1
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
+            else:
+                try:
+                    item = next(frame[1])
+                except StopIteration:
+                    frames.pop()
+                    if frames:
+                        finish_pending(frames[-1], frame[2])
+                    else:
+                        last = frame[2]
+                    continue
+                new_frame = handle(item)
+                if new_frame is not None:
+                    frames.append(new_frame)
         return last
 
     return run
@@ -301,9 +477,9 @@ def _unpack(op):
 
 
 def _apply_unpacked(fn, args, kwargs, docker):
-    """Execute one unpacked operate item.  Data injection is decided by
-    the function itself: a first positional parameter named ``data``
-    receives the data_pool, one named ``docker`` receives the docker."""
+    """Execute one unpacked operate item.  Data injection is by name: a
+    first positional parameter named ``data`` receives the data_pool, one
+    named ``docker`` receives the docker."""
     name = _first_param_name(fn)
     if name == "data":
         args = (docker.data_pool,) + tuple(args)

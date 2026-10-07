@@ -1,4 +1,4 @@
-#It allows to use inner or external modules.
+# Call containers for inner or external modules.
 
 from abc import ABC
 
@@ -10,11 +10,12 @@ class BaseCallContainer(ABC):
     def __init__(self,obj):
         self.container = obj
     def call(self,name,args=(),kwargs=None,init_func=None):
-        # It does not use "__getattr__",because it will cause bugs while get inner attribute such as "container".
+        # No "__getattr__": it would break access to inner attributes
+        # such as "container".
         kwargs= kwargs if kwargs is not None else {}
         return self.get_call(name,init_func=init_func)(*args,**kwargs)
     def get_call(self,name,init_func=None):
-        if init_func:
+        if init_func is not None:
             return init_func(getattr(self.container,name))
         else:
             return getattr(self.container,name)

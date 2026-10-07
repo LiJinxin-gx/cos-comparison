@@ -36,6 +36,18 @@ class TestWindowBatch(unittest.TestCase):
         self.assertEqual(list(IterWindow([1, 2, 3, 4], 2, 2)),
                          [[1, 2], [3, 4]])
 
+    def test_window_step_larger_than_size(self):
+        self.assertEqual(list(IterWindow([1, 2, 3, 4, 5, 6, 7], 2, 3)),
+                         [[1, 2], [4, 5]])
+
+    def test_window_invalid_arguments(self):
+        with self.assertRaises(ValueError):
+            IterWindow([1, 2], 0)
+        with self.assertRaises(ValueError):
+            IterWindow([1, 2], 2, 0)
+        with self.assertRaises(ValueError):
+            list(iter_batch([1, 2], 0))
+
     def test_window_short(self):
         self.assertEqual(list(IterWindow([1, 2], 3)), [])
 
@@ -79,6 +91,10 @@ class TestMapFilterGroup(unittest.TestCase):
         out = [next(gen) for _ in range(4)]
         self.assertEqual(out, [1, 10, 2, 10])
 
+    def test_cycle_skips_empty_sources(self):
+        gen = iter_cycle([], [1, 2])
+        self.assertEqual([next(gen) for _ in range(4)], [1, 2, 1, 2])
+
 
 class TestWrap(unittest.TestCase):
     def test_wrap_iter(self):
@@ -89,6 +105,19 @@ class TestWrap(unittest.TestCase):
     def test_wrap_delegated(self):
         w = IterWrap([1, 2], iter_func=lambda seq: iter(reversed(seq)))
         self.assertEqual(list(iter(w)), [2, 1])
+
+    def test_wrap_next_func_honoured(self):
+        calls = []
+
+        def custom_next(source):
+            calls.append(source)
+            if len(calls) >= 3:
+                raise StopIteration
+            return "item"
+
+        w = IterWrap([1, 2], next_func=custom_next)
+        self.assertEqual(list(w), ["item", "item"])
+        self.assertEqual(len(calls), 3)  # the third call stops the loop
 
 
 if __name__ == "__main__":

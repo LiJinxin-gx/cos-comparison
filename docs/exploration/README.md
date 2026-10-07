@@ -1,17 +1,39 @@
-﻿# Exploration Tests (v0.4.4)
+﻿# Exploration Tests (v0.5.3)
+
+> **Latest result (v0.5.3) — core identity.** Extraction and generation are the
+> forward / reverse of **one local comparison relation**; the universal criterion
+> is closure (re-extraction returns the same relation). The reference build is an
+> open-module platform (`cos_platform.py`): matched I/O pairs, processing
+> separated from I/O, runs standalone or imports as a module. Verified:
+> continuous closure mean|dE|≈1e-6 (formal-backend digit 4e-6), discrete grounded
+> connectors 100%, faces on-classified 88.8% (CNN 90%), synthetic video 95.8%,
+> prior-free text on-classified 73.5%; MNIST raw ceiling corrected to L1 94.70%
+> / L2 95.73% (irreducible ~3–5%).
+> See [core_identity_closure.md](core_identity_closure.md) for the full statement,
+> tables and evidence-backed boundaries.
 
 Exploratory testing summary — a general method (local comparison + hierarchical
 isolation + threshold mapping + parallelism) validated across image, audio and
 text tasks, plus learning mechanisms, Agent frameworks and field web-automation
-experiments.
+experiments. The v0.5.2 sections below are retained as the historical record;
+where they conflict with the v0.5.3 summary above, the newer result governs.
 
-The exploratory scripts themselves live in the `explore/` package directory
-at the project root (packaged with the distribution): `explore_data.py`
-(acquisition), `explore_vision.py` / `explore_audio.py` / `explore_text.py`
-(analyses), `explore_generate.py` / `explore_memory.py` / `explore_task.py`
-(learning & agent experiments), and the GUI viewers
-(`explore_client_gui.pyw` / `explore_server_gui.pyw`). They are exercised by
-`tests/test_explore_smoke.py` with synthetic in-memory data.
+The exploration modules live in the `explore/` directory at the project root:
+core module (`group_hierarchical.py`) and demo
+scripts (`demo_speech.py`, `demo_text.py`, `demo_image.py`). They are
+distributed as exploration examples in the source distribution (they are NOT
+installed as a package — the wheel carries no `explore` module; run them from
+the source tree). See [atomic_contrast_matching.md](atomic_contrast_matching.md)
+for the latest atomic contrast point matching results.
+See [hierarchical_isolation_reflection.md](hierarchical_isolation_reflection.md)
+for the tensor-domain hierarchy-isolation principle reflection (each layer uses
+a different primitive to extract a different kind of information).
+See [open_memory_system.md](open_memory_system.md)
+for the pluggable open memory architecture with protocol-based backends.
+
+> Test platform: Intel Core Ultra 5 125H (14C/18T) + Intel Arc Graphics
+> (112 CUs, driver 31.0.101.5382); Windows 11 x64; Python 3.14.6; numpy
+> 2.5.2; pyopencl 2026.1.4.  CPU-only experiments exclude the GPU.
 
 ## General Method
 
@@ -22,6 +44,93 @@ data -> numeric tensor (1D/2D) -> core hierarchical isolation
      -> block activation / label maps -> prototype matching / clustering
 parallelism: free-threaded (no-GIL Python 3.14 build) + ThreadPoolExecutor
 ```
+
+## Atomic Contrast Point Matching (PCML v10.37-v10.42)
+
+Unsupervised structure-first matching using binary contrast point sets and
+Jaccard similarity, instead of global feature vectors and cosine similarity.
+Key result: **47.1%** on 30-class speech recognition, exceeding supervised
+methods (22.6%).
+
+See [atomic_contrast_matching.md](atomic_contrast_matching.md) for full
+tables and methodology.
+
+| Method | Train/class | Accuracy |
+|--------|------------|----------|
+| Supervised Fisher baseline | 100 | 22.6% |
+| Unsupervised K-means | 80 | 7.2% |
+| Atomic Jaccard KNN | 500 | 42.9% |
+| **Multi-scale + Hierarchical** | **500** | **47.1%** |
+
+Core module in `explore/`: `group_hierarchical.py`.
+
+## Local k-NN Learner (world-model / control, PCML v53)
+
+The simplest rigorous non-parametric learner, validated as a control
+world-model study: knowledge is stored as **local prototypes**; prediction is
+the **unweighted mean of the k nearest local experiences that know the action**
+(the k-nearest-neighbour estimate of the local conditional mean). Strictly
+local - no weights, no gradient, no global function, no global temperature -
+with one knob (neighbourhood size k). As prototypes grow denser the
+k-nearest window shrinks and the estimate converges to the true local mean.
+
+Synthetic state-dependent rotation-field navigation (8-direction actions,
+goal-free i.i.d. data, one-step closed-loop MPC), compared on the same
+data/controller against a hand-written global MLP world model (the ML baseline,
+kept outside the project):
+
+| Data N | Local k-NN reach | Global MLP reach | k-NN RMSE | MLP RMSE |
+|--------|------------------|------------------|-----------|----------|
+| 150    | 100%             | 80%              | 0.050     | 0.069    |
+| 4000   | 100%             | 100%             | 0.0168    | 0.0184   |
+
+**Zero-forgetting (stability-plasticity):** after learning a new local region
+(40 transitions), the old region reach stayed 100% -> 100% (an absorbing
+update writes/updates a single prototype and never touches others); the global
+MLP dropped 100% -> 0% (catastrophic forgetting).
+
+Take-away: an earlier small-sample gap traced to hard nearest-neighbour
+boundary jumps, not to locality itself. Local averaging matches or beats a
+global MLP on sample efficiency while keeping zero-forgetting and full
+interpretability. Zero-dependency reference implementation in `explore/`:
+`core/localknn.py` + `examples/example_local_model.py` (see
+`docs/local_knn.md` in the explore repo).
+
+## Structural-Inverse Perception-Generation Loop (PCML v40-v50)
+
+A closed loop built only from native components (TensorReceptor / Memory /
+TensorGenerator / UnitMap): perception -> hierarchical fold -> asymmetric memory
+-> structural-inverse generation. The structural inverse is exact and
+deterministic (run-fold and expand are mutual inverses); high-frequency repeated
+char-groups auto-fold into tokens via UnitMap `window_units` + `most_common`.
+Validated on English literary, classical Chinese and modern Chinese text.
+
+See [structural_inverse_loop.md](structural_inverse_loop.md) for the pipeline,
+results table and empirical boundaries.
+
+| Stage | Key result |
+|-------|-----------|
+| Native hierarchy | run-fold ~25.7x compression |
+| Structural inverse | exact, deterministic |
+| Token emergence | repeated char-groups fold to tokens (native, not BPE) |
+| Reasoning loop | high-level perturbation drives low-level output exactly |
+
+## Open Memory System (Pluggable Backends)
+
+Protocol-based memory architecture with swappable storage backends.
+Pure standard library implementation, group-theoretically rigorous.
+
+See [open_memory_system.md](open_memory_system.md) for full architecture and
+performance benchmarks.
+
+| Backend | Speed | Persistence | Use Case |
+|---------|-------|-------------|----------|
+| InMemoryBackend (default) | Fastest | No | Development/testing |
+| JSONFileBackend | Medium | Yes | Small datasets, debugging |
+| SQLiteBackend | Fast queries | Yes | Large datasets |
+
+Core features: zero forgetting, cross-session learning, pluggable interface.
+Code in `explore/`: `memory.py`.
 
 ## Core Algorithm Validation
 
@@ -145,7 +254,7 @@ fetch (behavior from DB) -> decode (defaults merge)
      -> write back (runs history + statistics)
 ```
 
-Formal module `explore/behavior_agent.py` (pure stdlib + cos_comparison):
+Formal framework (historical, now in experiment area) (pure stdlib + cos_comparison):
 
 - `BehaviorMemory`: DatabaseMemory with injected DatabaseToolWrap
   (check_same_thread=False) - single shared connection + write lock,
@@ -161,12 +270,11 @@ Formal module `explore/behavior_agent.py` (pure stdlib + cos_comparison):
   `configure(name, "enabled", 0)` disables,
   `configure(name, "defaults", ...)` changes parameters
 - External behavior modules (e.g. selenium-backed) are injected
-  implementations; offline tests (`test_behavior_agent`, 11 cases) use
-  `explore/sample_behaviors.py` mocks - no network, no third-party deps
+  implementations; the module self-test uses inline test behaviors - no network, no third-party deps
 
 ### Generic Executor (atomic instruction triples)
 
-Formal evolution in `explore/behavior_agent.py` — fixed code runs any
+Formal evolution (historical, now in experiment area) — fixed code runs any
 logic encoded in the DB as instruction triples:
 
 ```
@@ -342,7 +450,7 @@ Paths below use placeholders: `<data-dir>` = local dataset root,
 Web-automation script names are generalized to avoid identifying specific
 target platforms; local filenames may differ.
 
-- Datasets: `<data-dir>/` (mnist / 20newsgroups / captcha*);
+- Datasets: `<data-dir>/` (MNIST / 20 Newsgroups / captcha*);
   `<data-dir>/video/` (7 CPU/OS MP4, 142.6 MB);
   `<data-dir>/video_dl/` (3 downloaded public samples:
   Big Buck Bunny / Jellyfish / Sintel, Blender CC movies)
@@ -357,8 +465,7 @@ target platforms; local filenames may differ.
 - Behavior Agent experiments: `<experiment-dir>/behavior_agent_v1.py`,
   `behavior_agent_v2.py`, `agent_behaviors.py` (output:
   `<experiment-dir>/behavior_output/`, `<experiment-dir>/behavior_output_v2/`);
-  formal framework: `explore/behavior_agent.py` + `explore/sample_behaviors.py` +
-  `tests/test_behavior_agent.py`
+  formal framework (historical, now in experiment area) (explicit interface, no config files)
 - Surf tasks (feedback / reflex / hier / platform): `von_surf_engine.py`,
   `agent_surf.py`, `agent_surf_behaviors.py`, `von_hier_engine.py`,
   `agent_hier_behaviors.py`, `agent_platform_behaviors.py`,
@@ -406,3 +513,100 @@ target platforms; local filenames may differ.
     robust extraction method; full-profile copy (not just cookies.sqlite)
     preserves session state across Selenium restarts, and profile-modify
     writes can be verified by read-back on a fresh launch
+
+## External Research Assessment (Summary)
+datasets are named for reproducibility, while specific third-party platforms
+and task setups are generalized) stress-tested the general method — perception
+(passive difference sensing /
+active template matching) + hierarchical memory + lazy similarity-based
+decision — across standard public benchmarks and internal synthetic tasks
+in the image, text, retrieval and generation domains.
+
+### Confirmed strengths
+
+- Retrieval, matching and consistency-oriented generation are the stable
+  home territory: high accuracy with millisecond-scale training, no
+  gradient loop, naturally incremental learning (new memories usable at
+  inference time), full interpretability and deterministic behaviour.
+- Decoupled training (a sensing/generation reconstruction objective before
+  decision discrimination) measurably improves downstream discrimination;
+  simple lazy learning beats stacked multi-mechanism designs; low-
+  dimensional signatures keep the pattern space tractable.
+- The repeatedly validated design principles — information lives in
+  differences; local analysis is absolute while global is relative; simple
+  beats complex; reconfiguration through data rather than code — hold
+  across domains and serve as a stable methodological core.
+
+### Empirically established boundaries
+
+- Classification strength concentrates on small, aligned, template-like
+  inputs; real-world variability (position, rotation, noise) degrades
+  accuracy sharply, and run-to-run stability is not yet guaranteed.
+- Text tasks remain weak for true topic discrimination under the v0.5.2
+  adjacent-change representation; the v0.5.3 prior-free recurring n-gram method
+  raises this to on-classified 73.5% (see core_identity_closure.md), and coherent
+  generation must replay the recorded sequential connector map. Exact-value
+  alignment across modalities is bounded by the corrected ~3–5% irreducible
+  ambiguity (MNIST raw L2 ceiling 95.73%).
+- Hand-built features mostly lack class-discriminative power; abstraction
+  beyond the two explicit memory levels does not emerge without manual
+  design.
+
+### Characterisation
+
+The method is best characterised as a non-parametric memory-and-retrieval
+system: strong as a transparent similarity core — a natural memory /
+retrieval / interpretability layer for hybrid architectures — while the
+abstract representation and compositional generalisation required for
+general intelligence are not yet supplied by this approach alone.
+
+### Next-step directions
+
+1. Stronger input representations (learned or pre-trained embeddings) on
+   top of the existing memory / decision core — the highest-leverage move
+2. Learned features replacing hand-crafted ones (reconstruction-decoupled
+   training)
+3. Invariance-aware sensing (position / rotation / noise handling)
+4. A language path via embeddings + memory retrieval, and generation by
+   fragment recombination under structure constraints
+5. Incremental concept formation (clustering / prototype learning) for
+   the higher memory levels
+6. A unified validation harness with mandatory random baselines before
+   claims
+## GPU Acceleration Test Data (Intel Arc)
+
+Exploratory measurement of element-space parallel work on the local
+Intel(R) Arc(TM) Graphics device (OpenCL via pyopencl; 14.3 GiB global
+memory, 4 GiB max single allocation, 1024 max work-group) - the
+SuperParallel element-space model maps directly onto OpenCL work items
+(one kernel invocation per configured element; data/hardware transfer
+stays a data-layer concern).
+
+Test platform: Intel Core Ultra 5 125H (14C/18T) + Intel Arc Graphics
+(112 CUs, driver 31.0.101.5382); Windows 11 x64; Python 3.14.6; numpy
+2.5.2; pyopencl 2026.1.4.
+
+### Saxpy benchmark (y = a*x + y, float32)
+
+| n        | CPU (numpy) | GPU compute | GPU end-to-end | CPU/GPU | CPU/e2e |
+|----------|-------------|-------------|----------------|---------|---------|
+| 10^5     | 0.13 ms     | 0.67 ms     | 0.37 ms        | 0.2x    | 0.4x    |
+| 10^6     | 2.04 ms     | 0.32 ms     | 1.34 ms        | 6.4x    | 1.5x    |
+| 10^7     | 21.2 ms     | 2.64 ms     | 11.3 ms        | 8.0x    | 1.9x    |
+| 10^8     | 217 ms      | 26.8 ms     | 165 ms         | 8.1x    | 1.3x    |
+| 4x10^8   | 919 ms      | 102 ms      | 1155 ms        | 9.0x    | 0.8x    |
+
+Device write bandwidth (fill kernel): 19-23 GiB/s.
+
+### Observations
+
+- Pure compute speedup is a stable 6-9x for n >= 10^6; below 10^5 the
+  launch/transfer overhead makes the CPU the winner.
+- End-to-end (host<->device copies included) stays ahead 1.3-1.9x in
+  the 10^6-10^8 sweet spot and falls behind at 4x10^8 - the device is
+  transfer-bound (~4.5 GB/s copies vs 19-23 GiB/s write bandwidth;
+  roughly three bytes moved per byte of useful work).
+- Platform profile: strong compute, moderate memory bandwidth
+  (shared/PCIe memory).  GPU executors are best used as resident batch
+  kernels (data uploaded once, computed several times, fetched once);
+  per-iteration round trips cancel the advantage at large n.

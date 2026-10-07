@@ -45,14 +45,14 @@ class IOStream(BaseIO):
                  write_func=None, close_func=None, seek_func=None,
                  tell_func=None, flush_func=None, readline_func=None):
         self.obj = obj
-        self.open_func = open_func if open_func else no_done
-        self.read_func = read_func if read_func else no_done
-        self.write_func = write_func if write_func else no_done
-        self.close_func = close_func if close_func else no_done
-        self.seek_func = seek_func if seek_func else no_done
-        self.tell_func = tell_func if tell_func else no_done
-        self.flush_func = flush_func if flush_func else no_done
-        self.readline_func = readline_func if readline_func else no_done
+        self.open_func = open_func if open_func is not None else no_done
+        self.read_func = read_func if read_func is not None else no_done
+        self.write_func = write_func if write_func is not None else no_done
+        self.close_func = close_func if close_func is not None else no_done
+        self.seek_func = seek_func if seek_func is not None else no_done
+        self.tell_func = tell_func if tell_func is not None else no_done
+        self.flush_func = flush_func if flush_func is not None else no_done
+        self.readline_func = readline_func if readline_func is not None else no_done
     def open(self, *args, **kwargs):
         return self.open_func(self, *args, **kwargs)
     def read(self, n=-1):

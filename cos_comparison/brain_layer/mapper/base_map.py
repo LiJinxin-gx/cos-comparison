@@ -58,7 +58,7 @@ class Map(BaseMap):
         """Default keys (Python mapping protocol): carrier keys() when
         supported; index keys for sized sequences; else empty."""
         source = getattr(self.map_obj, "keys", None)
-        if source is not None:
+        if callable(source):
             return source()
         try:
             return range(len(self.map_obj))

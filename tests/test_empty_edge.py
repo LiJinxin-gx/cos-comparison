@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Degenerate / empty / edge inputs across all three backends.
+"""Degenerate / empty / edge inputs across all backends.
 
-Every case runs in a fresh subprocess (so a segfault in one never kills
-the suite) with a sanitised environment and a neutral cwd (no source
-tree shadowing, no PYTHONPATH pollution - see testutil.py).
+Each case runs in a fresh subprocess (a segfault cannot kill the suite)
+with a sanitised environment and a neutral cwd (see testutil.py).
 
-Invariants asserted per case:
-  * no backend crashes (exit code must not be negative / killed);
-  * the outcome class (OK vs RAISED) is identical on all three backends.
+Invariants per case:
+  * no backend crashes (a normal interpreter exit is 0 or 1; any other
+    code - negative POSIX signals or Windows NTSTATUS values - fails);
+  * the outcome class (OK vs RAISED) is identical on all backends.
 """
 
 import unittest
@@ -16,8 +16,7 @@ import testutil
 
 BACKEND_IMPORTS = [
     ("py", "from cos_comparison.core import cos_comparison as m"),
-    ("pydll", "from cos_comparison.core import cos_comparison_pydll as m"),
-    ("ctypes", "import cos_comparison.core.cos_comparison_c as m"),
+    ("c", "import cos_comparison.core.cos_comparison_pydll as m"),
 ]
 
 CASES = [
@@ -40,7 +39,7 @@ CASES = [
     ("shape_empty_2d", "t=m.create_void_list((0,3)); print(t.shape)"),
     # --- Core algorithms with empty input ---
     ("cos_passive_empty", "m.cos_comparison_passive([])"),
-    ("cos_active_empty", "m.cos_comparison_active([], [])"),
+    ("cos_active_empty_kernel", "m.cos_comparison_active([], kernel=[])"),
     ("mean_local_empty", "m.mean_local([])"),
     ("local_variance_empty", "m.local_variance([])"),
     ("cos_passive_zero_shape", "t=m.create_void_list((0,)); m.cos_comparison_passive(t)"),
@@ -124,7 +123,7 @@ class TestEmptyAndEdgeInputs(unittest.TestCase):
             outcomes = {}
             for backend, imp in BACKEND_IMPORTS:
                 rc, out, err = testutil.run_probe(imp, code)
-                if rc < 0:
+                if rc not in (0, 1):  # not a clean OK / Python exception exit
                     failures.append("%s crashed on %s (rc=%d): %s"
                                     % (name, backend, rc, err[-200:]))
                     continue

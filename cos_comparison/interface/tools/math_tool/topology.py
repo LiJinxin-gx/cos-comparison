@@ -1,7 +1,12 @@
-"""
-It provides some tools to solve problems about topology.
+"""Tools for solving topology problems.
+
+Graph containers with iterative (recursion-free) algorithms.  ``Graph``
+is an undirected multigraph, ``DirectedGraph`` a directed one (parallel
+edges/arcs and self-loops allowed); both track connected components with
+a union-find structure.
 """
 
+import operator
 from collections import deque
 
 from ..context_tool import VoidContext as default_lock
@@ -38,32 +43,35 @@ def shortest_path_between(graph, src, dst):
     returns [src, ..., dst] or None."""
     return _bfs(graph.neighbors, src, dst)
 
+
 def Euler_characteristic_compute_by_cell(cell_list):
-    factor = 1
-    Euler_characteristic = 0
+    """Euler characteristic from cell counts: alternating sum
+    n0 - n1 + n2 - ... (each entry must be a positive int)."""
+    chi = 0
+    sign = 1
     for cell in cell_list:
-        if type(cell) is int:
-            if cell <= 0:
-                raise ValueError("Cell must be a positive integer.")
-            Euler_characteristic += cell * factor
-            factor *= -1
-        else:
+        # integer protocol (__index__); bool stays excluded (ambiguous)
+        if isinstance(cell, bool) or not hasattr(cell, "__index__"):
             raise TypeError("Cell must be a positive integer.")
-    return Euler_characteristic
+        cell = operator.index(cell)
+        if cell <= 0:
+            raise ValueError("Cell must be a positive integer.")
+        chi += cell * sign
+        sign = -sign
+    return chi
 
-class Graph:
-    """Undirected multigraph with parallel edges; union-find maintains
-    connected components for cycle rank and Euler characteristic."""
 
-    __slots__ = ("_vertices", "_edges", "_parent", "_rank", "_components", "_lock")
+class _UnionFind:
+    """Vertex set plus disjoint sets with path compression and union by
+    rank (iterative, recursion-free); ``_components`` counts the roots."""
 
-    def __init__(self, lock=None):
+    __slots__ = ("_components", "_parent", "_rank", "_vertices")
+
+    def __init__(self):
         self._vertices = set()
-        self._edges = 0
         self._parent = {}
         self._rank = {}
         self._components = 0
-        self._lock = lock if lock is not None else default_lock()
 
     def _add_vertex(self, v):
         """Add a vertex if it does not already exist."""
@@ -74,28 +82,40 @@ class Graph:
             self._components += 1
 
     def _find(self, x):
-        """Find the root of x with path compression (iterative, two-pass)."""
+        """Root of x with path compression (iterative, two-pass)."""
+        parent = self._parent
         root = x
-        while self._parent[root] != root:
-            root = self._parent[root]
-        while self._parent[x] != x:
-            parent = self._parent[x]
-            self._parent[x] = root
-            x = parent
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != x:
+            parent[x], x = root, parent[x]
         return root
 
     def _union(self, a, b):
-        """Union two vertices. Returns True if they were previously in different components."""
+        """Merge the components of a and b (True when they differed)."""
         ra, rb = self._find(a), self._find(b)
         if ra == rb:
             return False
-        if self._rank[ra] < self._rank[rb]:
+        rank = self._rank
+        if rank[ra] < rank[rb]:
             ra, rb = rb, ra
         self._parent[rb] = ra
-        if self._rank[ra] == self._rank[rb]:
-            self._rank[ra] += 1
+        if rank[ra] == rank[rb]:
+            rank[ra] += 1
         self._components -= 1
         return True
+
+
+class Graph(_UnionFind):
+    """Undirected multigraph with parallel edges; union-find maintains
+    connected components for cycle rank and Euler characteristic."""
+
+    __slots__ = ("_edges", "_lock")
+
+    def __init__(self, lock=None):
+        super().__init__()
+        self._edges = 0
+        self._lock = lock if lock is not None else default_lock()
 
     def add_edge(self, u, v):
         """Add an undirected edge between u and v (parallel edges allowed)."""
@@ -121,7 +141,7 @@ class Graph:
             return self._components
 
     def euler_characteristic(self):
-        """Euler characteristic χ = V - E + C (equals 1 - cycle rank)."""
+        """Euler characteristic chi = V - E + C (equals 1 - cycle rank)."""
         with self._lock:
             return len(self._vertices) - self._edges + self._components
 
@@ -142,62 +162,24 @@ class Graph:
                     f"χ={v - e + c}, r={e - v + c}>")
 
 
-class DirectedGraph:
+class DirectedGraph(_UnionFind):
     """Directed multigraph with parallel arcs and self-loops; iterative
     (recursion-free) algorithms: Tarjan SCC, Kahn topological sort, BFS
     reachability, Eulerian path/circuit tests."""
 
-    __slots__ = ("_vertices", "_adj", "_in", "_out", "_parent", "_rank",
-                 "_components", "_edges", "_lock")
+    __slots__ = ("_adj", "_edges", "_in", "_lock", "_out")
 
     def __init__(self, lock=None):
-        self._vertices = set()
+        super().__init__()
         self._adj = {}
         self._in = {}
         self._out = {}
-        self._parent = {}
-        self._rank = {}
-        self._components = 0
         self._edges = 0
         self._lock = lock if lock is not None else default_lock()
 
-    def _add_vertex(self, v):
-        """Add a vertex if it does not already exist."""
-        if v not in self._vertices:
-            self._vertices.add(v)
-            self._parent[v] = v
-            self._rank[v] = 0
-            self._components += 1
-
-    def _find(self, x):
-        """Find the root of x with path compression (iterative, two-pass)."""
-        root = x
-        while self._parent[root] != root:
-            root = self._parent[root]
-        while self._parent[x] != x:
-            parent = self._parent[x]
-            self._parent[x] = root
-            x = parent
-        return root
-
-    def _union(self, a, b):
-        """Union two vertices. Returns True if they were previously in different components."""
-        ra, rb = self._find(a), self._find(b)
-        if ra == rb:
-            return False
-        if self._rank[ra] < self._rank[rb]:
-            ra, rb = rb, ra
-        self._parent[rb] = ra
-        if self._rank[ra] == self._rank[rb]:
-            self._rank[ra] += 1
-        self._components -= 1
-        return True
-
     def add_edge(self, u, v):
-        """
-        Add a directed arc from u to v.
-        Supports parallel arcs and self-loops.
-        """
+        """Add a directed arc from u to v (parallel arcs and self-loops
+        allowed)."""
         with self._lock:
             self._add_vertex(u)
             self._add_vertex(v)
@@ -231,10 +213,11 @@ class DirectedGraph:
             return self._out.get(v, 0)
 
     def neighbors(self, v):
-        """Return the distinct successors of v as a tuple (parallel arcs deduplicated)."""
+        """Return the distinct successors of v as a tuple (parallel arcs
+        deduplicated)."""
         with self._lock:
             if v not in self._vertices:
-                raise KeyError("Unknown vertex: %r" % (v,))
+                raise KeyError(f"Unknown vertex: {v!r}")
             return tuple(self._adj.get(v, {}).keys())
 
     def weak_components_count(self):
@@ -243,12 +226,14 @@ class DirectedGraph:
             return self._components
 
     def is_weakly_connected(self):
-        """Return True if the graph is weakly connected (single weak component)."""
+        """Return True if the graph is weakly connected (single weak
+        component)."""
         with self._lock:
             return self._components <= 1
 
     def strong_components(self):
-        """Strongly connected components as vertex lists (iterative Tarjan)."""
+        """Strongly connected components as vertex lists (iterative
+        Tarjan: per-vertex frame stack, lowlink update on pop)."""
         with self._lock:
             index = {}
             lowlink = {}
@@ -256,46 +241,42 @@ class DirectedGraph:
             on_stack = set()
             components = []
             counter = 0
+            adj = self._adj
             for root in self._vertices:
                 if root in index:
                     continue
-                index[root] = counter
-                lowlink[root] = counter
+                index[root] = lowlink[root] = counter
                 counter += 1
                 stack.append(root)
                 on_stack.add(root)
-                frames = [(root, iter(self._adj.get(root, {}).keys()))]
+                frames = [(root, iter(adj.get(root, {})))]
                 while frames:
                     v, it = frames[-1]
-                    advanced = False
                     for w in it:
                         if w not in index:
-                            index[w] = counter
-                            lowlink[w] = counter
+                            index[w] = lowlink[w] = counter
                             counter += 1
                             stack.append(w)
                             on_stack.add(w)
-                            frames.append((w, iter(self._adj.get(w, {}).keys())))
-                            advanced = True
+                            frames.append((w, iter(adj.get(w, {}))))
                             break
                         if w in on_stack and index[w] < lowlink[v]:
                             lowlink[v] = index[w]
-                    if advanced:
-                        continue
-                    frames.pop()
-                    if frames:
-                        parent = frames[-1][0]
-                        if lowlink[v] < lowlink[parent]:
-                            lowlink[parent] = lowlink[v]
-                    if lowlink[v] == index[v]:
-                        comp = []
-                        while True:
-                            w = stack.pop()
-                            on_stack.discard(w)
-                            comp.append(w)
-                            if w == v:
-                                break
-                        components.append(comp)
+                    else:
+                        frames.pop()
+                        if frames:
+                            parent = frames[-1][0]
+                            lowlink[parent] = min(lowlink[parent],
+                                                  lowlink[v])
+                        if lowlink[v] == index[v]:
+                            comp = []
+                            while True:
+                                w = stack.pop()
+                                on_stack.discard(w)
+                                comp.append(w)
+                                if w == v:
+                                    break
+                            components.append(comp)
             return components
 
     def strong_components_count(self):
@@ -351,8 +332,10 @@ class DirectedGraph:
             return _bfs(lambda v: self._adj.get(v, {}), src, dst)
 
     def _non_isolated_weakly_connected(self):
-        """Return True if all vertices with non-zero degree share one weak component."""
-        active = [v for v in self._vertices if self._in.get(v, 0) or self._out.get(v, 0)]
+        """Return True if all vertices with non-zero degree share one
+        weak component."""
+        active = [v for v in self._vertices
+                  if self._in.get(v, 0) or self._out.get(v, 0)]
         if not active:
             return True
         root = self._find(active[0])
@@ -371,8 +354,8 @@ class DirectedGraph:
             return self._non_isolated_weakly_connected()
 
     def has_eulerian_path(self):
-        """True iff one weak component and balanced degrees except at most one
-        start (out-in == 1) and one end (in-out == 1)."""
+        """True iff one weak component and balanced degrees except at most
+        one start (out-in == 1) and one end (in-out == 1)."""
         with self._lock:
             if not self._non_isolated_weakly_connected():
                 return False
@@ -389,5 +372,5 @@ class DirectedGraph:
 
     def __repr__(self):
         with self._lock:
-            return (f"<DirectedGraph: V={len(self._vertices)}, E={self._edges}, "
-                    f"weak C={self._components}>")
+            return (f"<DirectedGraph: V={len(self._vertices)}, "
+                    f"E={self._edges}, weak C={self._components}>")

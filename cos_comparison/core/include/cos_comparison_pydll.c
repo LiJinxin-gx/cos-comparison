@@ -5,6 +5,19 @@
 #undef _DEBUG
 #endif
 
+#ifdef _MSC_VER
+/* CPython extension ABI patterns under /Wall:
+   - C4191: method-table casts of keyword functions to PyCFunction
+     (required by the CPython METH_KEYWORDS convention)
+   - C4232: address of dllimport PyType_GenericNew assigned to tp_new
+     (standard CPython slot pattern)
+   - C4820: padding inside the ABI-fixed C struct layouts (Data etc.)
+   - C5045/C4711/C4710: /Wall performance hints (not defects)
+   Keep these on for every other warning under /WX. */
+#pragma warning(push)
+#pragma warning(disable: 4191 4232 4820 5045 4711 4710)
+#endif
+
 #include <math.h>
 #ifndef PY_SSIZE_T_CLEAN
 #define PY_SSIZE_T_CLEAN
@@ -14,10 +27,8 @@
 #include "core.h"
 #include "type_vector.h"
 
-/* ------------------------------------------------------------------
-Helper: get nested item by multi-dimensional indices (iterative)
------------------------------------------------------------------- */
-static PyObject* _get_nested_item(PyObject *obj, int *indices, int dim) {
+/* ---- Helper: get nested item by multi-dimensional indices (iterative) ---- */
+static PyObject* get_nested_item(PyObject *obj, int *indices, int dim) {
     PyObject *current = obj;
     Py_INCREF(current);
     for (int i = 0; i < dim; ++i) {
@@ -34,10 +45,8 @@ static PyObject* _get_nested_item(PyObject *obj, int *indices, int dim) {
     return current;
 }
 
-/* ------------------------------------------------------------------
-Helper: flatten nested list to flat array (iterative, no recursion)
------------------------------------------------------------------- */
-static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const int *shape) {
+/* ---- Helper: flatten nested data to a flat double array (iterative) ---- */
+static int flatten_list(PyObject *obj, double *out, int *idx, int dim, const int *shape) {
     /* Degenerate shape (any dimension <= 0): nothing to flatten. */
     long long total = 1;
     for (int i = 0; i < dim; ++i) {
@@ -65,7 +74,7 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
     while (flag) {
         if (flag == dim) {
             for (int i = 0; i < dim; ++i) indices[i] = num_list[i+1] - 1;
-            PyObject *item = _get_nested_item(obj, indices, dim);
+            PyObject *item = get_nested_item(obj, indices, dim);
             if (!item) { free(indices); free(num_list); return -1; }
             PyObject *num = PyNumber_Float(item);
             Py_DECREF(item);
@@ -88,10 +97,8 @@ static int _flatten_list(PyObject *obj, double *out, int *idx, int dim, const in
     return 0;
 }
 
-/* ------------------------------------------------------------------
-Helper: nested list / Vector -> Data
------------------------------------------------------------------- */
-static Data* _pyobj_to_data(PyObject *obj) {
+/* ---- Helper: nested list / Vector -> Data ---- */
+static Data* pyobj_to_data(PyObject *obj) {
     if (PyObject_IsInstance(obj, (PyObject*)&VectorizeType)) {
         Vector *v = (Vector*)obj;
         int ndim = v->dimension;
@@ -100,7 +107,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
         data->dimension = ndim;
         data->shape = (int*)malloc((size_t)(ndim) * sizeof(int));
         if (!data->shape) { free(data); PyErr_NoMemory(); return NULL; }
-        memcpy(data->shape, v->shape, ndim * sizeof(int));
+        memcpy(data->shape, v->shape, (size_t)ndim * sizeof(int));
         data->strides = (int*)malloc((size_t)(ndim) * sizeof(int));
         if (!data->strides) { free(data->shape); free(data); PyErr_NoMemory(); return NULL; }
         long long stride = 1;
@@ -128,7 +135,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
         if (!indices) { Data_free(data); PyErr_NoMemory(); return NULL; }
         int *idx = (int*)malloc((size_t)(ndim > 0 ? ndim : 1) * sizeof(int));
         if (!idx) { free(indices); Data_free(data); return NULL; }
-        memset(idx, 0, ndim * sizeof(int));
+        memset(idx, 0, (size_t)ndim * sizeof(int));
         int pos = 0;
         if (total > 0) {
         while (1) {
@@ -176,7 +183,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
     
     int *shape = NULL;
     int dimension = 0;
-    if (_infer_shape(obj, &shape, &dimension) < 0) return NULL;
+    if (infer_shape(obj, &shape, &dimension) < 0) return NULL;
     if (dimension == 0) {
         free(shape);
         PyErr_SetString(PyExc_ValueError, "not a tensor");
@@ -185,7 +192,7 @@ static Data* _pyobj_to_data(PyObject *obj) {
     Data *data = Data_create(dimension, shape);
     if (!data) { free(shape); PyErr_NoMemory(); return NULL; }
     int idx = 0;
-    if (_flatten_list(obj, data->data, &idx, dimension, shape) < 0) {
+    if (flatten_list(obj, data->data, &idx, dimension, shape) < 0) {
         Data_free(data);
         free(shape);
         return NULL;
@@ -194,10 +201,8 @@ static Data* _pyobj_to_data(PyObject *obj) {
     return data;
 }
 
-/* ------------------------------------------------------------------
-Helper: Data -> vector_map_as_tensor (zero-copy)
------------------------------------------------------------------- */
-static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
+/* ---- Helper: Data -> vector_map_as_tensor (zero-copy) ---- */
+static PyObject* data_to_vector(Data *data, PyTypeObject *type) {
     if (!type) type = &VectorizeType;
     if (!data) {
         PyErr_SetString(PyExc_ValueError, "cannot create vector from empty data");
@@ -214,14 +219,14 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     vec->owner = NULL;
     vec->dimension = data->dimension;
     size_t dim_n = data->dimension > 0 ? (size_t)data->dimension : 1;
-    vec->shape = (int*)malloc(dim_n * sizeof(int));
+    vec->shape = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); PyErr_NoMemory(); return NULL; }
     if (data->dimension > 0) {
         memcpy(vec->shape, data->shape, (size_t)data->dimension * sizeof(int));
     } else {
         vec->shape[0] = 1;
     }
-    vec->strides = (int*)malloc(dim_n * sizeof(int));
+    vec->strides = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->strides) { Py_DECREF(vec); PyErr_NoMemory(); return NULL; }
     if (data->dimension > 0) {
         vec->strides[data->dimension - 1] = 1;
@@ -233,8 +238,8 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     }
     vec->start = 0;
     vec->offset = 0;
-    vec->start_offset = (int*)malloc(dim_n * sizeof(int));
-    vec->step_offset = (int*)malloc(dim_n * sizeof(int));
+    vec->start_offset = (int*)malloc((size_t)dim_n * sizeof(int));
+    vec->step_offset = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->start_offset || !vec->step_offset) {
         Py_DECREF(vec);
         PyErr_NoMemory();
@@ -249,10 +254,8 @@ static PyObject* _data_to_vector(Data *data, PyTypeObject *type) {
     return (PyObject*)vec;
 }
 
-/* ------------------------------------------------------------------
-Helper: parse int tuple/list
------------------------------------------------------------------- */
-static int _parse_int_seq(PyObject *obj, int **out, int *count) {
+/* ---- Helper: parse int tuple/list ---- */
+static int parse_int_seq(PyObject *obj, int **out, int *count) {
     if (!PySequence_Check(obj)) {
         PyErr_SetString(PyExc_TypeError, "expected sequence");
         return -1;
@@ -292,7 +295,7 @@ static int _parse_int_seq(PyObject *obj, int **out, int *count) {
    obj == NULL fills every element with dflt; shorter sequences are padded
    with dflt, longer ones truncated (safe against out-of-bounds reads).
    Returns 0 on success, or -1 with *arr set to NULL and an exception set. */
-static int _parse_opt_int_seq(PyObject *obj, int **arr, int dim, int dflt) {
+static int parse_opt_int_seq(PyObject *obj, int **arr, int dim, int dflt) {
     if (obj == NULL) {
         *arr = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
         if (!*arr) { PyErr_NoMemory(); return -1; }
@@ -301,7 +304,7 @@ static int _parse_opt_int_seq(PyObject *obj, int **arr, int dim, int dflt) {
     }
     int cnt = 0;
     int *tmp = NULL;
-    if (_parse_int_seq(obj, &tmp, &cnt) < 0) { *arr = NULL; return -1; }
+    if (parse_int_seq(obj, &tmp, &cnt) < 0) { *arr = NULL; return -1; }
     *arr = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
     if (!*arr) { free(tmp); *arr = NULL; PyErr_NoMemory(); return -1; }
     for (int i = 0; i < dim; ++i) (*arr)[i] = (i < cnt) ? tmp[i] : dflt;
@@ -309,10 +312,9 @@ static int _parse_opt_int_seq(PyObject *obj, int **arr, int dim, int dflt) {
     return 0;
 }
 
-/* ------------------------------------------------------------------
-Utility functions
------------------------------------------------------------------- */
+/* ---- Utility functions ---- */
 static PyObject* py_multiple_chain(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *iterable, *base_obj = NULL;
     static char *kwlist[] = {"iterable", "base", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &iterable, &base_obj))
@@ -344,6 +346,7 @@ static PyObject* py_multiple_chain(PyObject *self, PyObject *args, PyObject *kwa
 }
 
 static PyObject* py_add_chain(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *iterable, *base_obj = NULL;
     static char *kwlist[] = {"iterable", "base", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &iterable, &base_obj))
@@ -375,13 +378,14 @@ static PyObject* py_add_chain(PyObject *self, PyObject *args, PyObject *kwargs) 
 }
 
 static PyObject* py_create_void_list(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *length_list_obj = NULL, *default_obj = Py_None;
     static char *kwlist[] = {"length_list", "default", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO", kwlist, &length_list_obj, &default_obj))
         return NULL;
     int *shape = NULL; int dim = 0;
     if (length_list_obj) {
-        if (_parse_int_seq(length_list_obj, &shape, &dim) < 0) return NULL;
+        if (parse_int_seq(length_list_obj, &shape, &dim) < 0) return NULL;
     } else {
         shape = (int*)malloc(sizeof(int));
     if (!shape) { PyErr_NoMemory(); return NULL; }
@@ -398,11 +402,11 @@ static PyObject* py_create_void_list(PyObject *self, PyObject *args, PyObject *k
     COS_SIMD_LOOP
     for (int i = 0; i < total; ++i) Data_set_flat(data, i, fill_val);
     free(shape);
-    return _data_to_vector(data, NULL);
+    return data_to_vector(data, NULL);
 }
 
 /* Helper: create independent Vector from Data (deep copy) */
-static PyObject* _data_to_independent_vector(Data *data, int start) {
+static PyObject* data_to_independent_vector(Data *data, int start) {
     if (!data || data->dimension < 0) {
         Data_free(data);
         PyErr_SetString(PyExc_ValueError, "cannot create vector from empty or scalar data");
@@ -412,14 +416,14 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     if (!vec) { Data_free(data); return NULL; }
     vec->dimension = data->dimension;
     size_t dim_n = data->dimension > 0 ? (size_t)data->dimension : 1;
-    vec->shape = (int*)malloc(dim_n * sizeof(int));
+    vec->shape = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->shape) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
     if (data->dimension > 0) {
         memcpy(vec->shape, data->shape, (size_t)data->dimension * sizeof(int));
     } else {
         vec->shape[0] = 1;
     }
-    vec->strides = (int*)malloc(dim_n * sizeof(int));
+    vec->strides = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->strides) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
     if (data->dimension > 0) {
         vec->strides[data->dimension - 1] = 1;
@@ -432,12 +436,12 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
     int total = Data_total(data);
     vec->data = Data_create(data->dimension, data->shape);
     if (!vec->data) { Py_DECREF(vec); Data_free(data); PyErr_NoMemory(); return NULL; }
-    memcpy(vec->data->data, data->data, total * sizeof(double));
+    memcpy(vec->data->data, data->data, (size_t)total * sizeof(double));
     vec->owner = NULL;
     vec->start = start;
     vec->offset = 0;
-    vec->start_offset = (int*)malloc(dim_n * sizeof(int));
-    vec->step_offset = (int*)malloc(dim_n * sizeof(int));
+    vec->start_offset = (int*)malloc((size_t)dim_n * sizeof(int));
+    vec->step_offset = (int*)malloc((size_t)dim_n * sizeof(int));
     if (!vec->start_offset || !vec->step_offset) {
         Py_DECREF(vec); Data_free(data);
         PyErr_NoMemory();
@@ -454,6 +458,7 @@ static PyObject* _data_to_independent_vector(Data *data, int start) {
 }
 
 static PyObject* py_infer_shape(PyObject *self, PyObject *args) {
+    (void)self;
     PyObject *data_obj;
     if (!PyArg_ParseTuple(args, "O", &data_obj))
         return NULL;
@@ -461,7 +466,7 @@ static PyObject* py_infer_shape(PyObject *self, PyObject *args) {
     int *shape = NULL;
     int dim = 0;
     
-    if (_infer_shape(data_obj, &shape, &dim) < 0) {
+    if (infer_shape(data_obj, &shape, &dim) < 0) {
         PyErr_Clear();
         Py_RETURN_NONE;
     }
@@ -482,6 +487,7 @@ static PyObject* py_infer_shape(PyObject *self, PyObject *args) {
 }
 
 static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *data_obj;
     PyObject *start_obj = Py_None;
     PyObject *shape_obj = Py_None;
@@ -588,7 +594,7 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
         int total = (int)total_ll;
         int *flat_indices = (int*)malloc((size_t)(total) * sizeof(int));
         if (!flat_indices) { Py_DECREF(result); PyErr_NoMemory(); return NULL; }
-        if (_vector_get_flat_indices(res_vec, flat_indices, total) < 0) {
+        if (vector_get_flat_indices(res_vec, flat_indices, total) < 0) {
             free(flat_indices); Py_DECREF(result);
             if (!PyErr_Occurred()) PyErr_NoMemory();
             return NULL;
@@ -635,7 +641,7 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     int dimension = 0;
 
     /* Step 1: Infer full shape of input data */
-    if (_infer_shape(data_obj, &full_shape, &dimension) < 0)
+    if (infer_shape(data_obj, &full_shape, &dimension) < 0)
         return NULL;
     if (dimension == 0) {
         free(full_shape);
@@ -792,7 +798,7 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     }
 
     /* Step 5: Flatten full input data into temporary Data */
-    Data *full_data = _pyobj_to_data(data_obj);
+    Data *full_data = pyobj_to_data(data_obj);
     if (!full_data) {
         free(start); free(shape); free(step); free(full_shape);
         return NULL;
@@ -825,15 +831,13 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     long long total_ll = 1;
     for (int i = 0; i < dimension; ++i) total_ll *= shape[i];
 
-    /* Match pure Python: when the result shape has zero elements, the
-       carry loop still attempts one access into the source, which raises
-       IndexError on an empty container. */
+    /* Match the pure Python reference and the tensor fast path: a
+       zero-element shape yields an empty tensor with the shape kept. */
     if (total_ll == 0) {
         free(full_strides);
-        Data_free(result_data); Data_free(full_data);
+        Data_free(full_data);
         free(start); free(shape); free(step); free(full_shape);
-        PyErr_SetString(PyExc_IndexError, "list index out of range");
-        return NULL;
+        return data_to_independent_vector(result_data, 0);
     }
     if (total_ll > (long long)INT_MAX) {
         free(full_strides);
@@ -888,15 +892,14 @@ static PyObject* py_load_as_default_data(PyObject *self, PyObject *args, PyObjec
     free(full_shape);
 
     /* Step 10: Return as independent vector with start=0 */
-    return _data_to_independent_vector(result_data, 0);
+    return data_to_independent_vector(result_data, 0);
 }
 
-/* ------------------------------------------------------------------
-load_data: copy a sub-region from source to target with independent
-start/step for each side.  Tries PyBuffer fast path first, falls back
-to get_item/set_item on any failure.  Returns the number of elements
-actually copied.  Iterative, no recursion.
------------------------------------------------------------------- */
+/* ---- load_data: copy a sub-region from source to target with independent
+ * start/step for each side.  Tries PyBuffer fast path first, falls back
+ * to get_item/set_item on any failure.  Returns the number of elements
+ * actually copied.  Iterative.
+ * ---- */
 static PyObject* py_get_item(PyObject *self, PyObject *args);
 static PyObject* py_set_item(PyObject *self, PyObject *args);
 
@@ -915,11 +918,11 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
             &shape_obj, &target_start_obj, &target_step_obj))
         return NULL;
 
-    /* ---- infer shapes (with BufferError fallback inside _infer_shape) ---- */
+    /* ---- infer shapes (with BufferError fallback inside infer_shape) ---- */
     int *src_shape = NULL, *tgt_shape = NULL;
     int src_dim = 0, tgt_dim = 0;
-    if (_infer_shape(source, &src_shape, &src_dim) < 0) return NULL;
-    if (_infer_shape(target, &tgt_shape, &tgt_dim) < 0) {
+    if (infer_shape(source, &src_shape, &src_dim) < 0) return NULL;
+    if (infer_shape(target, &tgt_shape, &tgt_dim) < 0) {
         free(src_shape);
         return NULL;
     }
@@ -937,7 +940,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
     }
 
     /* ---- parse integer-sequence parameters (temp-pointer pattern to
-           avoid leaking the pre-allocated arrays; _parse_int_seq mallocs) ---- */
+           avoid leaking the pre-allocated arrays; parse_int_seq mallocs) ---- */
     int *src_step = NULL, *tgt_step = NULL;
     int *copy_shape = NULL, *src_start = NULL, *tgt_start = NULL;
     int cnt = 0;
@@ -948,7 +951,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         if (!src_step) goto oom;
         for (int i = 0; i < dim; ++i) src_step[i] = 1;
     } else {
-        if (_parse_int_seq(source_step_obj, &src_step, &cnt) < 0 || cnt != dim) {
+        if (parse_int_seq(source_step_obj, &src_step, &cnt) < 0 || cnt != dim) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "source_step must have %d elements", dim);
             goto fail;
@@ -960,7 +963,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         if (!tgt_step) goto oom;
         for (int i = 0; i < dim; ++i) tgt_step[i] = 1;
     } else {
-        if (_parse_int_seq(target_step_obj, &tgt_step, &cnt) < 0 || cnt != dim) {
+        if (parse_int_seq(target_step_obj, &tgt_step, &cnt) < 0 || cnt != dim) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "target_step must have %d elements", dim);
             goto fail;
@@ -980,7 +983,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         for (int i = 0; i < dim; ++i)
             copy_shape[i] = (src_shape[i] + src_step[i] - 1) / src_step[i];
     } else {
-        if (_parse_int_seq(shape_obj, &copy_shape, &cnt) < 0 || cnt != dim) {
+        if (parse_int_seq(shape_obj, &copy_shape, &cnt) < 0 || cnt != dim) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "shape must have %d elements", dim);
             goto fail;
@@ -999,7 +1002,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         if (!src_start) goto oom;
         for (int i = 0; i < dim; ++i) src_start[i] = 0;
     } else {
-        if (_parse_int_seq(source_start_obj, &src_start, &cnt) < 0 || cnt != dim) {
+        if (parse_int_seq(source_start_obj, &src_start, &cnt) < 0 || cnt != dim) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "source_start must have %d elements", dim);
             goto fail;
@@ -1011,7 +1014,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         if (!tgt_start) goto oom;
         for (int i = 0; i < dim; ++i) tgt_start[i] = 0;
     } else {
-        if (_parse_int_seq(target_start_obj, &tgt_start, &cnt) < 0 || cnt != dim) {
+        if (parse_int_seq(target_start_obj, &tgt_start, &cnt) < 0 || cnt != dim) {
             if (!PyErr_Occurred())
                 PyErr_Format(PyExc_ValueError, "target_start must have %d elements", dim);
             goto fail;
@@ -1116,7 +1119,7 @@ static PyObject* py_load_data(PyObject *self, PyObject *args, PyObject *kwargs) 
         }
     }
 
-    /* ---- copy loop (iterative carry, no recursion) ---- */
+    /* ---- copy loop (iterative carry) ---- */
     int *num = (int*)calloc((size_t)dim, sizeof(int));
     if (!num) {
         Py_XDECREF(src_mv); Py_XDECREF(tgt_mv);
@@ -1209,6 +1212,7 @@ fail:
 }
 
 static PyObject* py_get_item(PyObject *self, PyObject *args) {
+    (void)self;
     PyObject *obj, *index;
     if (!PyArg_ParseTuple(args, "OO", &obj, &index)) return NULL;
     PyObject *get_item_method = PyObject_GetAttrString(obj, "__get_item__");
@@ -1254,6 +1258,7 @@ static PyObject* py_get_item(PyObject *self, PyObject *args) {
 }
 
 static PyObject* py_set_item(PyObject *self, PyObject *args) {
+    (void)self;
     PyObject *obj, *index, *value;
     if (!PyArg_ParseTuple(args, "OOO", &obj, &index, &value)) return NULL;
     
@@ -1310,56 +1315,66 @@ static PyObject* py_set_item(PyObject *self, PyObject *args) {
     }
 }
 
-/* ------------------------------------------------------------------
-Basic similarity functions
------------------------------------------------------------------- */
+/* ---- Basic similarity functions ---- */
 static PyObject* py_cos(PyObject *self, PyObject *args) {
+    (void)self;
     double a, b, ab; PyObject *name;
     if (!PyArg_ParseTuple(args, "dddO", &a, &b, &ab, &name)) return NULL;
-    return PyFloat_FromDouble(_cos_(a, b, ab, NULL));
+    return PyFloat_FromDouble(cos_(a, b, ab, NULL));
 }
 
 static PyObject* py_mod(PyObject *self, PyObject *args) {
+    (void)self;
     double a, b, ab; PyObject *name;
     if (!PyArg_ParseTuple(args, "dddO", &a, &b, &ab, &name)) return NULL;
-    return PyFloat_FromDouble(_mod_(a, b, ab, NULL));
+    return PyFloat_FromDouble(mod_(a, b, ab, NULL));
 }
 
 static PyObject* py_cosmod(PyObject *self, PyObject *args) {
+    (void)self;
     double a, b, ab; PyObject *name;
     if (!PyArg_ParseTuple(args, "dddO", &a, &b, &ab, &name)) return NULL;
-    return PyFloat_FromDouble(_cosmod_(a, b, ab, NULL));
+    return PyFloat_FromDouble(cosmod_(a, b, ab, NULL));
 }
 
 static PyObject* py_convolution(PyObject *self, PyObject *args) {
+    (void)self;
     double a, b, ab; PyObject *name;
     if (!PyArg_ParseTuple(args, "dddO", &a, &b, &ab, &name)) return NULL;
-    return PyFloat_FromDouble(_convolution_(a, b, ab, NULL));
+    return PyFloat_FromDouble(convolution_(a, b, ab, NULL));
 }
 
 static PyObject* py_no_done(PyObject *self, PyObject *args, PyObject *kwds) {
+    (void)self;
+    (void)kwds;
+    (void)args;
     Py_RETURN_NONE;
 }
 
 static PyObject* py_sqrt(PyObject *self, PyObject *args) {
+    (void)self;
     double x;
     if (!PyArg_ParseTuple(args, "d", &x)) return NULL;
     return PyFloat_FromDouble(sqrt(x));
 }
 
-/* ------------------------------------------------------------------
-Custom Python algorithm callback
------------------------------------------------------------------- */
-static double _py_algo_wrapper(double a, double b, double ab, CallbackContext *ctx) {
-    if (!ctx || !ctx->name_space) return 0.0;
-    PyObject *py_algo = PyObject_GetAttrString(ctx->name_space, "algorithm");
-    if (!py_algo || !PyCallable_Check(py_algo)) {
-        Py_XDECREF(py_algo);
-        PyErr_Clear();
-        return 0.0;
+/* ---- Custom Python algorithm callback ---- */
+static double py_algo_wrapper(double a, double b, double ab, CallbackContext *ctx) {
+    if (!ctx) return 0.0;
+    PyObject *py_algo = ctx->algorithm;
+    PyObject *ns = ctx->name_space;
+    if (!py_algo) {
+        if (!ns) return 0.0;
+        py_algo = PyObject_GetAttrString(ns, "algorithm");
+        if (!py_algo || !PyCallable_Check(py_algo)) {
+            Py_XDECREF(py_algo);
+            PyErr_Clear();
+            return 0.0;
+        }
     }
-    PyObject *result = PyObject_CallFunction(py_algo, "dddO", a, b, ab, ctx->name_space);
-    Py_DECREF(py_algo);
+    PyObject *result = PyObject_CallFunction(
+        py_algo, "dddO", a, b, ab, ns ? ns : Py_None);
+    if (py_algo != ctx->algorithm) Py_DECREF(py_algo);
     if (!result) { PyErr_Clear(); return 0.0; }
     double res = PyFloat_AsDouble(result);
     if (res == -1.0 && PyErr_Occurred()) {
@@ -1371,25 +1386,108 @@ static double _py_algo_wrapper(double a, double b, double ab, CallbackContext *c
     return res;
 }
 
-static algo_fn _get_algo(PyObject *name) {
-    if (!name) return _cosmod_;
+static algo_fn get_algo(PyObject *name) {
+    if (!name) return cosmod_;
     if (PyUnicode_Check(name)) {
         const char *s = PyUnicode_AsUTF8(name);
         if (!s) return NULL;
-        if (strcmp(s, "cos") == 0) return _cos_;
-        if (strcmp(s, "mod") == 0) return _mod_;
-        if (strcmp(s, "cosmod") == 0) return _cosmod_;
+        if (strcmp(s, "cos") == 0) return cos_;
+        if (strcmp(s, "mod") == 0) return mod_;
+        if (strcmp(s, "cosmod") == 0) return cosmod_;
         PyErr_SetString(PyExc_ValueError, "unknown algorithm"); return NULL;
     }
     if (PyCallable_Check(name)) {
-        return _py_algo_wrapper;
+        return py_algo_wrapper;
     }
     PyErr_SetString(PyExc_TypeError, "algorithm must be a string or callable"); return NULL;
 }
 
-/* ------------------------------------------------------------------
-Core algorithm implementations (added)
------------------------------------------------------------------- */
+/* ---- Core algorithm implementations ---- */
+
+/* Pure-C validation helpers: the entry points call these while they still
+ * hold the GIL (the core functions themselves run with the GIL released,
+ * so they must not touch the CPython error API on their guard paths). */
+static int require_positive_dims(const int *values, int dim,
+                                 const char *what) {
+    for (int i = 0; i < dim; ++i) {
+        if (values[i] <= 0) {
+            PyErr_Format(PyExc_ValueError,
+                         "%s must be positive for all dimensions", what);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int require_positive_shape(const Data *tensor, const char *what) {
+    return require_positive_dims(tensor->shape, tensor->dimension, what);
+}
+
+static int require_nonnegative_dims(const int *values, int dim,
+                                    const char *what) {
+    for (int i = 0; i < dim; ++i) {
+        if (values[i] < 0) {
+            PyErr_Format(PyExc_ValueError,
+                         "%s entries must be non-negative", what);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Both windows of a passive step (at start and at start+d) must stay
+   inside the data: the core reads flat int indices without checks. */
+static int require_region_bounds(const int *start, const int *end,
+                                 const int *d, const Data *data, int dim) {
+    for (int i = 0; i < dim; ++i) {
+        long long shift = d ? d[i] : 0;
+        if (end[i] > data->shape[i]
+            || (long long)end[i] - shift > data->shape[i]
+            || (long long)start[i] + shift < 0) {
+            PyErr_Format(PyExc_ValueError,
+                         "region exceeds the data bounds on axis %d", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* The core-created output (output=None) covers only the step span, so a
+   non-zero output_start would index past it. */
+static int require_zero_output_start(const int *output_start, int dim,
+                                     PyObject *output_obj) {
+    if (output_obj != NULL && output_obj != Py_None) return 0;
+    for (int i = 0; i < dim; ++i) {
+        if (output_start[i] != 0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "output_start requires an explicit output");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Shared region guard for the passive-style entry points.  Runs with the
+   GIL held, before any callback / namespace work, so every branch (plain,
+   namespace, callable algorithm) receives validated arrays. */
+static int validate_region_args(const int *start, const int *end,
+                                const int *step, const int *window,
+                                const char *window_what, const int *d,
+                                const Data *data, int dim,
+                                const int *output_start,
+                                const int *output_step,
+                                PyObject *output_obj) {
+    if (require_nonnegative_dims(start, dim, "start") < 0
+        || require_positive_dims(step, dim, "step") < 0
+        || require_positive_dims(window, dim, window_what) < 0
+        || require_nonnegative_dims(output_start, dim, "output_start") < 0
+        || require_positive_dims(output_step, dim, "output_step") < 0
+        || require_region_bounds(start, end, d, data, dim) < 0
+        || require_zero_output_start(output_start, dim, output_obj) < 0) {
+        return -1;
+    }
+    return 0;
+}
 
 /* Passive mode */
 Data* cos_comparison_passive(const Data *data,
@@ -1401,13 +1499,13 @@ Data* cos_comparison_passive(const Data *data,
                              CallbackContext *ctx,
                              const int output_start[], const int output_step[],
                              PyObject *output_obj, Data *output) {
+                                 (void)output_obj;
     if (!data || !window_size) return NULL;
     int dim = data->dimension;
     
     // Validate step > 0 for all dimensions to prevent division by zero
     for (int i = 0; i < dim; ++i) {
         if (step[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "step must be positive for all dimensions");
             return NULL;
         }
     }
@@ -1415,13 +1513,12 @@ Data* cos_comparison_passive(const Data *data,
     // Validate window_size > 0 for all dimensions
     for (int i = 0; i < dim; ++i) {
         if (window_size[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "window_size must be positive for all dimensions");
             return NULL;
         }
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (!num) { PyErr_NoMemory(); return NULL; }
+    if (!num) { return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i] - d[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1429,7 +1526,7 @@ Data* cos_comparison_passive(const Data *data,
     }
     int output_is_data = (output != NULL);
     if (!output_is_data) {
-        output = _compute_output_shape(dim, num, output_start, output_step);
+        output = compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -1440,7 +1537,7 @@ Data* cos_comparison_passive(const Data *data,
     if (!num_list || !inner_list || !main_place || !other_place || !out_idx) {
         free(num); if (!output_is_data) Data_free(output);
         free(num_list); free(inner_list); free(main_place); free(other_place); free(out_idx);
-        PyErr_NoMemory(); return NULL;
+        return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
@@ -1480,7 +1577,7 @@ Data* cos_comparison_passive(const Data *data,
             for (int i = 0; i < dim; ++i)
                 out_idx[i] = output_start[i] + output_step[i] * (num_list[i+1] - 1);
             double res = algorithm ? algorithm(main_sum, other_sum, mu_sum, ctx)
-                                   : _cosmod_(main_sum, other_sum, mu_sum, ctx);
+                                   : cosmod_(main_sum, other_sum, mu_sum, ctx);
             Data_set(output, out_idx, res);
             if (num_list[dim] < num[dim - 1]) {
                 num_list[dim]++;
@@ -1512,6 +1609,7 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
                             CallbackContext *ctx,
                             const int output_start[], const int output_step[],
                             PyObject *output_obj, Data *output) {
+                                (void)output_obj;
     if (!data || !kernel || data->dimension != kernel->dimension) return NULL;
     int dim = data->dimension;
     const int *window_size = kernel->shape;
@@ -1519,7 +1617,6 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     // Validate step > 0 for all dimensions to prevent division by zero
     for (int i = 0; i < dim; ++i) {
         if (step[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "step must be positive for all dimensions");
             return NULL;
         }
     }
@@ -1527,13 +1624,12 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     // Validate kernel (window) size > 0 for all dimensions
     for (int i = 0; i < dim; ++i) {
         if (window_size[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "kernel size must be positive for all dimensions");
             return NULL;
         }
     }
     
     int *num = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (!num) { PyErr_NoMemory(); return NULL; }
+    if (!num) { return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1541,7 +1637,7 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     }
     int output_is_data = (output != NULL);
     if (!output_is_data) {
-        output = _compute_output_shape(dim, num, output_start, output_step);
+        output = compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
     int *num_list = (int*)malloc(((size_t)(dim) + 1) * sizeof(int));
@@ -1552,7 +1648,7 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
     if (!num_list || !inner_list || !data_place || !kern_place || !out_idx) {
         free(num); if (!output_is_data) Data_free(output);
         free(num_list); free(inner_list); free(data_place); free(kern_place); free(out_idx);
-        PyErr_NoMemory(); return NULL;
+        return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
@@ -1592,7 +1688,7 @@ Data* cos_comparison_active(const Data *data, const Data *kernel,
             for (int i = 0; i < dim; ++i)
                 out_idx[i] = output_start[i] + output_step[i] * (num_list[i+1] - 1);
             double res = algorithm ? algorithm(main_sum, other_sum, mu_sum, ctx)
-                                   : _cosmod_(main_sum, other_sum, mu_sum, ctx);
+                                   : cosmod_(main_sum, other_sum, mu_sum, ctx);
             Data_set(output, out_idx, res);
             if (num_list[dim] < num[dim - 1]) {
                 num_list[dim]++;
@@ -1648,7 +1744,7 @@ double cos_full(const Data *a, const Data *b, algo_fn algorithm, CallbackContext
         }
     }
     return algorithm ? algorithm(sum_a, sum_b, sum_ab, ctx)
-                     : _cosmod_(sum_a, sum_b, sum_ab, ctx);
+                     : cosmod_(sum_a, sum_b, sum_ab, ctx);
 }
 
 /* Local mean */
@@ -1658,13 +1754,13 @@ Data* cos_local_mean(const Data *data,
                      const int step[],
                      const int output_start[], const int output_step[],
                      PyObject *output_obj, Data *output, const double weights[]) {
+                         (void)output_obj;
     if (!data || !window_size) return NULL;
     int dim = data->dimension;
     
     // Validate step > 0 for all dimensions to prevent division by zero
     for (int i = 0; i < dim; ++i) {
         if (step[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "step must be positive for all dimensions");
             return NULL;
         }
     }
@@ -1672,13 +1768,12 @@ Data* cos_local_mean(const Data *data,
     // Validate local_size > 0 for all dimensions
     for (int i = 0; i < dim; ++i) {
         if (window_size[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "local_size must be positive for all dimensions");
             return NULL;
         }
     }
     
     int *num = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
-    if (!num) { PyErr_NoMemory(); return NULL; }
+    if (!num) { return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1686,40 +1781,36 @@ Data* cos_local_mean(const Data *data,
     }
     int output_is_data = (output != NULL);
     if (!output_is_data) {
-        output = _compute_output_shape(dim, num, output_start, output_step);
+        output = compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
     long long N = 1;
     for (int i = 0; i < dim; ++i) {
         if (N > LLONG_MAX / (long long)window_size[i]) {
             free(num); if (!output_is_data) Data_free(output);
-            PyErr_SetString(PyExc_OverflowError, "local window too large");
             return NULL;
         }
         N *= (long long)window_size[i];
         if (N > INT_MAX) {
             free(num); if (!output_is_data) Data_free(output);
-            PyErr_SetString(PyExc_OverflowError, "local window too large");
             return NULL;
         }
     }
     if (N <= 0) { free(num); if (!output_is_data) Data_free(output); return NULL; }
     /* Precompute window strides so weights are indexed in row-major order */
     int *wstrides = (int*)malloc((size_t)(dim) * sizeof(int));
-    if (!wstrides) { free(num); if (!output_is_data) Data_free(output); PyErr_NoMemory(); return NULL; }
+    if (!wstrides) { free(num); if (!output_is_data) Data_free(output); return NULL; }
     {
         long long acc = 1;
         for (int i = dim - 1; i >= 0; --i) {
             wstrides[i] = (int)acc;
             if (acc > LLONG_MAX / (long long)window_size[i]) {
                 free(num); free(wstrides); if (!output_is_data) Data_free(output);
-                PyErr_SetString(PyExc_OverflowError, "local window too large");
                 return NULL;
             }
             acc *= (long long)window_size[i];
             if (acc > INT_MAX) {
                 free(num); free(wstrides); if (!output_is_data) Data_free(output);
-                PyErr_SetString(PyExc_OverflowError, "local window too large");
                 return NULL;
             }
         }
@@ -1732,7 +1823,7 @@ Data* cos_local_mean(const Data *data,
         free(num); free(wstrides); free(num_list); free(inner_list);
         free(data_place); free(out_idx);
         if (!output_is_data) Data_free(output);
-        PyErr_NoMemory(); return NULL;
+        return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
@@ -1799,13 +1890,13 @@ Data* cos_local_variance(const Data *data,
                          const int step[],
                          const int output_start[], const int output_step[],
                          PyObject *output_obj, Data *output) {
+                             (void)output_obj;
     if (!data || !window_size) return NULL;
     int dim = data->dimension;
     
     // Validate step > 0 for all dimensions to prevent division by zero
     for (int i = 0; i < dim; ++i) {
         if (step[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "step must be positive for all dimensions");
             return NULL;
         }
     }
@@ -1813,13 +1904,12 @@ Data* cos_local_variance(const Data *data,
     // Validate local_size > 0 for all dimensions
     for (int i = 0; i < dim; ++i) {
         if (window_size[i] <= 0) {
-            PyErr_SetString(PyExc_ValueError, "local_size must be positive for all dimensions");
             return NULL;
         }
     }
     
     int *num = (int*)calloc((size_t)(dim > 0 ? dim : 1), sizeof(int));
-    if (!num) { PyErr_NoMemory(); return NULL; }
+    if (!num) { return NULL; }
     for (int i = 0; i < dim; ++i) {
         int eff = end[i] - start[i] - window_size[i];
         if (eff < 0) { free(num); return NULL; }
@@ -1827,20 +1917,18 @@ Data* cos_local_variance(const Data *data,
     }
     int output_is_data = (output != NULL);
     if (!output_is_data) {
-        output = _compute_output_shape(dim, num, output_start, output_step);
+        output = compute_output_shape(dim, num, output_start, output_step);
         if (!output) { free(num); return NULL; }
     }
     long long N = 1;
     for (int i = 0; i < dim; ++i) {
         if (N > LLONG_MAX / (long long)window_size[i]) {
             free(num); if (!output_is_data) Data_free(output);
-            PyErr_SetString(PyExc_OverflowError, "local window too large");
             return NULL;
         }
         N *= (long long)window_size[i];
         if (N > INT_MAX) {
             free(num); if (!output_is_data) Data_free(output);
-            PyErr_SetString(PyExc_OverflowError, "local window too large");
             return NULL;
         }
     }
@@ -1852,7 +1940,7 @@ Data* cos_local_variance(const Data *data,
     if (!num_list || !inner_list || !data_place || !out_idx) {
         free(num); if (!output_is_data) Data_free(output);
         free(num_list); free(inner_list); free(data_place); free(out_idx);
-        PyErr_NoMemory(); return NULL;
+        return NULL;
     }
     for (int i = 0; i <= dim; ++i) { num_list[i] = 1; inner_list[i] = 1; }
     int flag = dim;
@@ -1912,17 +2000,41 @@ Data* cos_local_variance(const Data *data,
     return output;
 }
 
-/* ------------------------------------------------------------------
-Python wrapper functions (full implementations)
------------------------------------------------------------------- */
+/* ---- Python wrapper functions (full implementations) ---- */
 
 /* Passive mode Python wrapper */
+/* Derive "<pkg>.core.cos_comparison" from this module's own name (never
+ * hard-code the package name) - used to delegate the iterate path of the
+ * passive/active functions to the pure Python reference implementation. */
+static PyObject* _import_pure_core(PyObject *self) {
+    const char *full = PyModule_GetName(self);
+    if (!full) return NULL;
+    const char *dot = strrchr(full, '.');
+    if (!dot) {
+        PyErr_SetString(PyExc_ImportError,
+                        "cannot derive the package name");
+        return NULL;
+    }
+    size_t len = (size_t)(dot - full);
+    char *buf = (char*)malloc(len + sizeof(".cos_comparison"));
+    if (!buf) { PyErr_NoMemory(); return NULL; }
+    memcpy(buf, full, len);
+    memcpy(buf + len, ".cos_comparison", sizeof(".cos_comparison"));
+    PyObject *mod = PyImport_ImportModule(buf);
+    free(buf);
+    return mod;
+}
+
 static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *data_obj, *window_size_obj = NULL, *start_obj = NULL, *end_obj = NULL,
              *step_obj = NULL, *d_obj = NULL, *algo_name = NULL, *output_obj = NULL,
              *output_start_obj = NULL, *output_step_obj = NULL, *start_callback = NULL,
              *end_callback = NULL, *global_error_callback = NULL, *local_error_callback = NULL,
-             *return_callback = NULL;
+             *return_callback = NULL, *iterate_obj = NULL,
+             *transform1_obj = NULL, *transform2_obj = NULL;
+    int use_ns = 1;
+    PyObject *hook_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
         static char *kwlist[] = {
         "data", "window_size", "w1", "w2", "b1", "b2",
@@ -1930,9 +2042,10 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
-        "return_callback", NULL
+        "return_callback",
+        "use_namespace", "namespace_hook", "iterate", "transform1", "transform2", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOOpOOOO", kwlist,
                                      &data_obj, &window_size_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj, &d_obj,
@@ -1940,7 +2053,8 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback))
+                                     &return_callback, &use_ns, &hook_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
     if (PyObject_HasAttrString(data_obj, "__cos_comparison_passive__")) {
@@ -1962,39 +2076,65 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         PyErr_Clear();
     }
 
-    Data *data = _pyobj_to_data(data_obj);
+    /* iterate/transform paths: delegate to the pure Python reference
+     * implementation (the iterate mechanism, kernels and transforms live
+     * there; the C core keeps the plain fast path when neither is given). */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "cos_comparison_passive");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
+
+    Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
     int dim = data->dimension;
 
     int *window_size = NULL;
-    if (_parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(data); return NULL; }
+    if (parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(data); return NULL; }
 
     int *start = NULL;
-    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { free(window_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { free(window_size); Data_free(data); return NULL; }
 
     int *end = NULL;
     if (end_obj == NULL) {
         end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
         if (!end) { free(start); free(window_size); Data_free(data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
-    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+    } else if (parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
         free(start); free(window_size); Data_free(data); return NULL;
     }
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(window_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
     int *d = NULL;
-    if (_parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
     if (d_obj == NULL && dim > 0) d[0] = 1;
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(d); free(step); free(end); free(start); free(window_size); Data_free(data); return NULL; }
 
-    algo_fn algo = _get_algo(algo_name);
+    /* Guard the whole region up front: the callback / namespace branch
+       reads the same arrays as the plain branch. */
+    if (validate_region_args(start, end, step, window_size, "window_size",
+                             d, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(output_step); free(output_start); free(d); free(step);
+        free(end); free(start); free(window_size); Data_free(data);
+        return NULL;
+    }
+
+    algo_fn algo = get_algo(algo_name);
     if (!algo) {
         free(output_step); free(output_start); free(d); free(step);
         free(end); free(start); free(window_size); Data_free(data);
@@ -2012,52 +2152,60 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
 
     PyObject *name_space = NULL;
     CallbackContext ctx = {0};
-    if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
-        name_space = PyObject_CallObject((PyObject*)&FuncNameSpaceType, NULL);
-        if (name_space) {
-            if (output_obj) { Py_INCREF(output_obj); PyObject_SetAttrString(name_space, "output", output_obj); }
+    if (PyCallable_Check(algo_name)) {
+        Py_INCREF(algo_name);
+        ctx.algorithm = algo_name;
+    }
+    if (use_ns && (start_callback || end_callback ||
+                   global_error_callback ||
+                   local_error_callback ||
+                   return_callback || ctx.algorithm)) {
+        PyObject *hook = hook_obj ? hook_obj :
+            (PyObject *)&FuncNameSpaceType;
+        PyObject *fill = PyDict_New();
+        name_space = NULL;
+        if (fill) {
+            if (output_obj) { Py_INCREF(output_obj); PyDict_SetItemString(fill, "output", output_obj); }
             PyObject *os_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(os_tuple, i, PyLong_FromLong(output_start[i]));
-            PyObject_SetAttrString(name_space, "output_start", os_tuple); Py_DECREF(os_tuple);
+            PyDict_SetItemString(fill, "output_start", os_tuple); Py_DECREF(os_tuple);
             PyObject *ost_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ost_tuple, i, PyLong_FromLong(output_step[i]));
-            PyObject_SetAttrString(name_space, "output_step", ost_tuple); Py_DECREF(ost_tuple);
+            PyDict_SetItemString(fill, "output_step", ost_tuple); Py_DECREF(ost_tuple);
             PyObject *ws_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(window_size[i]));
-            PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
+            PyDict_SetItemString(fill, "window_size", ws_tuple); Py_DECREF(ws_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
-            PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
+            PyDict_SetItemString(fill, "start", start_tuple); Py_DECREF(start_tuple);
             PyObject *end_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(end_tuple, i, PyLong_FromLong(end[i]));
-            PyObject_SetAttrString(name_space, "end", end_tuple); Py_DECREF(end_tuple);
+            PyDict_SetItemString(fill, "end", end_tuple); Py_DECREF(end_tuple);
             PyObject *d_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(d_tuple, i, PyLong_FromLong(d[i]));
-            PyObject_SetAttrString(name_space, "d", d_tuple); Py_DECREF(d_tuple);
+            PyDict_SetItemString(fill, "d", d_tuple); Py_DECREF(d_tuple);
             PyObject *step_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(step_tuple, i, PyLong_FromLong(step[i]));
-            PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
-            if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
+            PyDict_SetItemString(fill, "step", step_tuple); Py_DECREF(step_tuple);
+            if (algo_name) { Py_INCREF(algo_name); PyDict_SetItemString(fill, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!num) { PyErr_NoMemory(); return NULL; }
             for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - window_size[i] - d[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
-            PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
+            PyDict_SetItemString(fill, "num", num_tuple); Py_DECREF(num_tuple);
             free(num);
+            name_space = PyObject_Call(hook, PyTuple_New(0), fill);
+            Py_DECREF(fill);
+        }
+        if (name_space) {
             ctx.local_error_callback = local_error_callback;
             ctx.name_space = name_space;
         }
     }
 
-    if (start_callback && PyCallable_Check(start_callback) && name_space) {
-        PyObject *res = PyObject_CallFunctionObjArgs(start_callback, name_space, NULL);
+    if (start_callback && PyCallable_Check(start_callback)) {
+        PyObject *res = PyObject_CallFunctionObjArgs(start_callback, name_space ? name_space : Py_None, NULL);
         Py_XDECREF(res);
     }
 
@@ -2072,14 +2220,14 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
         }
     }
-    if (!name_space) {
+    if (!name_space && !ctx.algorithm) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_passive(data, window_size, w1, w2, b1, b2,
                                         start, end, step, d,
@@ -2096,17 +2244,17 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
-        if (global_error_callback && PyCallable_Check(global_error_callback) && name_space) {
+        if (global_error_callback && PyCallable_Check(global_error_callback)) {
             PyObject *exc = PyErr_Occurred();
-            if (exc) { Py_INCREF(exc); PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res);  Py_DECREF(exc); }
+            if (exc) { Py_INCREF(exc); PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space ? name_space : Py_None, NULL); Py_XDECREF(res);  Py_DECREF(exc); }
         }
         // Free allocated memory before return
         free(output_step); free(output_start); free(d); free(step);
@@ -2153,7 +2301,7 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -2178,17 +2326,18 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
-        py_result = _data_to_vector(result, result_type);
+        py_result = data_to_vector(result, result_type);
     }
 
-    if (end_callback && PyCallable_Check(end_callback) && name_space) {
-        PyObject_SetAttrString(name_space, "output", py_result);
-        PyObject *res = PyObject_CallFunctionObjArgs(end_callback, name_space, NULL);
+    if (end_callback && PyCallable_Check(end_callback)) {
+        if (name_space)
+            PyObject_SetAttrString(name_space, "output", py_result);
+        PyObject *res = PyObject_CallFunctionObjArgs(end_callback, name_space ? name_space : Py_None, NULL);
         Py_XDECREF(res);
     }
 
-    if (return_callback && PyCallable_Check(return_callback) && name_space) {
-        PyObject *ret = PyObject_CallFunctionObjArgs(return_callback, py_result, name_space, NULL);
+    if (return_callback && PyCallable_Check(return_callback)) {
+        PyObject *ret = PyObject_CallFunctionObjArgs(return_callback, py_result, name_space ? name_space : Py_None, NULL);
         Py_DECREF(py_result);
         py_result = ret;
     }
@@ -2203,11 +2352,15 @@ static PyObject* py_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
 
 /* Active mode Python wrapper */
 static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *data_obj, *kernel_obj = NULL, *start_obj = NULL, *end_obj = NULL,
              *step_obj = NULL, *algo_name = NULL, *output_obj = NULL,
              *output_start_obj = NULL, *output_step_obj = NULL, *start_callback = NULL,
              *end_callback = NULL, *global_error_callback = NULL, *local_error_callback = NULL,
-             *return_callback = NULL;
+             *return_callback = NULL, *iterate_obj = NULL,
+             *transform1_obj = NULL, *transform2_obj = NULL;
+    int use_ns = 1;
+    PyObject *hook_obj = NULL;
     double w1 = 1.0, w2 = 1.0, b1 = 0.0, b2 = 0.0;
         static char *kwlist[] = {
         "data", "kernel", "w1", "w2", "b1", "b2",
@@ -2215,9 +2368,10 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
-        "return_callback", NULL
+        "return_callback",
+        "use_namespace", "namespace_hook", "iterate", "transform1", "transform2", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OddddOOOOOOOOOOOOpOOOO", kwlist,
                                      &data_obj, &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
@@ -2225,7 +2379,8 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback))
+                                     &return_callback, &use_ns, &hook_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
     /* Match pure Python signature cos_comparison_active(data, *arg, kernel=None):
@@ -2258,34 +2413,56 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         PyErr_Clear();
     }
 
-    Data *data = _pyobj_to_data(data_obj);
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "cos_comparison_active");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
+
+    Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
-    Data *kernel = _pyobj_to_data(kernel_obj);
+    Data *kernel = pyobj_to_data(kernel_obj);
     if (!kernel) { Data_free(data); return NULL; }
     int dim = data->dimension;
 
     int *start = NULL;
-    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(data); Data_free(kernel); return NULL; }
+    if (parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(data); Data_free(kernel); return NULL; }
 
     int *end = NULL;
     if (end_obj == NULL) {
         end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
         if (!end) { free(start); Data_free(data); Data_free(kernel); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
-    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+    } else if (parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
         free(start); Data_free(data); Data_free(kernel); return NULL;
     }
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); Data_free(data); Data_free(kernel); return NULL; }
 
-    algo_fn algo = _get_algo(algo_name);
+    if (validate_region_args(start, end, step, kernel->shape, "kernel size",
+                             NULL, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); Data_free(data); Data_free(kernel);
+        return NULL;
+    }
+
+    algo_fn algo = get_algo(algo_name);
     if (!algo) {
         free(output_step); free(output_start); free(step);
         free(end); free(start); Data_free(data); Data_free(kernel);
@@ -2303,50 +2480,58 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
 
     PyObject *name_space = NULL;
     CallbackContext ctx = {0};
-    if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
-        name_space = PyObject_CallObject((PyObject*)&FuncNameSpaceType, NULL);
-        if (name_space) {
-            if (output_obj) { Py_INCREF(output_obj); PyObject_SetAttrString(name_space, "output", output_obj); }
+    if (PyCallable_Check(algo_name)) {
+        Py_INCREF(algo_name);
+        ctx.algorithm = algo_name;
+    }
+    if (use_ns && (start_callback || end_callback ||
+                   global_error_callback ||
+                   local_error_callback ||
+                   return_callback || ctx.algorithm)) {
+        PyObject *hook = hook_obj ? hook_obj :
+            (PyObject *)&FuncNameSpaceType;
+        PyObject *fill = PyDict_New();
+        name_space = NULL;
+        if (fill) {
+            if (output_obj) { Py_INCREF(output_obj); PyDict_SetItemString(fill, "output", output_obj); }
             PyObject *os_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(os_tuple, i, PyLong_FromLong(output_start[i]));
-            PyObject_SetAttrString(name_space, "output_start", os_tuple); Py_DECREF(os_tuple);
+            PyDict_SetItemString(fill, "output_start", os_tuple); Py_DECREF(os_tuple);
             PyObject *ost_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ost_tuple, i, PyLong_FromLong(output_step[i]));
-            PyObject_SetAttrString(name_space, "output_step", ost_tuple); Py_DECREF(ost_tuple);
+            PyDict_SetItemString(fill, "output_step", ost_tuple); Py_DECREF(ost_tuple);
             PyObject *ws_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(kernel->shape[i]));
-            PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
-            Py_INCREF(kernel_obj); PyObject_SetAttrString(name_space, "kernel", kernel_obj);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
+            PyDict_SetItemString(fill, "window_size", ws_tuple); Py_DECREF(ws_tuple);
+            Py_INCREF(kernel_obj); PyDict_SetItemString(fill, "kernel", kernel_obj);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
-            PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
+            PyDict_SetItemString(fill, "start", start_tuple); Py_DECREF(start_tuple);
             PyObject *end_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(end_tuple, i, PyLong_FromLong(end[i]));
-            PyObject_SetAttrString(name_space, "end", end_tuple); Py_DECREF(end_tuple);
+            PyDict_SetItemString(fill, "end", end_tuple); Py_DECREF(end_tuple);
             PyObject *step_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(step_tuple, i, PyLong_FromLong(step[i]));
-            PyObject_SetAttrString(name_space, "step", step_tuple); Py_DECREF(step_tuple);
-            if (algo_name) { Py_INCREF(algo_name); PyObject_SetAttrString(name_space, "algorithm", algo_name); }
+            PyDict_SetItemString(fill, "step", step_tuple); Py_DECREF(step_tuple);
+            if (algo_name) { Py_INCREF(algo_name); PyDict_SetItemString(fill, "algorithm", algo_name); }
             int *num = (int*)malloc((size_t)(dim) * sizeof(int));
     if (!num) { PyErr_NoMemory(); return NULL; }
             for (int i = 0; i < dim; ++i) num[i] = (step[i] != 0) ? (end[i] - start[i] - kernel->shape[i]) / step[i] + 1 : 0;
             PyObject *num_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(num_tuple, i, PyLong_FromLong(num[i]));
-            PyObject_SetAttrString(name_space, "num", num_tuple); Py_DECREF(num_tuple);
+            PyDict_SetItemString(fill, "num", num_tuple); Py_DECREF(num_tuple);
             free(num);
+            name_space = PyObject_Call(hook, PyTuple_New(0), fill);
+            Py_DECREF(fill);
+        }
+        if (name_space) {
             ctx.local_error_callback = local_error_callback;
             ctx.name_space = name_space;
         }
     }
 
-    if (start_callback && PyCallable_Check(start_callback) && name_space) {
-        PyObject *res = PyObject_CallFunctionObjArgs(start_callback, name_space, NULL);
+    if (start_callback && PyCallable_Check(start_callback)) {
+        PyObject *res = PyObject_CallFunctionObjArgs(start_callback, name_space ? name_space : Py_None, NULL);
         Py_XDECREF(res);
     }
 
@@ -2361,14 +2546,14 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
         }
     }
-    if (!name_space) {
+    if (!name_space && !ctx.algorithm) {
         Py_BEGIN_ALLOW_THREADS
         result = cos_comparison_active(data, kernel, w1, w2, b1, b2,
                                        start, end, step,
@@ -2385,17 +2570,17 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
 
     if (!result) {
         if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "effectless args.");
-        if (global_error_callback && PyCallable_Check(global_error_callback) && name_space) {
+        if (global_error_callback && PyCallable_Check(global_error_callback)) {
             PyObject *exc = PyErr_Occurred();
-            if (exc) { Py_INCREF(exc); PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space, NULL); Py_XDECREF(res);  Py_DECREF(exc); }
+            if (exc) { Py_INCREF(exc); PyErr_Clear(); PyObject *res = PyObject_CallFunctionObjArgs(global_error_callback, exc, name_space ? name_space : Py_None, NULL); Py_XDECREF(res);  Py_DECREF(exc); }
         }
         // Free allocated memory before return
         free(output_step); free(output_start); free(step);
@@ -2442,7 +2627,7 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -2467,17 +2652,18 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
         Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
-        py_result = _data_to_vector(result, result_type);
+        py_result = data_to_vector(result, result_type);
     }
 
-    if (end_callback && PyCallable_Check(end_callback) && name_space) {
-        PyObject_SetAttrString(name_space, "output", py_result);
-        PyObject *res = PyObject_CallFunctionObjArgs(end_callback, name_space, NULL);
+    if (end_callback && PyCallable_Check(end_callback)) {
+        if (name_space)
+            PyObject_SetAttrString(name_space, "output", py_result);
+        PyObject *res = PyObject_CallFunctionObjArgs(end_callback, name_space ? name_space : Py_None, NULL);
         Py_XDECREF(res);
     }
 
-    if (return_callback && PyCallable_Check(return_callback) && name_space) {
-        PyObject *ret = PyObject_CallFunctionObjArgs(return_callback, py_result, name_space, NULL);
+    if (return_callback && PyCallable_Check(return_callback)) {
+        PyObject *ret = PyObject_CallFunctionObjArgs(return_callback, py_result, name_space ? name_space : Py_None, NULL);
         Py_DECREF(py_result);
         py_result = ret;
     }
@@ -2492,14 +2678,15 @@ static PyObject* py_active(PyObject *self, PyObject *args, PyObject *kwargs) {
 
 /* Full tensor similarity Python wrapper */
 static PyObject* py_cos_full(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *a_obj, *b_obj, *algo_name = NULL;
         static char *kwlist[] = {"a", "b", "algorithm", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O", kwlist, &a_obj, &b_obj, &algo_name))
         return NULL;
 
-    Data *a = _pyobj_to_data(a_obj);
+    Data *a = pyobj_to_data(a_obj);
     if (!a) return NULL;
-    Data *b = _pyobj_to_data(b_obj);
+    Data *b = pyobj_to_data(b_obj);
     if (!b) { Data_free(a); return NULL; }
 
     if (a->dimension != b->dimension) { PyErr_SetString(PyExc_ValueError, "the shape of two tensors are not same."); Data_free(a); Data_free(b); return NULL; }
@@ -2520,10 +2707,10 @@ static PyObject* py_cos_full(PyObject *self, PyObject *args, PyObject *kwargs) {
 
     algo_fn algo;
     if (algo_name) {
-        algo = _get_algo(algo_name);
+        algo = get_algo(algo_name);
     } else {
         PyObject *tmp = PyUnicode_FromString("cos");
-        algo = tmp ? _get_algo(tmp) : NULL;
+        algo = tmp ? get_algo(tmp) : NULL;
         Py_XDECREF(tmp);
     }
     if (!algo) { Data_free(a); Data_free(b); return NULL; }
@@ -2551,16 +2738,33 @@ static PyObject* py_cos_full(PyObject *self, PyObject *args, PyObject *kwargs) {
 
 /* Local mean Python wrapper */
 static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *data_obj, *local_size_obj = NULL, *step_obj = NULL,
              *weight_obj = NULL,
-             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL;
-        static char *kwlist[] = {"data", "local_size", "step", "weight", "output", "output_start", "output_step", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOO", kwlist,
+             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL,
+             *iterate_obj = NULL, *transform1_obj = NULL, *transform2_obj = NULL;
+        static char *kwlist[] = {"data", "local_size", "step", "weight", "output", "output_start", "output_step", "iterate", "transform1", "transform2", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOOOOO", kwlist,
                                      &data_obj, &local_size_obj, &step_obj, &weight_obj,
-                                     &output_obj, &output_start_obj, &output_step_obj))
+                                     &output_obj, &output_start_obj, &output_step_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
-    Data *data = _pyobj_to_data(data_obj);
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "mean_local");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
+
+    Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
     int dim = data->dimension;
 
@@ -2576,7 +2780,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         if (PyErr_Occurred()) { free(local_size); Data_free(data); return NULL; }
         ls_dim = 1;
     } else if (local_size_obj) {
-        if (_parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
+        if (parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
     } else {
         ls_dim = dim; local_size = (int*)malloc((size_t)(ls_dim) * sizeof(int));
         for (int i = 0; i < ls_dim; ++i) local_size[i] = 1;
@@ -2589,7 +2793,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     /* Optional per-element weights: convert to a flat double array (NULL = ones) */
     double *weights = NULL;
     if (weight_obj && weight_obj != Py_None) {
-        Data *wdata = _pyobj_to_data(weight_obj);
+        Data *wdata = pyobj_to_data(weight_obj);
         if (!wdata) { free(local_size); Data_free(data); return NULL; }
         if (wdata->dimension != dim) {
             int wdim = wdata->dimension;
@@ -2627,13 +2831,22 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); free(weights); Data_free(data); return NULL; }
+
+    if (validate_region_args(start, end, step, local_size, "local_size",
+                             NULL, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); free(local_size); free(weights);
+        Data_free(data);
+        return NULL;
+    }
 
     Data *result = NULL;
     // Save user's output_start/output_step and set to 0/1 for core call when output is provided
@@ -2646,8 +2859,8 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
@@ -2664,8 +2877,8 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
@@ -2716,7 +2929,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -2741,7 +2954,7 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
         Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
-        py_result = _data_to_vector(result, result_type);
+        py_result = data_to_vector(result, result_type);
     }
 
     // Free all allocated memory
@@ -2753,15 +2966,32 @@ static PyObject* py_mean_local(PyObject *self, PyObject *args, PyObject *kwargs)
 
 /* Local variance Python wrapper */
 static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
     PyObject *data_obj, *local_size_obj = NULL, *step_obj = NULL,
-             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL;
-        static char *kwlist[] = {"data", "local_size", "step", "output", "output_start", "output_step", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOO", kwlist,
+             *output_obj = NULL, *output_start_obj = NULL, *output_step_obj = NULL,
+             *iterate_obj = NULL, *transform1_obj = NULL, *transform2_obj = NULL;
+        static char *kwlist[] = {"data", "local_size", "step", "output", "output_start", "output_step", "iterate", "transform1", "transform2", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOOOO", kwlist,
                                      &data_obj, &local_size_obj, &step_obj,
-                                     &output_obj, &output_start_obj, &output_step_obj))
+                                     &output_obj, &output_start_obj, &output_step_obj,
+                                     &iterate_obj, &transform1_obj, &transform2_obj))
         return NULL;
 
-    Data *data = _pyobj_to_data(data_obj);
+    /* iterate/transform paths: delegate to the pure Python reference implementation. */
+    if ((iterate_obj != NULL && iterate_obj != Py_None) ||
+        (transform1_obj != NULL && transform1_obj != Py_None) ||
+        (transform2_obj != NULL && transform2_obj != Py_None)) {
+        PyObject *pure = _import_pure_core(self);
+        if (!pure) return NULL;
+        PyObject *fn = PyObject_GetAttrString(pure, "local_variance");
+        Py_DECREF(pure);
+        if (!fn) return NULL;
+        PyObject *result = PyObject_Call(fn, args, kwargs);
+        Py_DECREF(fn);
+        return result;
+    }
+
+    Data *data = pyobj_to_data(data_obj);
     if (!data) return NULL;
     int dim = data->dimension;
 
@@ -2776,7 +3006,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         if (PyErr_Occurred()) { free(local_size); Data_free(data); return NULL; }
         ls_dim = 1;
     } else if (local_size_obj) {
-        if (_parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
+        if (parse_int_seq(local_size_obj, &local_size, &ls_dim) < 0) { Data_free(data); return NULL; }
     } else {
         ls_dim = dim; local_size = (int*)malloc((size_t)(ls_dim) * sizeof(int));
         for (int i = 0; i < ls_dim; ++i) local_size[i] = 1;
@@ -2795,13 +3025,21 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(end); free(start); free(local_size); Data_free(data); return NULL; }
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(output_start); free(step); free(end); free(start); free(local_size); Data_free(data); return NULL; }
+
+    if (validate_region_args(start, end, step, local_size, "local_size",
+                             NULL, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(output_step); free(output_start); free(step);
+        free(end); free(start); free(local_size); Data_free(data);
+        return NULL;
+    }
 
     Data *result = NULL;
     // Save user's output_start/output_step and set to 0/1 for core call when output is provided
@@ -2814,8 +3052,8 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
@@ -2832,8 +3070,8 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
@@ -2884,7 +3122,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -2909,7 +3147,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
         Py_INCREF(py_result);
     } else {
         PyTypeObject *result_type = PyObject_IsInstance(data_obj, (PyObject*)&VectorizeType) ? Py_TYPE(data_obj) : NULL;
-        py_result = _data_to_vector(result, result_type);
+        py_result = data_to_vector(result, result_type);
     }
 
     // Free all allocated memory
@@ -2919,9 +3157,7 @@ static PyObject* py_local_variance(PyObject *self, PyObject *args, PyObject *kwa
     return py_result;
 }
 
-/* ------------------------------------------------------------------
-Vector optimized methods (unchanged)
------------------------------------------------------------------- */
+/* ---- Vector optimized methods ---- */
 static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, PyObject *kwargs) {
     /* Vector passive wrapper (delegates to core loop) */
     Vector *vec = (Vector*)self;
@@ -2940,15 +3176,18 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     PyObject *global_error_callback = NULL;
     PyObject *local_error_callback = NULL;
     PyObject *return_callback = NULL;
+    int use_ns = 1;
+    PyObject *hook_obj = NULL;
         static char *kwlist[] = {
         "window_size", "w1", "w2", "b1", "b2",
         "start", "end", "step", "d", "algorithm",
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
-        "return_callback", NULL
+        "return_callback",
+        "use_namespace", "namespace_hook", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OddddOOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OddddOOOOOOOOOOOOOpO", kwlist,
                                      &window_size_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj, &d_obj,
@@ -2956,7 +3195,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback))
+                                     &return_callback, &use_ns, &hook_obj))
         return NULL;
 
     /* Create contiguous copy of view data for core computation */
@@ -2971,7 +3210,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     if (total > 0) {
         int *idx = (int*)malloc((size_t)(vec->dimension > 0 ? vec->dimension : 1) * sizeof(int));
         if (!idx) { free(indices); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
-        memset(idx, 0, vec->dimension * sizeof(int));
+        memset(idx, 0, (size_t)vec->dimension * sizeof(int));
         int pos = 0;
         while (1) {
             int flat = vec->start + vec->offset;
@@ -2999,28 +3238,28 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     int dim = vec->dimension;
 
     int *window_size = NULL;
-    if (_parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(window_size_obj, &window_size, dim, 1) < 0) { Data_free(contig_data); return NULL; }
 
     int *start = NULL;
-    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { free(window_size); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { free(window_size); Data_free(contig_data); return NULL; }
 
     int *end = NULL;
     if (end_obj == NULL) {
         end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
         if (!end) { Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
-    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+    } else if (parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
         free(window_size); free(start); Data_free(contig_data); return NULL;
     }
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(window_size); free(start); free(end); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(window_size); free(start); free(end); Data_free(contig_data); return NULL; }
 
     int *d = NULL;
-    if (_parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { free(window_size); free(start); free(end); free(step); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(d_obj, &d, dim, 0) < 0) { free(window_size); free(start); free(end); free(step); Data_free(contig_data); return NULL; }
     if (d_obj == NULL && dim > 0) d[0] = 1;
 
-    algo_fn algo = _get_algo(algo_name);
+    algo_fn algo = get_algo(algo_name);
     if (!algo) {
         free(window_size); free(start); free(end); free(step); free(d);
         Data_free(contig_data);
@@ -3028,10 +3267,18 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     }
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { Data_free(contig_data); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { Data_free(contig_data); return NULL; }
+
+    if (validate_region_args(start, end, step, window_size, "window_size",
+                             d, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(window_size); free(start); free(end); free(step); free(d);
+        free(output_start); free(output_step); Data_free(contig_data);
+        return NULL;
+    }
 
     PyObject *name_space = NULL; CallbackContext ctx = {0};
     if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
@@ -3048,12 +3295,6 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             PyObject *ws_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(window_size[i]));
             PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
@@ -3095,8 +3336,8 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
@@ -3119,8 +3360,8 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
@@ -3176,7 +3417,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -3200,7 +3441,7 @@ static PyObject *Vector_cos_comparison_passive(PyObject *self, PyObject *args, P
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        py_result = _data_to_vector(result, Py_TYPE(self));
+        py_result = data_to_vector(result, Py_TYPE(self));
     }
 
     if (end_callback && PyCallable_Check(end_callback) && name_space) {
@@ -3242,15 +3483,18 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     PyObject *global_error_callback = NULL;
     PyObject *local_error_callback = NULL;
     PyObject *return_callback = NULL;
+    int use_ns = 1;
+    PyObject *hook_obj = NULL;
         static char *kwlist[] = {
         "kernel", "w1", "w2", "b1", "b2",
         "start", "end", "step", "algorithm",
         "output", "output_start", "output_step",
         "start_callback", "end_callback",
         "global_error_callback", "local_error_callback",
-        "return_callback", NULL
+        "return_callback",
+        "use_namespace", "namespace_hook", NULL
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|ddddOOOOOOOOOOOO", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|ddddOOOOOOOOOOOOpO", kwlist,
                                      &kernel_obj,
                                      &w1, &w2, &b1, &b2,
                                      &start_obj, &end_obj, &step_obj,
@@ -3258,7 +3502,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
                                      &output_start_obj, &output_step_obj,
                                      &start_callback, &end_callback,
                                      &global_error_callback, &local_error_callback,
-                                     &return_callback))
+                                     &return_callback, &use_ns, &hook_obj))
         return NULL;
 
     if (!kernel_obj) { PyErr_SetString(PyExc_ValueError, "kernel must be provided for active mode"); return NULL; }
@@ -3275,7 +3519,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     if (total > 0) {
         int *idx = (int*)malloc((size_t)(vec->dimension > 0 ? vec->dimension : 1) * sizeof(int));
         if (!idx) { free(indices); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
-        memset(idx, 0, vec->dimension * sizeof(int));
+        memset(idx, 0, (size_t)vec->dimension * sizeof(int));
         int pos = 0;
         while (1) {
             int flat = vec->start + vec->offset;
@@ -3301,32 +3545,41 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     
     Data *data = contig_data;
     int dim = vec->dimension;
-    Data *kernel = _pyobj_to_data(kernel_obj);
+    Data *kernel = pyobj_to_data(kernel_obj);
     if (!kernel) { Data_free(contig_data); return NULL; }
 
     int *start = NULL;
-    if (_parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(start_obj, &start, dim, 0) < 0) { Data_free(kernel); Data_free(contig_data); return NULL; }
 
     int *end = NULL;
     if (end_obj == NULL) {
         end = (int*)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(int));
         if (!end) { Data_free(kernel); Data_free(contig_data); PyErr_NoMemory(); return NULL; }
         for (int i = 0; i < dim; ++i) end[i] = data->shape[i];
-    } else if (_parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
+    } else if (parse_opt_int_seq(end_obj, &end, dim, -1) < 0) {
         free(start); Data_free(kernel); Data_free(contig_data); return NULL;
     }
 
     int *step = NULL;
-    if (_parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(start); free(end); Data_free(kernel); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(step_obj, &step, dim, 1) < 0) { free(start); free(end); Data_free(kernel); Data_free(contig_data); return NULL; }
 
-    algo_fn algo = _get_algo(algo_name);
+    algo_fn algo = get_algo(algo_name);
     if (!algo) { free(start); free(end); free(step); Data_free(kernel); Data_free(contig_data); return NULL; }
 
     int *output_start = NULL;
-    if (_parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(start); free(end); free(step); Data_free(kernel); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(output_start_obj, &output_start, dim, 0) < 0) { free(start); free(end); free(step); Data_free(kernel); Data_free(contig_data); return NULL; }
 
     int *output_step = NULL;
-    if (_parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(start); free(end); free(step); Data_free(kernel); Data_free(contig_data); return NULL; }
+    if (parse_opt_int_seq(output_step_obj, &output_step, dim, 1) < 0) { free(start); free(end); free(step); Data_free(kernel); Data_free(contig_data); return NULL; }
+
+    if (validate_region_args(start, end, step, kernel->shape, "kernel size",
+                             NULL, data, dim, output_start, output_step,
+                             output_obj) < 0) {
+        free(start); free(end); free(step);
+        free(output_start); free(output_step);
+        Data_free(kernel); Data_free(contig_data);
+        return NULL;
+    }
 
     PyObject *name_space = NULL; CallbackContext ctx = {0};
     if (start_callback || end_callback || global_error_callback || local_error_callback || return_callback || PyCallable_Check(algo_name)) {
@@ -3344,12 +3597,6 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(ws_tuple, i, PyLong_FromLong(kernel->shape[i]));
             PyObject_SetAttrString(name_space, "window_size", ws_tuple); Py_DECREF(ws_tuple);
             Py_INCREF(kernel_obj); PyObject_SetAttrString(name_space, "kernel", kernel_obj);
-            PyObject *linear_tuple = PyTuple_New(4);
-            PyTuple_SET_ITEM(linear_tuple, 0, PyFloat_FromDouble(w1));
-            PyTuple_SET_ITEM(linear_tuple, 1, PyFloat_FromDouble(w2));
-            PyTuple_SET_ITEM(linear_tuple, 2, PyFloat_FromDouble(b1));
-            PyTuple_SET_ITEM(linear_tuple, 3, PyFloat_FromDouble(b2));
-            PyObject_SetAttrString(name_space, "linear", linear_tuple); Py_DECREF(linear_tuple);
             PyObject *start_tuple = PyTuple_New(dim);
             for (int i = 0; i < dim; ++i) PyTuple_SET_ITEM(start_tuple, i, PyLong_FromLong(start[i]));
             PyObject_SetAttrString(name_space, "start", start_tuple); Py_DECREF(start_tuple);
@@ -3388,8 +3635,8 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
             PyErr_NoMemory();
             return NULL;
         }
-        memcpy(saved_os, output_start, dim * sizeof(int));
-        memcpy(saved_ost, output_step, dim * sizeof(int));
+        memcpy(saved_os, output_start, (size_t)dim * sizeof(int));
+        memcpy(saved_ost, output_step, (size_t)dim * sizeof(int));
         for (int i = 0; i < dim; ++i) {
             output_start[i] = 0;
             output_step[i] = 1;
@@ -3412,8 +3659,8 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     }
     // Restore user's output_start/output_step
     if (saved_os) {
-        memcpy(output_start, saved_os, dim * sizeof(int));
-        memcpy(output_step, saved_ost, dim * sizeof(int));
+        memcpy(output_start, saved_os, (size_t)dim * sizeof(int));
+        memcpy(output_step, saved_ost, (size_t)dim * sizeof(int));
         free(saved_os);
         free(saved_ost);
     }
@@ -3469,7 +3716,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
                 if (out_data) {
                     Data_set(out_data, out_idx, val);
                 } else {
-                    _py_set_item(output_obj, out_idx, r_dim, 0, val);
+                    py_set_item_value(output_obj, out_idx, r_dim, 0, val);
                 }
                 // Advance last dimension
                 idx[flag]++;
@@ -3493,7 +3740,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
         py_result = output_obj;
         Py_INCREF(py_result);
     } else {
-        py_result = _data_to_vector(result, Py_TYPE(self));
+        py_result = data_to_vector(result, Py_TYPE(self));
     }
 
     if (end_callback && PyCallable_Check(end_callback) && name_space) {
@@ -3517,9 +3764,7 @@ static PyObject *Vector_cos_comparison_active(PyObject *self, PyObject *args, Py
     return py_result;
 }
 
-/* ------------------------------------------------------------------
-VectorChainCompute native type (replaces PyRun_String Python closure)
------------------------------------------------------------------- */
+/* ---- VectorChainCompute native type ---- */
 typedef struct {
     PyObject_HEAD
     PyObject *a;
@@ -3580,6 +3825,7 @@ static PyObject* VectorChainCompute_fix(VectorChainComputeObject *self, PyObject
 
 // get method: return current a
 static PyObject* VectorChainCompute_get(VectorChainComputeObject *self, PyObject *args) {
+    (void)args;
     if (self->a) {
         Py_INCREF(self->a);
         return self->a;
@@ -3615,6 +3861,7 @@ static PyMethodDef vcc_fix_def = {"fix", (PyCFunction)VectorChainCompute_fix, ME
 static PyMethodDef vcc_get_def = {"get", (PyCFunction)VectorChainCompute_get, METH_NOARGS, NULL};
 
 static PyObject* py_vector_chain_compute(PyObject *self, PyObject *A) {
+    (void)self;
     VectorChainComputeObject *obj = PyObject_New(VectorChainComputeObject, &VectorChainComputeType);
     if (!obj) return NULL;
     obj->a = A;
@@ -3635,14 +3882,12 @@ static PyObject* py_vector_chain_compute(PyObject *self, PyObject *A) {
     return result;
 }
 
-/* ------------------------------------------------------------------
- * data_filter / data_mapping: callback-based element walk over a sampled
- * region.  Callbacks are stateless (value only); errors are silently
- * skipped.  Iterative odometer walk, never recursive.  All arrays are
- * malloc'd and freed on every path.
- * ------------------------------------------------------------------ */
-
-static int _check_region_len(PyObject *obj, int dimension, const char *name) {
+/* ---- data_filter / data_mapping: callback-based element walk over a sampled
+region.  Callbacks are stateless (value only); errors are silently
+skipped.  Iterative odometer walk, never recursive.  All arrays are
+malloc'd and freed on every path.
+------------------------------------------------------------------ */
+static int check_region_len(PyObject *obj, int dimension, const char *name) {
     if (obj == NULL || obj == Py_None) return 0;
     if (!PyTuple_Check(obj) || PyTuple_Size(obj) != dimension) {
         PyErr_Format(PyExc_ValueError, "%s length does not match data dimension", name);
@@ -3650,21 +3895,20 @@ static int _check_region_len(PyObject *obj, int dimension, const char *name) {
     }
     return 0;
 }
-
 /* Resolve the sampled read region (start/shape/step -> effective sizes and
-   element total), with the same clipping semantics as load_data's source
-   side.  Allocates r_start/r_step/effective (caller frees each).  Returns 0
-   on success, -1 with a Python exception set otherwise.  data_shape is
-   const: the caller's shape buffer is never modified. */
-static int _resolve_read_region(PyObject *start, PyObject *shape_obj,
-                                PyObject *step, const int *data_shape,
-                                int dimension,
-                                int **r_start_out, int **r_step_out,
-                                int **effective_out, long long *total_out) {
+element total), with the same clipping semantics as load_data's source
+side.  Allocates r_start/r_step/effective (caller frees each).  Returns 0
+on success, -1 with a Python exception set otherwise.  data_shape is
+const: the caller's shape buffer is never modified. */
+static int resolve_read_region(PyObject *start, PyObject *shape_obj,
+PyObject *step, const int *data_shape,
+int dimension,
+int **r_start_out, int **r_step_out,
+int **effective_out, long long *total_out) {
     int *r_start = NULL, *r_step = NULL, *req_shape = NULL;
-    if (_parse_opt_int_seq(start, &r_start, dimension, 0) < 0
-        || _parse_opt_int_seq(step, &r_step, dimension, 1) < 0
-        || _parse_opt_int_seq(shape_obj, &req_shape, dimension, -1) < 0) {
+    if (parse_opt_int_seq(start, &r_start, dimension, 0) < 0
+    || parse_opt_int_seq(step, &r_step, dimension, 1) < 0
+    || parse_opt_int_seq(shape_obj, &req_shape, dimension, -1) < 0) {
         free(r_start); free(r_step); free(req_shape);
         return -1;
     }
@@ -3689,7 +3933,7 @@ static int _resolve_read_region(PyObject *start, PyObject *shape_obj,
     long long total = 1;
     for (int i = 0; i < dimension; ++i) {
         int avail = (r_start[i] < data_shape[i])
-            ? (long long)(data_shape[i] - r_start[i] + r_step[i] - 1) / r_step[i] : 0;
+        ? (int)((long long)(data_shape[i] - r_start[i] + r_step[i] - 1) / r_step[i]) : 0;
         int n = (req_shape[i] >= 0) ? req_shape[i] : avail;
         effective[i] = (n < avail) ? n : avail;
         total *= (long long)effective[i];
@@ -3701,46 +3945,672 @@ static int _resolve_read_region(PyObject *start, PyObject *shape_obj,
     *total_out = total;
     return 0;
 }
+/* ==================================================================
+Optional iterate path: a module-level C kernel (PyObject* in /
+PyObject* out) handed to custom iterators.  One implementation with a
+mode selector carried on the PyCFunction self argument; the five
+PyMethodDef entries below name the per-function kernels - they are
+NOT registered in the module method table.
+================================================================== */
+/* Pooling (v0.5.1): every window of data reduces to one output element
+   through func(*values) (row-major order; NULL func = mean). */
 
+/* Region axis: NULL/None -> default, int -> 1-tuple, else sequence; the
+   length must match the data dimension (no broadcast). */
+static int parse_pool_axis(PyObject *obj, int **arr, int dimension,
+int dflt, const char *name) {
+    if (obj == NULL || obj == Py_None) {
+        *arr = (int*)malloc((size_t)(dimension > 0 ? dimension : 1) * sizeof(int));
+        if (!*arr) { PyErr_NoMemory(); return -1; }
+        for (int i = 0; i < dimension; ++i) (*arr)[i] = dflt;
+        return 0;
+    }
+    int *tmp = NULL;
+    int cnt = 0;
+    if (PyLong_Check(obj)) {
+        tmp = (int*)malloc(sizeof(int));
+        if (!tmp) { PyErr_NoMemory(); return -1; }
+        int overflow = 0;
+        long v = PyLong_AsLongAndOverflow(obj, &overflow);
+        if (overflow || v > INT_MAX || v < INT_MIN) {
+            free(tmp);
+            PyErr_SetString(PyExc_OverflowError, "value out of range");
+            return -1;
+        }
+        if (v == -1 && PyErr_Occurred()) { free(tmp); return -1; }
+        tmp[0] = (int)v;
+        cnt = 1;
+    } else if (parse_int_seq(obj, &tmp, &cnt) < 0) {
+        return -1;
+    }
+    if (cnt != dimension) {
+        free(tmp);
+        PyErr_Format(PyExc_ValueError,
+        "%s length does not match data dimension", name);
+        return -1;
+    }
+    *arr = tmp;
+    return 0;
+}
+
+/* Window read source: native double array (conv) or duck get_item. */
+typedef struct {
+    Data *conv;      /* non-NULL: native reads from the converted data */
+    PyObject *data;  /* duck reads through the active get_item otherwise */
+} PoolRead;
+
+static int pool_read_value(const PoolRead *read, const int *pos,
+int dimension, int want_obj, double *dbl, PyObject **out) {
+    if (read->conv) {
+        long long flat = 0;
+        for (int i = 0; i < dimension; ++i)
+        flat += (long long)pos[i] * read->conv->strides[i];
+        double v = ((double*)read->conv->data)[flat];
+        if (!want_obj) { *dbl = v; return 0; }
+        *out = PyFloat_FromDouble(v);
+        return *out ? 0 : -1;
+    }
+    PyObject *place = PyTuple_New(dimension);
+    if (!place) return -1;
+    for (int i = 0; i < dimension; ++i)
+    PyTuple_SET_ITEM(place, i, PyLong_FromLong(pos[i]));
+    PyObject *get_args = PyTuple_Pack(2, read->data, place);
+    Py_DECREF(place);
+    PyObject *value = get_args ? py_get_item(NULL, get_args) : NULL;
+    Py_XDECREF(get_args);
+    if (!value) return -1;
+    if (want_obj) { *out = value; return 0; }
+    *dbl = PyFloat_AsDouble(value);
+    Py_DECREF(value);
+    if (*dbl == -1.0 && PyErr_Occurred()) return -1;
+    return 0;
+}
+
+/* One output element: gather the window values in row-major order, apply
+   func (NULL = mean) and write through py_set_item.  Returns 0 or -1. */
+static int pool_window_value(const PoolRead *read, const int *window_start,
+const int *window_step, const int *window_size,
+int dimension, PyObject *func, const int *index,
+PyObject *output) {
+    long long total = 1;
+    for (int i = 0; i < dimension; ++i) {
+        if (window_size[i] > 0 && total > LLONG_MAX / window_size[i]) {
+            PyErr_SetString(PyExc_OverflowError, "window is too large");
+            return -1;
+        }
+        total *= (long long)window_size[i];
+    }
+    PyObject *values = func ? PyTuple_New((Py_ssize_t)total) : NULL;
+    if (func && !values) return -1;
+    int *inner = (int*)calloc(
+    (size_t)(dimension > 0 ? dimension : 1), sizeof(int));
+    if (!inner) { Py_XDECREF(values); PyErr_NoMemory(); return -1; }
+    double acc = 0.0;
+    long long count = 0;
+    int *pos = (int*)malloc(
+    (size_t)(dimension > 0 ? dimension : 1) * sizeof(int));
+    if (!pos) { free(inner); Py_XDECREF(values); PyErr_NoMemory(); return -1; }
+    long long k = 0;
+    while (1) {
+        for (int i = 0; i < dimension; ++i)
+        pos[i] = window_start[i] + window_step[i] * index[i] + inner[i];
+        double v = 0.0;
+        PyObject *value = NULL;
+        if (pool_read_value(read, pos, dimension, func != NULL, &v,
+        &value) < 0) {
+            free(pos); free(inner); Py_XDECREF(values); return -1;
+        }
+        if (func) {
+            PyTuple_SET_ITEM(values, (Py_ssize_t)k, value);
+        } else {
+            acc += v;
+            count++;
+        }
+        ++k;
+        int d = dimension - 1;
+        while (d >= 0) {
+            inner[d]++;
+            if (inner[d] < window_size[d]) break;
+            inner[d] = 0;
+            d--;
+        }
+        if (d < 0) break;
+    }
+    free(pos);
+    free(inner);
+    double result = 0.0;
+    if (func) {
+        PyObject *value = PyObject_Call(func, values, NULL);
+        Py_DECREF(values);
+        if (!value) return -1;
+        if (!PyNumber_Check(value)) {
+            Py_DECREF(value);
+            PyErr_SetString(PyExc_TypeError, "pool func must return a number");
+            return -1;
+        }
+        result = PyFloat_AsDouble(value);
+        Py_DECREF(value);
+        if (result == -1.0 && PyErr_Occurred()) return -1;
+    } else {
+        result = acc / (double)count;
+    }
+    PyObject *write = PyTuple_New(dimension);
+    if (!write) return -1;
+    for (int i = 0; i < dimension; ++i)
+    PyTuple_SET_ITEM(write, i, PyLong_FromLong(index[i]));
+    PyObject *result_obj = PyFloat_FromDouble(result);
+    PyObject *set_args = result_obj
+    ? PyTuple_Pack(3, output, write, result_obj) : NULL;
+    Py_DECREF(write);
+    Py_XDECREF(result_obj);
+    PyObject *r = set_args ? py_set_item(NULL, set_args) : NULL;
+    Py_XDECREF(set_args);
+    if (!r) return -1;
+    Py_DECREF(r);
+    return 0;
+}
+static PyObject* _ints_to_tuple(const int *values, int dimension) {
+    PyObject *tuple = PyTuple_New(dimension);
+    if (tuple == NULL) return NULL;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PyLong_FromLong(values[i]);
+        if (item == NULL) { Py_DECREF(tuple); return NULL; }
+        PyTuple_SET_ITEM(tuple, i, item);
+    }
+    return tuple;
+}
+static PyObject* _dbls_to_tuple(const double *values, int dimension) {
+    PyObject *tuple = PyTuple_New(dimension);
+    if (tuple == NULL) return NULL;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PyFloat_FromDouble(values[i]);
+        if (item == NULL) { Py_DECREF(tuple); return NULL; }
+        PyTuple_SET_ITEM(tuple, i, item);
+    }
+    return tuple;
+}
+static int _parse_int_tuple(PyObject *obj, int **out, int dimension) {
+    if (obj == NULL || !PySequence_Check(obj)) return -1;
+    if (PySequence_Size(obj) != dimension) return -1;
+    int *values = (int*)malloc(sizeof(int) *
+    (size_t)(dimension > 0 ? dimension : 1));
+    if (values == NULL) return -1;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (item == NULL) { free(values); return -1; }
+        long v = PyLong_AsLong(item);
+        Py_DECREF(item);
+        if (v == -1 && PyErr_Occurred()) { free(values); return -1; }
+        values[i] = (int)v;
+    }
+    *out = values;
+    return 0;
+}
+static int _parse_dbl_tuple(PyObject *obj, double **out, int dimension) {
+    if (obj == NULL || !PySequence_Check(obj)) return -1;
+    if (PySequence_Size(obj) != dimension) return -1;
+    double *values = (double*)malloc(sizeof(double) *
+    (size_t)(dimension > 0 ? dimension : 1));
+    if (values == NULL) return -1;
+    for (int i = 0; i < dimension; ++i) {
+        PyObject *item = PySequence_GetItem(obj, i);
+        if (item == NULL) { free(values); return -1; }
+        double v = PyFloat_AsDouble(item);
+        Py_DECREF(item);
+        if (v == -1.0 && PyErr_Occurred()) { free(values); return -1; }
+        values[i] = v;
+    }
+    *out = values;
+    return 0;
+}
+static PyObject* _make_kernel(PyMethodDef *def, long mode) {
+    PyObject *mode_obj = PyLong_FromLong(mode);
+    if (mode_obj == NULL) return NULL;
+    PyObject *kernel = PyCFunction_New(def, mode_obj);
+    Py_DECREF(mode_obj);
+    return kernel;
+}
+/* mode: 0 data_mapping, 1 data_filter, 2 elementwise,
+3 position_map, 4 elementwise_position */
+static PyObject* _iterate_kernel(PyObject *self, PyObject *args,
+PyObject *kwargs) {
+    long mode = PyLong_AsLong(self);
+    if (mode == -1 && PyErr_Occurred()) return NULL;
+    PyObject *index_obj = NULL;
+    if (!PyArg_ParseTuple(args, "O", &index_obj)) return NULL;
+    Py_ssize_t dim_ss = PySequence_Size(index_obj);
+    if (dim_ss < 0) {
+        PyErr_Clear();
+        PyErr_SetString(PyExc_TypeError, "index must be a sequence");
+        return NULL;
+    }
+    int dimension = (int)dim_ss;
+    int *index = NULL;
+    if (_parse_int_tuple(index_obj, &index, dimension) < 0) {
+        PyErr_Clear();
+        PyErr_SetString(PyExc_TypeError, "index must be an int sequence");
+        return NULL;
+    }
+    if (mode == 0) {
+        /* data_mapping */
+        PyObject *data = PyDict_GetItemString(kwargs, "data");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *out = PyDict_GetItemString(kwargs, "out");
+        int *r_start = NULL, *r_step = NULL;
+        int *w_start = NULL, *w_step = NULL, *out_shape = NULL;
+        int ok = (data != NULL && callback != NULL && out != NULL
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+        &r_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+        &r_step, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_start"),
+        &w_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_step"),
+        &w_step, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "out_shape"),
+        &out_shape, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+            "data_mapping kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(w_start); free(w_step); free(out_shape);
+            return NULL;
+        }
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+        PyTuple_SET_ITEM(read, i, PyLong_FromLongLong(
+        (long long)r_start[i] + (long long)index[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = get_args ? py_get_item(NULL, get_args) : NULL;
+        Py_XDECREF(get_args);
+        if (value == NULL) {
+            free(index); free(r_start); free(r_step);
+            free(w_start); free(w_step); free(out_shape);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int in_bounds = 1;
+            for (int i = 0; i < dimension; ++i) {
+                long long w = (long long)w_start[i]
+                + (long long)index[i] * w_step[i];
+                if (w >= out_shape[i]) { in_bounds = 0; break; }
+            }
+            if (in_bounds) {
+                PyObject *write = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                PyTuple_SET_ITEM(write, i, PyLong_FromLongLong(
+                (long long)w_start[i]
+                + (long long)index[i] * w_step[i]));
+                PyObject *set_args = PyTuple_Pack(3, out, write, cb_res);
+                Py_DECREF(write);
+                PyObject *r = set_args ? py_set_item(NULL, set_args)
+                : NULL;
+                Py_XDECREF(set_args);
+                Py_DECREF(cb_res);
+                if (r == NULL) {
+                    free(index); free(r_start); free(r_step);
+                    free(w_start); free(w_step); free(out_shape);
+                    return NULL;
+                }
+                Py_DECREF(r);
+            } else {
+                Py_DECREF(cb_res);
+            }
+        }
+        free(index); free(r_start); free(r_step);
+        free(w_start); free(w_step); free(out_shape);
+        Py_RETURN_NONE;
+    } else if (mode == 1) {
+        /* data_filter */
+        PyObject *data = PyDict_GetItemString(kwargs, "data");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *hits = PyDict_GetItemString(kwargs, "hits");
+        int *r_start = NULL, *r_step = NULL;
+        int *origin = NULL, *basis = NULL;
+        int ok = (data != NULL && callback != NULL && hits != NULL
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+        &r_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+        &r_step, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "origin"),
+        &origin, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "basis"),
+        &basis, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+            "data_filter kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin); free(basis);
+            return NULL;
+        }
+        PyObject *read = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i)
+        PyTuple_SET_ITEM(read, i, PyLong_FromLongLong(
+        (long long)r_start[i] + (long long)index[i] * r_step[i]));
+        PyObject *get_args = PyTuple_Pack(2, data, read);
+        Py_DECREF(read);
+        PyObject *value = get_args ? py_get_item(NULL, get_args) : NULL;
+        Py_XDECREF(get_args);
+        if (value == NULL) {
+            free(index); free(r_start); free(r_step);
+            free(origin); free(basis);
+            return NULL;
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, value, NULL);
+        Py_DECREF(value);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            int truthy = PyObject_IsTrue(cb_res);
+            Py_DECREF(cb_res);
+            if (truthy < 0) {
+                PyErr_Clear();
+                truthy = 0;
+            }
+            if (truthy) {
+                PyObject *pos = PyTuple_New(dimension);
+                for (int i = 0; i < dimension; ++i)
+                PyTuple_SET_ITEM(pos, i, PyLong_FromLongLong(
+                (long long)origin[i]
+                + (long long)basis[i] * index[i]));
+                int app = PyList_Append(hits, pos);
+                Py_DECREF(pos);
+                if (app < 0) {
+                    free(index); free(r_start); free(r_step);
+                    free(origin); free(basis);
+                    return NULL;
+                }
+            }
+        }
+        free(index); free(r_start); free(r_step);
+        free(origin); free(basis);
+        Py_RETURN_NONE;
+    } else if (mode == 2) {
+        /* elementwise */
+        PyObject *tensors = PyDict_GetItemString(kwargs, "tensors");
+        PyObject *func = PyDict_GetItemString(kwargs, "func");
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        if (tensors == NULL || func == NULL || output == NULL) {
+            PyErr_SetString(PyExc_TypeError,
+            "elementwise kernel: bad arguments");
+            free(index);
+            return NULL;
+        }
+        Py_ssize_t nt = PyTuple_Size(tensors);
+        PyObject *vals = PyTuple_New(nt);
+        if (vals == NULL) { free(index); return NULL; }
+        for (Py_ssize_t t = 0; t < nt; ++t) {
+            PyObject *get_args = PyTuple_Pack(
+            2, PyTuple_GET_ITEM(tensors, t), index_obj);
+            PyObject *v = get_args ? py_get_item(NULL, get_args) : NULL;
+            Py_XDECREF(get_args);
+            if (v == NULL) {
+                Py_DECREF(vals); free(index);
+                return NULL;
+            }
+            PyTuple_SET_ITEM(vals, t, v);
+        }
+        PyObject *value = PyObject_Call(func, vals, NULL);
+        Py_DECREF(vals);
+        if (value == NULL) { free(index); return NULL; }
+        if (!PyNumber_Check(value)) {
+            Py_DECREF(value);
+            PyErr_SetString(PyExc_TypeError,
+            "elementwise func must return a number");
+            free(index);
+            return NULL;
+        }
+        PyObject *set_args = PyTuple_Pack(3, output, index_obj, value);
+        Py_DECREF(value);
+        PyObject *r = set_args ? py_set_item(NULL, set_args) : NULL;
+        Py_XDECREF(set_args);
+        if (r == NULL) { free(index); return NULL; }
+        Py_DECREF(r);
+        free(index);
+        Py_RETURN_NONE;
+    } else if (mode == 3) {
+        /* position_map */
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *status = PyDict_GetItemString(kwargs, "status");
+        int *r_start = NULL, *r_step = NULL;
+        double *origin_d = NULL, *scale_d = NULL;
+        int ok = (output != NULL && callback != NULL && status != NULL
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+        &r_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+        &r_step, dimension) == 0
+        && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "origin"),
+        &origin_d, dimension) == 0
+        && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "scale"),
+        &scale_d, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+            "position_map kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin_d); free(scale_d);
+            return NULL;
+        }
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+            + (long long)index[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong((long long)rr));
+            double logical_val = rr * scale_d[i] - origin_d[i];
+            long long li = (long long)logical_val;
+            if ((double)li == logical_val)
+            PyTuple_SET_ITEM(logical, i, PyLong_FromLongLong(li));
+            else
+            PyTuple_SET_ITEM(logical, i, PyFloat_FromDouble(logical_val));
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(callback, logical,
+        NULL);
+        Py_DECREF(logical);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, cb_res);
+            Py_DECREF(cb_res);
+            PyObject *r = set_args ? py_set_item(NULL, set_args) : NULL;
+            Py_XDECREF(set_args);
+            if (r == NULL) {
+                PyErr_Clear();
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                Py_DECREF(real);
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        free(index); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        Py_RETURN_NONE;
+    } else if (mode == 5) {
+        /* pool */
+        PyObject *data = PyDict_GetItemString(kwargs, "data");
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        PyObject *func = PyDict_GetItemString(kwargs, "func");
+        int *w_start = NULL, *w_step = NULL, *w_size = NULL;
+        int ok = (data != NULL && output != NULL
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "window_start"),
+        &w_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "window_step"),
+        &w_step, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "window_size"),
+        &w_size, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError, "pool kernel: bad arguments");
+            free(index); free(w_start); free(w_step); free(w_size);
+            return NULL;
+        }
+        if (func == Py_None) func = NULL;
+        {
+            PoolRead read;
+            read.conv = NULL;
+            read.data = data;
+            if (pool_window_value(&read, w_start, w_step, w_size, dimension,
+            func, index, output) < 0) {
+                free(index); free(w_start); free(w_step); free(w_size);
+                return NULL;
+            }
+        }
+        free(index); free(w_start); free(w_step); free(w_size);
+        Py_RETURN_NONE;
+    } else {
+        /* elementwise_position */
+        PyObject *output = PyDict_GetItemString(kwargs, "output");
+        PyObject *tensors = PyDict_GetItemString(kwargs, "tensors");
+        PyObject *callback = PyDict_GetItemString(kwargs, "callback");
+        PyObject *status = PyDict_GetItemString(kwargs, "status");
+        int *r_start = NULL, *r_step = NULL;
+        double *origin_d = NULL, *scale_d = NULL;
+        int ok = (output != NULL && tensors != NULL && callback != NULL
+        && status != NULL
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_start"),
+        &r_start, dimension) == 0
+        && _parse_int_tuple(PyDict_GetItemString(kwargs, "r_step"),
+        &r_step, dimension) == 0
+        && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "origin"),
+        &origin_d, dimension) == 0
+        && _parse_dbl_tuple(PyDict_GetItemString(kwargs, "scale"),
+        &scale_d, dimension) == 0);
+        if (!ok) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+            "elementwise_position kernel: bad arguments");
+            free(index); free(r_start); free(r_step);
+            free(origin_d); free(scale_d);
+            return NULL;
+        }
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+            + (long long)index[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong((long long)rr));
+            double logical_val = rr * scale_d[i] - origin_d[i];
+            long long li = (long long)logical_val;
+            if ((double)li == logical_val)
+            PyTuple_SET_ITEM(logical, i, PyLong_FromLongLong(li));
+            else
+            PyTuple_SET_ITEM(logical, i, PyFloat_FromDouble(logical_val));
+        }
+        Py_ssize_t nt = PyTuple_Size(tensors);
+        PyObject *elements = PyTuple_New(nt);
+        for (Py_ssize_t t = 0; t < nt; ++t) {
+            PyObject *get_args = PyTuple_Pack(
+            2, PyTuple_GET_ITEM(tensors, t), real);
+            PyObject *v = get_args ? py_get_item(NULL, get_args) : NULL;
+            Py_XDECREF(get_args);
+            if (v == NULL) {
+                PyErr_Clear();
+                Py_DECREF(elements); Py_DECREF(logical); Py_DECREF(real);
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            PyTuple_SET_ITEM(elements, t, v);
+        }
+        PyObject *value = PyObject_CallFunctionObjArgs(callback, elements,
+        logical, NULL);
+        Py_DECREF(elements);
+        Py_DECREF(logical);
+        if (value == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, value);
+            Py_DECREF(value);
+            PyObject *r = set_args ? py_set_item(NULL, set_args) : NULL;
+            Py_XDECREF(set_args);
+            if (r == NULL) {
+                PyErr_Clear();
+                PyList_SetItem(status, 0, PyLong_FromLong(1));
+                Py_DECREF(real);
+                free(index); free(r_start); free(r_step);
+                free(origin_d); free(scale_d);
+                Py_RETURN_NONE;
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        free(index); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        Py_RETURN_NONE;
+    }
+}
+static PyMethodDef _kernel_def_mapping = {
+    "_data_mapping_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_filter = {
+    "_data_filter_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_elementwise = {
+    "_elementwise_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_position = {
+    "_position_map_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_elementwise_position = {
+    "_elementwise_position_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
+static PyMethodDef _kernel_def_pool = {
+    "_pool_kernel",
+    (PyCFunction)(void(*)(void))_iterate_kernel,
+    METH_VARARGS | METH_KEYWORDS, NULL};
 static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"data", "callback", "start", "shape", "step",
-                             "origin", "basis", NULL};
+        "origin", "basis", "iterate", NULL};
     PyObject *data, *callback;
     PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
     PyObject *origin = NULL, *basis = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
-            &data, &callback, &start, &shape_obj, &step, &origin, &basis))
-        return NULL;
-
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOO", kwlist,
+    &data, &callback, &start, &shape_obj, &step, &origin, &basis,
+    &iterate))
+    return NULL;
     /* Match pure Python: None input cannot be shaped. */
     if (data == Py_None) {
         PyErr_SetString(PyExc_ValueError, "cannot infer shape of input data");
         return NULL;
     }
-
     int *data_shape = NULL, dimension = 0;
-    if (_infer_shape(data, &data_shape, &dimension) < 0) return NULL;
-
-    if (_check_region_len(start, dimension, "start") < 0
-        || _check_region_len(step, dimension, "step") < 0
-        || _check_region_len(shape_obj, dimension, "shape") < 0
-        || _check_region_len(origin, dimension, "origin") < 0
-        || _check_region_len(basis, dimension, "basis") < 0) {
+    if (infer_shape(data, &data_shape, &dimension) < 0) return NULL;
+    if (check_region_len(start, dimension, "start") < 0
+    || check_region_len(step, dimension, "step") < 0
+    || check_region_len(shape_obj, dimension, "shape") < 0
+    || check_region_len(origin, dimension, "origin") < 0
+    || check_region_len(basis, dimension, "basis") < 0) {
         free(data_shape);
         return NULL;
     }
-
     int *r_start = NULL, *r_step = NULL, *effective = NULL;
     long long total = 0;
-    if (_resolve_read_region(start, shape_obj, step, data_shape, dimension,
-                             &r_start, &r_step, &effective, &total) < 0) {
+    if (resolve_read_region(start, shape_obj, step, data_shape, dimension,
+    &r_start, &r_step, &effective, &total) < 0) {
         free(data_shape);
         return NULL;
     }
-
     int *r_origin = NULL, *r_basis = NULL;
-    if (_parse_opt_int_seq(origin, &r_origin, dimension, 0) < 0
-        || _parse_opt_int_seq(basis, &r_basis, dimension, 1) < 0) {
+    if (parse_opt_int_seq(origin, &r_origin, dimension, 0) < 0
+    || parse_opt_int_seq(basis, &r_basis, dimension, 1) < 0) {
         free(data_shape); free(r_start); free(r_step); free(effective);
         return NULL;
     }
@@ -3749,7 +4619,6 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
         if (origin == NULL || origin == Py_None) r_origin[i] = r_start[i];
         if (basis == NULL || basis == Py_None) r_basis[i] = r_step[i];
     }
-
     PyObject *result = PyList_New(0);
     if (!result) {
         free(data_shape); free(r_start); free(r_step); free(effective);
@@ -3757,7 +4626,48 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
         PyErr_NoMemory();
         return NULL;
     }
-
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_filter, 1);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+        ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+        ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+        ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+        ? _ints_to_tuple(r_origin, dimension) : NULL;
+        PyObject *basis_t = origin_t
+        ? _ints_to_tuple(r_basis, dimension) : NULL;
+        if (basis_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+            (shape_obj && shape_obj != Py_None)
+            ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "data", data);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "hits", result);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "basis", basis_t);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(basis_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(r_origin); free(r_basis); free(effective);
+        free(r_start); free(r_step); free(data_shape);
+        if (res == NULL) { Py_DECREF(result); return NULL; }
+        Py_DECREF(res);
+        return result;
+    }
     int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
     if (!local) {
         Py_DECREF(result); free(data_shape); free(r_start); free(r_step);
@@ -3765,11 +4675,10 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
         PyErr_NoMemory();
         return NULL;
     }
-
     for (long long k = 0; k < total; ++k) {
         PyObject *read = PyTuple_New(dimension);
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
+        PyTuple_SET_ITEM(read, i, PyLong_FromLongLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
         PyObject *get_args = PyTuple_Pack(2, data, read);
         Py_DECREF(read);
         PyObject *value = py_get_item(self, get_args);
@@ -3793,7 +4702,7 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
             if (truthy) {
                 PyObject *pos = PyTuple_New(dimension);
                 for (int i = 0; i < dimension; ++i)
-                    PyTuple_SET_ITEM(pos, i, PyLong_FromLong((long long)r_origin[i] + (long long)r_basis[i] * local[i]));
+                PyTuple_SET_ITEM(pos, i, PyLong_FromLongLong((long long)r_origin[i] + (long long)r_basis[i] * local[i]));
                 int app = PyList_Append(result, pos);
                 Py_DECREF(pos);
                 if (app < 0) {
@@ -3813,48 +4722,44 @@ static PyObject* py_data_filter(PyObject *self, PyObject *args, PyObject *kwargs
     free(r_start); free(r_step); free(data_shape);
     return result;
 }
-
 static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwargs) {
     static char *kwlist[] = {"data", "callback", "start", "shape", "step",
-                             "out", "out_start", "out_step", NULL};
+        "out", "out_start", "out_step", "iterate", NULL};
     PyObject *data, *callback;
     PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
     PyObject *out = NULL, *out_start = NULL, *out_step = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOO", kwlist,
-            &data, &callback, &start, &shape_obj, &step, &out, &out_start, &out_step))
-        return NULL;
-
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOOO", kwlist,
+    &data, &callback, &start, &shape_obj, &step, &out, &out_start,
+    &out_step, &iterate))
+    return NULL;
     /* Match pure Python: None input cannot be shaped. */
     if (data == Py_None) {
         PyErr_SetString(PyExc_ValueError, "cannot infer shape of input data");
         return NULL;
     }
-
     int *data_shape = NULL, dimension = 0;
-    if (_infer_shape(data, &data_shape, &dimension) < 0) return NULL;
-
-    if (_check_region_len(start, dimension, "start") < 0
-        || _check_region_len(step, dimension, "step") < 0
-        || _check_region_len(shape_obj, dimension, "shape") < 0
-        || _check_region_len(out_start, dimension, "out_start") < 0
-        || _check_region_len(out_step, dimension, "out_step") < 0) {
+    if (infer_shape(data, &data_shape, &dimension) < 0) return NULL;
+    if (check_region_len(start, dimension, "start") < 0
+    || check_region_len(step, dimension, "step") < 0
+    || check_region_len(shape_obj, dimension, "shape") < 0
+    || check_region_len(out_start, dimension, "out_start") < 0
+    || check_region_len(out_step, dimension, "out_step") < 0) {
         free(data_shape);
         return NULL;
     }
-
     int *r_start = NULL, *r_step = NULL, *effective = NULL;
     long long total = 0;
-    if (_resolve_read_region(start, shape_obj, step, data_shape, dimension,
-                             &r_start, &r_step, &effective, &total) < 0) {
+    if (resolve_read_region(start, shape_obj, step, data_shape, dimension,
+    &r_start, &r_step, &effective, &total) < 0) {
         free(data_shape);
         return NULL;
     }
-
     /* output: default-allocate shaped like the read region */
     if (out == NULL || out == Py_None) {
         PyObject *shape_tuple = PyTuple_New(dimension);
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(shape_tuple, i, PyLong_FromLong(effective[i]));
+        PyTuple_SET_ITEM(shape_tuple, i, PyLong_FromLong(effective[i]));
         PyObject *void_args = PyTuple_Pack(1, shape_tuple);
         Py_DECREF(shape_tuple);
         out = py_create_void_list(self, void_args, NULL);
@@ -3863,9 +4768,8 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
     } else {
         Py_INCREF(out);
     }
-
     int *out_shape = NULL, out_dim = 0;
-    if (_infer_shape(out, &out_shape, &out_dim) < 0) {
+    if (infer_shape(out, &out_shape, &out_dim) < 0) {
         Py_DECREF(out); free(effective); free(r_start); free(r_step); free(data_shape);
         return NULL;
     }
@@ -3874,10 +4778,9 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
         Py_DECREF(out); free(out_shape); free(effective); free(r_start); free(r_step); free(data_shape);
         return NULL;
     }
-
     int *w_start = NULL, *w_step = NULL;
-    if (_parse_opt_int_seq(out_start, &w_start, dimension, 0) < 0
-        || _parse_opt_int_seq(out_step, &w_step, dimension, 1) < 0) {
+    if (parse_opt_int_seq(out_start, &w_start, dimension, 0) < 0
+    || parse_opt_int_seq(out_step, &w_step, dimension, 1) < 0) {
         Py_DECREF(out); free(out_shape); free(effective); free(r_start); free(r_step); free(data_shape);
         return NULL;
     }
@@ -3895,7 +4798,52 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
             return NULL;
         }
     }
-
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_mapping, 0);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+        ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+        ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+        ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *w_start_t = r_step_t
+        ? _ints_to_tuple(w_start, dimension) : NULL;
+        PyObject *w_step_t = w_start_t
+        ? _ints_to_tuple(w_step, dimension) : NULL;
+        PyObject *out_shape_t = w_step_t
+        ? _ints_to_tuple(out_shape, dimension) : NULL;
+        if (out_shape_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+            (shape_obj && shape_obj != Py_None)
+            ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "data", data);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "out", out);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "out_start", w_start_t);
+            PyDict_SetItemString(call_kwargs, "out_step", w_step_t);
+            PyDict_SetItemString(call_kwargs, "out_shape", out_shape_t);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(w_start_t);
+        Py_XDECREF(w_step_t); Py_XDECREF(out_shape_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(out_shape); free(w_start); free(w_step);
+        free(effective); free(r_start); free(r_step); free(data_shape);
+        if (res == NULL) { Py_DECREF(out); return NULL; }
+        Py_DECREF(res);
+        return out;
+    }
     int *local = (int*)calloc((size_t)(dimension > 0 ? dimension : 1), sizeof(int));
     if (!local) {
         Py_DECREF(out); free(out_shape); free(w_start); free(w_step);
@@ -3903,11 +4851,10 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
         PyErr_NoMemory();
         return NULL;
     }
-
     for (long long k = 0; k < total; ++k) {
         PyObject *read = PyTuple_New(dimension);
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(read, i, PyLong_FromLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
+        PyTuple_SET_ITEM(read, i, PyLong_FromLongLong((long long)r_start[i] + (long long)local[i] * r_step[i]));
         PyObject *get_args = PyTuple_Pack(2, data, read);
         Py_DECREF(read);
         PyObject *value = py_get_item(self, get_args);
@@ -3924,13 +4871,13 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
         } else {
             int in_bounds = 1;
             for (int i = 0; i < dimension; ++i) {
-                long w = (long long)w_start[i] + (long long)local[i] * w_step[i];
+                long long w = (long long)w_start[i] + (long long)local[i] * w_step[i];
                 if (w >= out_shape[i]) { in_bounds = 0; break; }
             }
             if (in_bounds) {
                 PyObject *write = PyTuple_New(dimension);
                 for (int i = 0; i < dimension; ++i)
-                    PyTuple_SET_ITEM(write, i, PyLong_FromLong((long long)w_start[i] + (long long)local[i] * w_step[i]));
+                PyTuple_SET_ITEM(write, i, PyLong_FromLongLong((long long)w_start[i] + (long long)local[i] * w_step[i]));
                 PyObject *set_args = PyTuple_Pack(3, out, write, cb_res);
                 Py_DECREF(write);
                 PyObject *r = py_set_item(self, set_args);
@@ -3954,7 +4901,6 @@ static PyObject* py_data_mapping(PyObject *self, PyObject *args, PyObject *kwarg
     free(r_start); free(r_step); free(data_shape);
     return out;
 }
-
 /* ------------------------------------------------------------------
 Element-wise operation: elementwise(*tensors, func=f, output=o) -> 0.
 Duck typing: every tensor/output only needs the sequence protocol
@@ -3964,7 +4910,428 @@ tensor order.  Callback errors propagate (no silent skipping); the
 callback return value must be numeric.  Iterative row-major walk,
 never recursive.  Integrated with the internal get_item/set_item
 machinery for the value access.
+---- */
+/* ---- position_map / elementwise_position: position-driven element callback
+(C99).  Traversal and writes stay on the REAL region
+(start/shape/step, clipped like load_data's source side); the callback
+receives the LOGICAL coordinate redirected by origin and scaled per
+dimension (logical_i = (real_i - origin_i) / scale_i).  Callback
+errors are silently skipped; a read or write failure stops with
+status 1 (0 success).
 ------------------------------------------------------------------ */
+/* parse an optional sequence into a double array (dflt when None) */
+static int parse_opt_dbl_seq(PyObject *obj, double **arr, int dim,
+double dflt, int nonzero) {
+    if (obj == NULL || obj == Py_None) {
+        *arr = (double *)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(double));
+        if (*arr == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        for (int i = 0; i < dim; ++i) {
+            (*arr)[i] = dflt;
+        }
+        return 0;
+    }
+    {
+        Py_ssize_t n = PySequence_Size(obj);
+        if (n < 0 || n != (Py_ssize_t)dim) {
+            PyErr_SetString(PyExc_ValueError,
+            "sequence length does not match dimension");
+            return -1;
+        }
+        *arr = (double *)malloc((size_t)(dim > 0 ? dim : 1) * sizeof(double));
+        if (*arr == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        for (int i = 0; i < dim; ++i) {
+            PyObject *item = PySequence_GetItem(obj, i);
+            double v;
+            if (item == NULL) {
+                free(*arr);
+                arr = NULL;
+                return -1;
+            }
+            v = PyFloat_AsDouble(item);
+            Py_DECREF(item);
+            if (v == -1.0 && PyErr_Occurred()) {
+                free(*arr);
+                arr = NULL;
+                return -1;
+            }
+            if (nonzero && v == 0.0) {
+                PyErr_SetString(PyExc_ValueError,
+                "scale entries must be non-zero");
+                free(*arr);
+                arr = NULL;
+                return -1;
+            }
+            (*arr)[i] = v;
+        }
+    }
+    return 0;
+}
+static PyObject* py_position_map(PyObject *self, PyObject *args,
+PyObject *kwargs) {
+    static char *kwlist[] = {"output", "callback", "start", "shape", "step",
+        "origin", "scale", "iterate", NULL};
+    PyObject *output, *callback;
+    PyObject *start = NULL, *shape_obj = NULL, *step = NULL;
+    PyObject *origin = NULL, *scale = NULL;
+    PyObject *iterate = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OOOOOO", kwlist,
+    &output, &callback, &start, &shape_obj, &step, &origin, &scale,
+    &iterate))
+    return NULL;
+    if (output == Py_None) {
+        PyErr_SetString(PyExc_ValueError, "cannot infer shape of output");
+        return NULL;
+    }
+    int *data_shape = NULL, dimension = 0;
+    if (infer_shape(output, &data_shape, &dimension) < 0) return NULL;
+    if (check_region_len(start, dimension, "start") < 0
+    || check_region_len(step, dimension, "step") < 0
+    || check_region_len(shape_obj, dimension, "shape") < 0
+    || check_region_len(origin, dimension, "origin") < 0
+    || check_region_len(scale, dimension, "scale") < 0) {
+        free(data_shape);
+        return NULL;
+    }
+    int *r_start = NULL, *r_step = NULL, *effective = NULL;
+    long long total = 0;
+    if (resolve_read_region(start, shape_obj, step, data_shape, dimension,
+    &r_start, &r_step, &effective, &total) < 0) {
+        free(data_shape);
+        return NULL;
+    }
+    double *origin_d = NULL, *scale_d = NULL;
+    if (parse_opt_dbl_seq(origin, &origin_d, dimension, 0.0, 0) < 0
+    || parse_opt_dbl_seq(scale, &scale_d, dimension, 1.0, 0) < 0) {
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        return NULL;
+    }
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        long status_val = 0;
+        PyObject *res = NULL;
+        PyObject *status = PyList_New(1);
+        if (status != NULL) PyList_SET_ITEM(status, 0, PyLong_FromLong(0));
+        PyObject *kernel = status ? _make_kernel(&_kernel_def_position, 3)
+        : NULL;
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+        ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+        ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+        ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+        ? _dbls_to_tuple(origin_d, dimension) : NULL;
+        PyObject *scale_t = origin_t
+        ? _dbls_to_tuple(scale_d, dimension) : NULL;
+        if (scale_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+            (shape_obj && shape_obj != Py_None)
+            ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "scale", scale_t);
+            PyDict_SetItemString(call_kwargs, "status", status);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(scale_t);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        if (res == NULL) { Py_XDECREF(status); return NULL; }
+        Py_DECREF(res);
+        if (status != NULL) {
+            PyObject *sv = PyList_GET_ITEM(status, 0);
+            status_val = PyLong_AsLong(sv);
+            if (status_val == -1 && PyErr_Occurred()) {
+                PyErr_Clear();
+                status_val = 0;
+            }
+            Py_DECREF(status);
+        }
+        return PyLong_FromLong(status_val);
+    }
+    int *local = (int *)calloc((size_t)(dimension > 0 ? dimension : 1),
+    sizeof(int));
+    if (local == NULL) {
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (long long k = 0; k < total; ++k) {
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        if (real == NULL || logical == NULL) {
+            Py_XDECREF(real); Py_XDECREF(logical);
+            free(local); free(data_shape); free(effective); free(r_start);
+            free(r_step); free(origin_d); free(scale_d);
+            return NULL;
+        }
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+            + (long long)local[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong(
+            (long long)r_start[i] + (long long)local[i] * r_step[i]));
+            /* logical: keep an integer when exactly divisible (type
+            safety), otherwise float */
+            {
+                double logical_val = rr * scale_d[i] - origin_d[i];
+                long long li = (long long)logical_val;
+                if ((double)li == logical_val) {
+                    PyTuple_SET_ITEM(logical, i,
+                    PyLong_FromLongLong(li));
+                } else {
+                    PyTuple_SET_ITEM(logical, i,
+                    PyFloat_FromDouble(logical_val));
+                }
+            }
+        }
+        PyObject *cb_res = PyObject_CallFunctionObjArgs(
+        callback, logical, NULL);
+        Py_DECREF(logical);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, cb_res);
+            PyObject *r = set_args ? py_set_item(self, set_args) : NULL;
+            Py_XDECREF(set_args);
+            Py_DECREF(cb_res);
+            if (r == NULL) {
+                PyErr_Clear();
+                Py_DECREF(real);
+                free(local); free(data_shape); free(effective);
+                free(r_start); free(r_step); free(origin_d); free(scale_d);
+                return PyLong_FromLong(1);  /* write failure -> status 1 */
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        for (int i = dimension - 1; i >= 0; --i) {
+            local[i]++;
+            if (local[i] < effective[i]) break;
+            local[i] = 0;
+        }
+    }
+    free(local); free(data_shape); free(effective); free(r_start);
+    free(r_step); free(origin_d); free(scale_d);
+    return PyLong_FromLong(0);
+}
+static PyObject* py_elementwise_position(PyObject *self, PyObject *args,
+PyObject *kwargs) {
+    Py_ssize_t n = PyTuple_Size(args);
+    if (n < 1) {
+        PyErr_SetString(PyExc_TypeError,
+        "elementwise_position requires an output");
+        return NULL;
+    }
+    PyObject *output = PyTuple_GET_ITEM(args, 0);
+    PyObject *callback = kwargs ? PyDict_GetItemString(kwargs, "callback")
+    : NULL;
+    if (callback == NULL || !PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "callback is required");
+        return NULL;
+    }
+    PyObject *start = kwargs ? PyDict_GetItemString(kwargs, "start") : NULL;
+    PyObject *shape_obj = kwargs ? PyDict_GetItemString(kwargs, "shape") : NULL;
+    PyObject *step = kwargs ? PyDict_GetItemString(kwargs, "step") : NULL;
+    PyObject *origin = kwargs ? PyDict_GetItemString(kwargs, "origin") : NULL;
+    PyObject *scale = kwargs ? PyDict_GetItemString(kwargs, "scale") : NULL;
+    PyObject *iterate = kwargs ? PyDict_GetItemString(kwargs, "iterate")
+    : NULL;
+    if (output == Py_None) {
+        PyErr_SetString(PyExc_ValueError, "cannot infer shape of output");
+        return NULL;
+    }
+    int *data_shape = NULL, dimension = 0;
+    if (infer_shape(output, &data_shape, &dimension) < 0) return NULL;
+    if (check_region_len(start, dimension, "start") < 0
+    || check_region_len(step, dimension, "step") < 0
+    || check_region_len(shape_obj, dimension, "shape") < 0
+    || check_region_len(origin, dimension, "origin") < 0
+    || check_region_len(scale, dimension, "scale") < 0) {
+        free(data_shape);
+        return NULL;
+    }
+    int *r_start = NULL, *r_step = NULL, *effective = NULL;
+    long long total = 0;
+    if (resolve_read_region(start, shape_obj, step, data_shape, dimension,
+    &r_start, &r_step, &effective, &total) < 0) {
+        free(data_shape);
+        return NULL;
+    }
+    double *origin_d = NULL, *scale_d = NULL;
+    if (parse_opt_dbl_seq(origin, &origin_d, dimension, 0.0, 0) < 0
+    || parse_opt_dbl_seq(scale, &scale_d, dimension, 1.0, 0) < 0) {
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        return NULL;
+    }
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        long status_val = 0;
+        PyObject *res = NULL;
+        PyObject *status = PyList_New(1);
+        if (status != NULL) PyList_SET_ITEM(status, 0, PyLong_FromLong(0));
+        PyObject *tensors = PyTuple_GetSlice(args, 1, n);
+        PyObject *kernel = (status && tensors)
+        ? _make_kernel(&_kernel_def_elementwise_position, 4) : NULL;
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *data_shape_t = call_kwargs
+        ? _ints_to_tuple(data_shape, dimension) : NULL;
+        PyObject *r_start_t = data_shape_t
+        ? _ints_to_tuple(r_start, dimension) : NULL;
+        PyObject *r_step_t = r_start_t
+        ? _ints_to_tuple(r_step, dimension) : NULL;
+        PyObject *origin_t = r_step_t
+        ? _dbls_to_tuple(origin_d, dimension) : NULL;
+        PyObject *scale_t = origin_t
+        ? _dbls_to_tuple(scale_d, dimension) : NULL;
+        if (scale_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", data_shape_t);
+            PyDict_SetItemString(call_kwargs, "start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "shape",
+            (shape_obj && shape_obj != Py_None)
+            ? shape_obj : Py_None);
+            PyDict_SetItemString(call_kwargs, "step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            PyDict_SetItemString(call_kwargs, "tensors", tensors);
+            PyDict_SetItemString(call_kwargs, "callback", callback);
+            PyDict_SetItemString(call_kwargs, "r_start", r_start_t);
+            PyDict_SetItemString(call_kwargs, "r_step", r_step_t);
+            PyDict_SetItemString(call_kwargs, "origin", origin_t);
+            PyDict_SetItemString(call_kwargs, "scale", scale_t);
+            PyDict_SetItemString(call_kwargs, "status", status);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(data_shape_t); Py_XDECREF(r_start_t);
+        Py_XDECREF(r_step_t); Py_XDECREF(origin_t); Py_XDECREF(scale_t);
+        Py_XDECREF(tensors);
+        Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        if (res == NULL) { Py_XDECREF(status); return NULL; }
+        Py_DECREF(res);
+        if (status != NULL) {
+            PyObject *sv = PyList_GET_ITEM(status, 0);
+            status_val = PyLong_AsLong(sv);
+            if (status_val == -1 && PyErr_Occurred()) {
+                PyErr_Clear();
+                status_val = 0;
+            }
+            Py_DECREF(status);
+        }
+        return PyLong_FromLong(status_val);
+    }
+    int *local = (int *)calloc((size_t)(dimension > 0 ? dimension : 1),
+    sizeof(int));
+    if (local == NULL) {
+        free(data_shape); free(effective); free(r_start); free(r_step);
+        free(origin_d); free(scale_d);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (long long k = 0; k < total; ++k) {
+        PyObject *real = PyTuple_New(dimension);
+        PyObject *logical = PyTuple_New(dimension);
+        PyObject *elements = PyList_New(0);
+        if (real == NULL || logical == NULL || elements == NULL) {
+            Py_XDECREF(real); Py_XDECREF(logical); Py_XDECREF(elements);
+            free(local); free(data_shape); free(effective); free(r_start);
+            free(r_step); free(origin_d); free(scale_d);
+            return NULL;
+        }
+        for (int i = 0; i < dimension; ++i) {
+            double rr = (double)((long long)r_start[i]
+            + (long long)local[i] * r_step[i]);
+            PyTuple_SET_ITEM(real, i, PyLong_FromLongLong(
+            (long long)r_start[i] + (long long)local[i] * r_step[i]));
+            /* logical: keep an integer when exactly divisible (type
+            safety), otherwise float */
+            {
+                double logical_val = rr * scale_d[i] - origin_d[i];
+                long long li = (long long)logical_val;
+                if ((double)li == logical_val) {
+                    PyTuple_SET_ITEM(logical, i,
+                    PyLong_FromLongLong(li));
+                } else {
+                    PyTuple_SET_ITEM(logical, i,
+                    PyFloat_FromDouble(logical_val));
+                }
+            }
+        }
+        for (Py_ssize_t t = 1; t < n; ++t) {
+            PyObject *get_args = PyTuple_Pack(2, PyTuple_GET_ITEM(args, t),
+            real);
+            PyObject *item = get_args ? py_get_item(self, get_args) : NULL;
+            Py_XDECREF(get_args);
+            if (item == NULL) {
+                PyErr_Clear();
+                Py_DECREF(real); Py_DECREF(logical); Py_DECREF(elements);
+                free(local); free(data_shape); free(effective);
+                free(r_start); free(r_step); free(origin_d); free(scale_d);
+                return PyLong_FromLong(1);  /* read failure -> status 1 */
+            }
+            if (PyList_Append(elements, item) < 0) {
+                Py_DECREF(item); Py_DECREF(real); Py_DECREF(logical);
+                Py_DECREF(elements);
+                free(local); free(data_shape); free(effective);
+                free(r_start); free(r_step); free(origin_d); free(scale_d);
+                return NULL;
+            }
+            Py_DECREF(item);
+        }
+        PyObject *cb_args = PyTuple_Pack(2, elements, logical);
+        PyObject *cb_res = cb_args ? PyObject_CallObject(callback, cb_args)
+        : NULL;
+        Py_XDECREF(cb_args);
+        Py_DECREF(elements);
+        Py_DECREF(logical);
+        if (cb_res == NULL) {
+            PyErr_Clear();  /* callback errors silently skipped */
+        } else {
+            PyObject *set_args = PyTuple_Pack(3, output, real, cb_res);
+            PyObject *r = set_args ? py_set_item(self, set_args) : NULL;
+            Py_XDECREF(set_args);
+            Py_DECREF(cb_res);
+            if (r == NULL) {
+                PyErr_Clear();
+                Py_DECREF(real);
+                free(local); free(data_shape); free(effective);
+                free(r_start); free(r_step); free(origin_d); free(scale_d);
+                return PyLong_FromLong(1);
+            }
+            Py_DECREF(r);
+        }
+        Py_DECREF(real);
+        for (int i = dimension - 1; i >= 0; --i) {
+            local[i]++;
+            if (local[i] < effective[i]) break;
+            local[i] = 0;
+        }
+    }
+    free(local); free(data_shape); free(effective); free(r_start);
+    free(r_step); free(origin_d); free(scale_d);
+    return PyLong_FromLong(0);
+}
 static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs) {
     Py_ssize_t n = PyTuple_Size(args);
     if (n < 1) {
@@ -3981,23 +5348,24 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
         PyErr_SetString(PyExc_ValueError, "output is required");
         return NULL;
     }
-
+    PyObject *iterate = kwargs ? PyDict_GetItemString(kwargs, "iterate")
+    : NULL;
     int *shape = NULL;
     int dimension = 0;
-    if (_infer_shape(PyTuple_GET_ITEM(args, 0), &shape, &dimension) < 0)
-        return NULL;
+    if (infer_shape(PyTuple_GET_ITEM(args, 0), &shape, &dimension) < 0)
+    return NULL;
     for (Py_ssize_t i = 1; i < n; ++i) {
         int *other = NULL;
         int other_dim = 0;
-        if (_infer_shape(PyTuple_GET_ITEM(args, i), &other, &other_dim) < 0) {
+        if (infer_shape(PyTuple_GET_ITEM(args, i), &other, &other_dim) < 0) {
             free(shape);
             return NULL;
         }
         if (other_dim != dimension ||
-            memcmp(shape, other, (size_t)dimension * sizeof(int)) != 0) {
+        memcmp(shape, other, (size_t)dimension * sizeof(int)) != 0) {
             free(shape); free(other);
             PyErr_SetString(PyExc_ValueError,
-                            "the shape of two tensors are not same.");
+            "the shape of two tensors are not same.");
             return NULL;
         }
         free(other);
@@ -4005,34 +5373,52 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
     {
         int *out_shape = NULL;
         int out_dim = 0;
-        if (_infer_shape(output, &out_shape, &out_dim) < 0) {
+        if (infer_shape(output, &out_shape, &out_dim) < 0) {
             free(shape);
             return NULL;
         }
         if (out_dim != dimension ||
-            memcmp(shape, out_shape, (size_t)dimension * sizeof(int)) != 0) {
+        memcmp(shape, out_shape, (size_t)dimension * sizeof(int)) != 0) {
             free(shape); free(out_shape);
             PyErr_SetString(PyExc_ValueError,
-                            "output shape does not match input");
+            "output shape does not match input");
             return NULL;
         }
         free(out_shape);
     }
-
+    if (iterate != NULL && iterate != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *res = NULL;
+        PyObject *kernel = _make_kernel(&_kernel_def_elementwise, 2);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *shape_t = call_kwargs
+        ? _ints_to_tuple(shape, dimension) : NULL;
+        if (shape_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", shape_t);
+            PyDict_SetItemString(call_kwargs, "tensors", args);
+            PyDict_SetItemString(call_kwargs, "func", func);
+            PyDict_SetItemString(call_kwargs, "output", output);
+            res = PyObject_Call(iterate, call_args, call_kwargs);
+        }
+        Py_XDECREF(shape_t); Py_XDECREF(call_kwargs); Py_XDECREF(call_args);
+        free(shape);
+        if (res == NULL) return NULL;
+        Py_DECREF(res);
+        return PyLong_FromLong(0);
+    }
     long long total_ll = 1;
     for (int i = 0; i < dimension; ++i)
-        total_ll *= (long long)shape[i];
-
+    total_ll *= (long long)shape[i];
     int *idx = (int*)calloc((size_t)(dimension > 0 ? dimension : 1),
-                            sizeof(int));
+    sizeof(int));
     if (!idx) { free(shape); PyErr_NoMemory(); return NULL; }
-
     for (long long k = 0; k < total_ll; ++k) {
         PyObject *index = PyTuple_New(dimension);
         if (!index) { free(idx); free(shape); return NULL; }
         for (int i = 0; i < dimension; ++i)
-            PyTuple_SET_ITEM(index, i, PyLong_FromLong(idx[i]));
-
+        PyTuple_SET_ITEM(index, i, PyLong_FromLong(idx[i]));
         PyObject *vals = PyTuple_New(n);
         if (!vals) { Py_DECREF(index); free(idx); free(shape); return NULL; }
         for (Py_ssize_t i = 0; i < n; ++i) {
@@ -4044,7 +5430,6 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
             PyTuple_SET_ITEM(vals, i, value);
         }
         Py_DECREF(index);
-
         /* func receives the values as positional arguments in tensor order */
         PyObject *call_args = PyTuple_New(n);
         if (!call_args) { Py_DECREF(vals); free(idx); free(shape); return NULL; }
@@ -4064,24 +5449,22 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
         Py_DECREF(cb_res);
         if (num == -1.0 && PyErr_Occurred()) {
             PyErr_SetString(PyExc_TypeError,
-                            "elementwise func must return a number");
+            "elementwise func must return a number");
             free(idx); free(shape);
             return NULL;
         }
-
         {
             PyObject *write = PyTuple_New(dimension);
             for (int i = 0; i < dimension; ++i)
-                PyTuple_SET_ITEM(write, i, PyLong_FromLong(idx[i]));
+            PyTuple_SET_ITEM(write, i, PyLong_FromLong(idx[i]));
             PyObject *set_args = PyTuple_Pack(3, output, write,
-                                              PyFloat_FromDouble(num));
+            PyFloat_FromDouble(num));
             Py_DECREF(write);
             PyObject *r = py_set_item(self, set_args);
             Py_DECREF(set_args);
             if (!r) { free(idx); free(shape); return NULL; }
             Py_DECREF(r);
         }
-
         for (int d = dimension - 1; d >= 0; --d) {
             idx[d]++;
             if (idx[d] < shape[d]) break;
@@ -4092,10 +5475,192 @@ static PyObject* py_elementwise(PyObject *self, PyObject *args, PyObject *kwargs
     free(shape);
     return PyLong_FromLong(0);
 }
-
+static PyObject* py_pool(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    static char *kwlist[] = {"data", "window_size", "func", "step",
+        "start", "end", "output", "iterate", NULL};
+    PyObject *data = NULL, *window_size_obj = NULL, *func_obj = NULL;
+    PyObject *step_obj = NULL, *start_obj = NULL, *end_obj = NULL;
+    PyObject *output_obj = NULL, *iterate_obj = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOOOO", kwlist,
+    &data, &window_size_obj, &func_obj, &step_obj, &start_obj,
+    &end_obj, &output_obj, &iterate_obj))
+    return NULL;
+    if (data == Py_None) {
+        PyErr_SetString(PyExc_ValueError, "cannot infer shape of input data");
+        return NULL;
+    }
+    int *data_shape = NULL;
+    int dimension = 0;
+    if (infer_shape(data, &data_shape, &dimension) < 0) return NULL;
+    int *window_size = NULL, *start = NULL, *end = NULL, *step = NULL;
+    int *num = NULL;
+    PyObject *result = NULL;
+    if (parse_pool_axis(window_size_obj, &window_size, dimension, 1,
+    "window_size") < 0
+    || parse_pool_axis(start_obj, &start, dimension, 0, "start") < 0
+    || parse_pool_axis(end_obj, &end, dimension, 0, "end") < 0
+    || parse_pool_axis(step_obj, &step, dimension, 1, "step") < 0)
+    goto fail;
+    if (end_obj == NULL || end_obj == Py_None) {
+        for (int i = 0; i < dimension; ++i) end[i] = data_shape[i];
+    }
+    for (int i = 0; i < dimension; ++i) {
+        if (start[i] < 0) {
+            PyErr_SetString(PyExc_ValueError,
+            "start entries must be non-negative");
+            goto fail;
+        }
+        if (step[i] <= 0) {
+            PyErr_SetString(PyExc_ValueError,
+            "step must be positive for all dimensions");
+            goto fail;
+        }
+        if (window_size[i] <= 0) {
+            PyErr_SetString(PyExc_ValueError,
+            "window_size must be positive for all dimensions");
+            goto fail;
+        }
+        if (end[i] > data_shape[i]) {
+            PyErr_SetString(PyExc_ValueError,
+            "end exceeds the data shape");
+            goto fail;
+        }
+    }
+    num = (int*)malloc((size_t)(dimension > 0 ? dimension : 1) * sizeof(int));
+    if (!num) { PyErr_NoMemory(); goto fail; }
+    for (int i = 0; i < dimension; ++i) {
+        long long span = (long long)end[i] - start[i] - window_size[i];
+        if (span < 0) {
+            PyErr_SetString(PyExc_ValueError, "effectless args.");
+            goto fail;
+        }
+        long long count = span / step[i] + 1;
+        if (count > INT_MAX) {
+            PyErr_SetString(PyExc_OverflowError,
+            "window count does not fit an int");
+            goto fail;
+        }
+        num[i] = (int)count;
+    }
+    if (output_obj == NULL) {
+        PyErr_SetString(PyExc_ValueError, "output is required");
+        goto fail;
+    }
+    {
+        int *out_shape = NULL;
+        int out_dim = 0;
+        if (infer_shape(output_obj, &out_shape, &out_dim) < 0) goto fail;
+        int same = (out_dim == dimension);
+        for (int i = 0; same && i < dimension; ++i) {
+            if (out_shape[i] != num[i]) same = 0;
+        }
+        free(out_shape);
+        if (!same) {
+            PyErr_SetString(PyExc_ValueError,
+            "output shape does not match the window count");
+            goto fail;
+        }
+    }
+    if (func_obj != NULL && func_obj != Py_None
+    && !PyCallable_Check(func_obj)) {
+        PyErr_SetString(PyExc_TypeError, "func must be callable");
+        goto fail;
+    }
+    PyObject *func = (func_obj == Py_None) ? NULL : func_obj;
+    if (iterate_obj != NULL && iterate_obj != Py_None) {
+        /* optional custom iterator: hand it the C kernel + index info */
+        PyObject *kernel = _make_kernel(&_kernel_def_pool, 5);
+        PyObject *call_args = kernel ? PyTuple_Pack(1, kernel) : NULL;
+        Py_XDECREF(kernel);
+        PyObject *call_kwargs = call_args ? PyDict_New() : NULL;
+        PyObject *shape_t = call_kwargs
+        ? _ints_to_tuple(num, dimension) : NULL;
+        PyObject *ws_t = shape_t
+        ? _ints_to_tuple(window_size, dimension) : NULL;
+        PyObject *wst_t = ws_t
+        ? _ints_to_tuple(start, dimension) : NULL;
+        PyObject *wsp_t = wst_t
+        ? _ints_to_tuple(step, dimension) : NULL;
+        if (wsp_t != NULL) {
+            PyDict_SetItemString(call_kwargs, "data_shape", shape_t);
+            PyDict_SetItemString(call_kwargs, "data", data);
+            PyDict_SetItemString(call_kwargs, "output", output_obj);
+            PyDict_SetItemString(call_kwargs, "window_start", wst_t);
+            PyDict_SetItemString(call_kwargs, "window_step", wsp_t);
+            PyDict_SetItemString(call_kwargs, "window_size", ws_t);
+            PyDict_SetItemString(call_kwargs, "func",
+            func ? func : Py_None);
+            PyObject *res = PyObject_Call(iterate_obj, call_args, call_kwargs);
+            Py_XDECREF(shape_t); Py_XDECREF(ws_t); Py_XDECREF(wst_t);
+            Py_XDECREF(wsp_t); Py_XDECREF(call_kwargs);
+            Py_XDECREF(call_args);
+            if (!res) goto fail;
+            Py_DECREF(res);
+        } else {
+            Py_XDECREF(shape_t); Py_XDECREF(ws_t); Py_XDECREF(wst_t);
+            Py_XDECREF(wsp_t); Py_XDECREF(call_kwargs);
+            Py_XDECREF(call_args);
+            goto fail;
+        }
+        result = PyLong_FromLong(0);
+        goto done;
+    }
+    {
+        Data *conv = pyobj_to_data(data);
+        if (!conv) goto fail;
+        PoolRead read;
+        read.conv = conv;
+        read.data = NULL;
+        int *index = (int*)calloc(
+        (size_t)(dimension > 0 ? dimension : 1), sizeof(int));
+        if (!index) {
+            Data_free(conv);
+            PyErr_NoMemory();
+            goto fail;
+        }
+        long long total = 1;
+        for (int i = 0; i < dimension; ++i) {
+            if (total > LLONG_MAX / num[i]) {
+                free(index);
+                Data_free(conv);
+                PyErr_SetString(PyExc_OverflowError,
+                "window count is too large");
+                goto fail;
+            }
+            total *= (long long)num[i];
+        }
+        for (long long k = 0; k < total; ++k) {
+            if (pool_window_value(&read, start, step, window_size, dimension,
+            func, index, output_obj) < 0) {
+                free(index);
+                Data_free(conv);
+                goto fail;
+            }
+            int d = dimension - 1;
+            while (d >= 0) {
+                index[d]++;
+                if (index[d] < num[d]) break;
+                index[d] = 0;
+                d--;
+            }
+        }
+        free(index);
+        Data_free(conv);
+    }
+    result = PyLong_FromLong(0);
+done:
+    free(data_shape); free(window_size); free(start); free(end);
+    free(step); free(num);
+    return result;
+fail:
+    free(data_shape); free(window_size); free(start); free(end);
+    free(step); free(num);
+    return NULL;
+}
 /* ------------------------------------------------------------------
 Method table
------------------------------------------------------------------- */
+---- */
 static PyMethodDef methods[] = {
     {"multiple_chain", (PyCFunction)py_multiple_chain, METH_VARARGS | METH_KEYWORDS,
         "Multiply all elements in an iterable."},
@@ -4117,8 +5682,19 @@ static PyMethodDef methods[] = {
         "Yield positions whose callback(value) is truthy over a sampled region."},
     {"data_mapping", (PyCFunction)py_data_mapping, METH_VARARGS | METH_KEYWORDS,
         "Map every sampled element through callback(value) into the output."},
+    {"position_map", (PyCFunction)py_position_map,
+     METH_VARARGS | METH_KEYWORDS,
+     "position_map(output, callback, start/shape/step, origin/scale): "
+     "position-driven element callback -> 0."},
+    {"elementwise_position", (PyCFunction)py_elementwise_position,
+     METH_VARARGS | METH_KEYWORDS,
+     "elementwise_position(output, *tensors, callback=..., origin/scale): "
+     "multi-tensor element callback by position -> 0."},
     {"elementwise", (PyCFunction)py_elementwise, METH_VARARGS | METH_KEYWORDS,
         "Element-wise operation: elementwise(*tensors, func=f, output=o) -> 0."},
+    {"pool", (PyCFunction)py_pool, METH_VARARGS | METH_KEYWORDS,
+        "Sliding-window pooling: reduce every valid window (step stride; "
+        "overlap / exact tiling / gaps) -> 0."},
     {"_cos", py_cos, METH_VARARGS, "inner cos algorithm."},
     {"_mod", py_mod, METH_VARARGS, "inner mod algorithm."},
     {"_cosmod", py_cosmod, METH_VARARGS, "inner cosmod algorithm."},
@@ -4180,9 +5756,7 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-/* ------------------------------------------------------------------
-Module definition (multi-phase: safe re-init, free-threaded ready)
------------------------------------------------------------------- */
+/* ---- Module definition (multi-phase: safe re-init, free-threaded ready) ---- */
 static int module_exec(PyObject *module) {
     if (Add_Object(module)) {
         return -1;
@@ -4232,9 +5806,9 @@ static int module_exec(PyObject *module) {
         return -1;
     }
 
-    // Add __all__ (public API list, matches pure Python backend)
-    PyObject *__all__ = PyList_New(0);
-    if (!__all__) {
+    // Add all_names (public API list, matches pure Python backend)
+    PyObject *all_names = PyList_New(0);
+    if (!all_names) {
         return -1;
     }
     {
@@ -4246,7 +5820,7 @@ static int module_exec(PyObject *module) {
             "mean_local", "mean_local_1d", "mean_local_2d", "mean_local_3d", "mean_local_4d",
             "local_variance", "local_variance_1d", "local_variance_2d", "local_variance_3d", "local_variance_4d",
             "multiple_chain", "add_chain", "no_done", "create_void_list", "load_as_default_data", "load_data", "infer_shape", "get_item", "set_item", "_cos", "_mod", "_cosmod", "_convolution",
-            "data_filter", "data_mapping", "elementwise", "threshold_filter", "threshold_map", "threshold_judge",
+            "data_filter", "data_mapping", "elementwise", "position_map", "elementwise_position", "pool", "threshold_filter", "threshold_map", "threshold_judge",
             "vector_chain_compute",
             "vector_map_as_tensor", "func_name_space", "default_contain",
             "private_dict"
@@ -4254,16 +5828,16 @@ static int module_exec(PyObject *module) {
         size_t i;
         for (i = 0; i < sizeof(_all_names) / sizeof(_all_names[0]); ++i) {
             PyObject *name = PyUnicode_FromString(_all_names[i]);
-            if (name == NULL || PyList_Append(__all__, name) < 0) {
+            if (name == NULL || PyList_Append(all_names, name) < 0) {
                 Py_XDECREF(name);
-                Py_DECREF(__all__);
+                Py_DECREF(all_names);
                 return -1;
             }
             Py_DECREF(name);
         }
     }
-    if (PyModule_AddObject(module, "__all__", __all__) < 0) {
-        Py_DECREF(__all__);
+    if (PyModule_AddObject(module, "all_names", all_names) < 0) {
+        Py_DECREF(all_names);
         return -1;
     }
 
@@ -4294,7 +5868,7 @@ static int module_exec(PyObject *module) {
 
 static PyModuleDef_Slot module_slots[] = {
     {Py_mod_exec, (void*)module_exec},
-#if PY_VERSION_HEX >= 0x030D0000
+#if defined(Py_mod_gil) && defined(Py_MOD_GIL_NOT_USED)
     {Py_mod_gil, Py_MOD_GIL_NOT_USED},
 #endif
     {0, NULL}
@@ -4312,9 +5886,12 @@ static struct PyModuleDef moduledef = {
     NULL
 };
 
-/* ------------------------------------------------------------------
-Module init
------------------------------------------------------------------- */
+/* ---- Module init ---- */
+PyMODINIT_FUNC PyInit_cos_comparison_pydll(void);
 PyMODINIT_FUNC PyInit_cos_comparison_pydll(void) {
     return PyModuleDef_Init(&moduledef);
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

@@ -1,6 +1,5 @@
 #database tools
 
-from ...core import no_done
 from ...interface.api import DATABASE_DRIVER, DatabaseToolWrap
 from .basememory import *
 
@@ -15,13 +14,14 @@ def _conn_method(name):
     return func
 
 class DatabaseMemory(Memory):
-    """Wrap the database storage procedure around one connector.
+    """Database-backed memory: wraps the storage procedure around one
+    connector.
 
     * ``connect`` establishes the connector; the other methods transcribe
       the corresponding Connection methods (cursor / commit / rollback /
       close / execute / executemany).
     * Every transcription is a delegation function injected at ``__init__``
-      (connect_func / cursor_func / ...), receiving the connector as its
+      (connect_func / cursor_func / ...) receiving the connector as its
       FIRST argument, so Connection type methods can be passed directly
       (e.g. cursor_func=sqlite3.Connection.cursor).
     * ``connect_func`` defaults to DatabaseToolWrap.connect; ``execute`` /
@@ -51,7 +51,7 @@ class DatabaseMemory(Memory):
         self.connect_func = connect_func if connect_func is not None else self.wrap.connect
         self.connector = None
         self.last_cursor = None
-        super().__init__(None, refer_func=refer_func if refer_func else no_done)
+        super().__init__(None, refer_func=refer_func)
         # base Memory.__init__ resets the same-named delegation slots to
         # no_done; re-establish the connection-method transcriptions here
         self.cursor_func = cursor_func if cursor_func is not None else _conn_method("cursor")
@@ -136,3 +136,11 @@ class DatabaseMemory(Memory):
         if self.last_cursor is None:
             return None
         return getattr(self.last_cursor, "lastrowid", None)
+
+
+"""
+Explicit public exports (prevents import-star namespace pollution).
+"""
+__all__ = (
+    "DatabaseMemory",
+)

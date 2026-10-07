@@ -24,7 +24,7 @@ class Trigger:
             s = self.stack
             self.stack[self.b_res_index] = self.callback(*(s[i] for i in self.args_index),**{a:s[b] for a,b in self.kwargs_index})
             return 0
-        except:
+        except Exception:
             return 1
     def target(self,*args,**kwargs):
         try:
@@ -32,7 +32,7 @@ class Trigger:
             if self.exec():
                 return 1
             return 0
-        except:
+        except Exception:
             return 2
     def stack_operate(self,caller,*args,**kwargs):
         return caller(self,self.stack,*args,**kwargs)

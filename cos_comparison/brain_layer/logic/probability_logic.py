@@ -1,7 +1,17 @@
 """
 Probabilistic logic system for uncertain reasoning.
 Implements event classes, probability operations and Bayesian inference primitives.
+
+Event domain: any hashable object; strings stay whole atoms, container events
+(frozenset/tuple - UnionEvent/IntersectionEvent) expand members in chain
+conditions.  Values: any numeric type comparable with 0/1.  Binds are duck
+containers (items()/iteration, get/scan lookup); graph factories duck
+(add_edge/neighbors).  Engines are single-threaded.
 """
+
+# ---- imports ----
+from ...core import no_done
+from ...interface.tools.math_tool.topology import DirectedGraph, shortest_path_between
 
 # Relative probability axioms (no absolute probability; all values are
 # conditional P(X|C), global_event is the relative benchmark):
@@ -15,57 +25,74 @@ Implements event classes, probability operations and Bayesian inference primitiv
 # Absolute forms degenerate from C = global_event (A3/A4 -> classic rules).
 #
 # Modes:
-#   non-strict (default): exact hits, then A4 Bayes (direct refs), then the
-#       A3 Markov chain product on the shortest dependency path.
-#   strict (rigorous): only A2 reflexivity, exact bindings, A4 Bayes, and
-#       the exact chain rule (every step an explicit intersection-condition
-#       binding); anything underivable returns 0.0 (impossible semantics).
+#   non-strict (default): exact hits, then A4 Bayes (direct refs), then
+#       the A3 Markov chain product on the shortest dependency path.
+#   strict (rigorous): only A2 reflexivity, exact bindings, A4 Bayes and
+#       the exact chain rule (every step an explicit intersection-
+#       condition binding); anything underivable returns 0.0 (impossible
+#       semantics).
 
-#----------- event class -----------
+# ---------- event classes ----------
 class UnionEvent(frozenset): #A+B+...
     __slots__ = ("name",)
+    kind = "Union"  # same-kind events compare by members
+
     def __init__(self,*event):
         self.name = "UnionEvent"
     def __new__(cls,*event):
         return super().__new__(cls,event)
     def __eq__(self,other):
-        # kind-sensitive equality: a union must never equal an
-        # intersection (or plain frozenset) even with equal members.
-        if type(self) is not type(other):
+        # kind-sensitive: unions never equal intersections/plain frozensets;
+        # explicit False (not NotImplemented) keeps reflection symmetric.
+        if not isinstance(other, frozenset) or getattr(other, "kind", None) != self.kind:
             return False
         return frozenset.__eq__(self,other)
     def __ne__(self,other):
         return not self == other
     def __hash__(self):
-        return hash(("Union",super().__hash__()))
+        return hash((self.kind, frozenset.__hash__(self)))
+    def __reduce__(self):
+        # rebuild through *members (frozenset.__reduce__ feeds an unhashable list)
+        return (type(self), tuple(self))
 
 class IntersectionEvent(frozenset): #AB...
     __slots__ = ("name",)
+    kind = "Intersection"  # same-kind events compare by members
+
     def __init__(self,*event):
         self.name = "IntersectionEvent"
     def __new__(cls,*event):
         return super().__new__(cls,event)
     def __eq__(self,other):
-        # kind-sensitive equality (same event kind only).
-        if type(self) is not type(other):
+        # kind-sensitive: intersections never equal unions/plain frozensets.
+        if not isinstance(other, frozenset) or getattr(other, "kind", None) != self.kind:
             return False
         return frozenset.__eq__(self,other)
     def __ne__(self,other):
         return not self == other
     def __hash__(self):
-        return hash(("Intersection",super().__hash__()))
+        return hash((self.kind, frozenset.__hash__(self)))
+    def __reduce__(self):
+        return (type(self), tuple(self))
 
 class GlobalEvent: 
-    # No absolute global event exists; the class provides a relative
-    # benchmark for a context.
+    # Relative benchmark (no absolute event exists); all instances denote the
+    # same benchmark, so a fresh GlobalEvent() matches stored global_event keys.
+    def __eq__(self,other):
+        if isinstance(other, GlobalEvent):
+            return True
+        return NotImplemented
+    def __hash__(self):
+        return hash("GlobalEvent")
     def __repr__(self):
-        return f"<GlobalEvent : id={id(self)} , hash={hash(self)}>"
+        return f"<GlobalEvent : id={id(self)}>"
 
 global_event = GlobalEvent()
-# module-wide singleton relative benchmark.
 
-#------------ event_bind ---------------
+# ---------- event_bind ----------
 class event_bind:
+    """Single-outcome probability container: P(self.event | c), with
+    Mapping-style reads and an engine items() view keyed ((outcome, condition), p)."""
     __slots__=("name","event","binds","id")
     def __init__(self,name="",event=None):
         self.name=name if name else  str(event)
@@ -73,8 +100,25 @@ class event_bind:
         self.binds = {} # conditional probabilities, e.g. P(A | B)
         self.id=id(self)
     def __iter__(self):
+        # legacy triple iteration: (outcome, condition, p)
         for bind in self.binds:
             yield (self.event,bind,self.binds[bind])
+    def __len__(self):
+        return len(self.binds)
+    def __contains__(self,condition):
+        return condition in self.binds
+    def __getitem__(self,condition):
+        return self.binds[condition]
+    def get(self,condition,default=None):
+        return self.binds.get(condition,default)
+    def keys(self):
+        return self.binds.keys()
+    def values(self):
+        return self.binds.values()
+    def items(self):
+        # engine view: ((outcome, condition), p)
+        for condition,prob in self.binds.items():
+            yield ((self.event,condition),prob)
     def get_bind(self,event):
         return self.binds[event]
     def bind_exist(self,event):
@@ -92,25 +136,21 @@ class event_bind:
         try:
             del self.binds[event]
             return 0
-        except:
+        except KeyError:
             return 1
 
-#--------- context ----------
-from ...core import no_done
-from ...interface.tools.math_tool.topology import DirectedGraph, shortest_path_between
-
+# ---------- context ----------
 class event_context:
-    # Delegated-slot context (init_func / add_func / probability_func),
-    # mirroring Logic_context; injecting a function replaces a slot entirely.
-    # Default binds use the EventBinds protocol container (cached-graph /
-    # statistics engine); explicit binds keep the stateless default slots.
+    # Delegated slots (init_func / add_func / probability_func) mirroring
+    # Logic_context; binds=None creates the EventBinds engine (cached graph,
+    # stats) - any provided container keeps the stateless defaults.
     __slots__ = ("name","binds","extension","init_func","add_func","probability_func")
     def __init__(self,name="",binds=None,init_func=None,add_func=None,probability_func=None):
         self.name = name
         self.extension = None # extension slot usable by callbacks.
         if binds is None:
-            # Default: EventBinds container (engine state) + its class-method
-            # slots (no separate instance construction).
+            # Default: EventBinds container (engine state) whose class
+            # methods fill the slots (no separate engine instance).
             binds = EventBinds()
             init_func = init_func if init_func is not None else default_context_init
             add_func = add_func if add_func is not None else EventBinds.add_bind
@@ -121,7 +161,11 @@ class event_context:
         self.probability_func = probability_func if probability_func is not None else default_probability_func
     def __iter__(self):
         for bind in self.binds:
-            yield (*bind,self.binds[bind])
+            if isinstance(bind, tuple) and len(bind) == 2:
+                yield (bind[0], bind[1], self.binds[bind])
+            else:
+                # non-pair keys stay whole (no string/character expansion)
+                yield (bind, self.binds[bind])
     def initialize(self,*args,**kwargs):
         return self.init_func(self.binds,*args,**kwargs)
     def add_bind(self,binds):
@@ -133,15 +177,25 @@ class event_context:
         return self.probability_func(self,A,B)
 
 
+# ---------- resolution helpers ----------
 def _as_binds(context):
     """Duck protocol: a context exposing `.binds`, or a bare binds container."""
     return getattr(context, "binds", context)
 
 
 def default_add_bind(binds, items):
-    """add_func slot default: store (outcome, condition, p) triples."""
-    for bind in items:
-        binds[(bind[0], bind[1])] = bind[2]
+    """add_func slot default: store (outcome, condition, p) triples (append
+    when the container supports it, else item assignment)."""
+    append = getattr(binds, "append", None)
+    if callable(append):
+        for bind in items:
+            append((bind[0], bind[1], bind[2]))
+        return
+    if callable(getattr(binds, "__setitem__", None)):
+        for bind in items:
+            binds[(bind[0], bind[1])] = bind[2]
+        return
+    raise TypeError("binds container supports neither append nor item assignment")
 
 
 def default_context_init(binds, *args, **kwargs):
@@ -152,10 +206,45 @@ def default_context_init(binds, *args, **kwargs):
     return 0
 
 
+def _bind_items(binds):
+    """Duck bind iteration -> (outcome, condition, p): items() first, then
+    plain (key, p) pairs or (outcome, condition, p) triples."""
+    items = getattr(binds, "items", None)
+    if callable(items):
+        for key, prob in items():
+            yield key[0], key[1], prob
+        return
+    for item in binds:
+        if len(item) == 3:
+            yield item[0], item[1], item[2]
+        else:
+            key, prob = item
+            yield key[0], key[1], prob
+
+
+def _bind_lookup(binds, outcome, condition):
+    """(outcome, condition) -> p: O(1) for dicts, scan for other duck
+    containers; None when absent."""
+    if isinstance(binds, dict):
+        return binds.get((outcome, condition))
+    for o, c, p in _bind_items(binds):
+        if o == outcome and c == condition:
+            return p
+    return None
+
+
+def _condition_members(cond):
+    """Chain-condition members: container events (frozenset/tuple) expand,
+    scalar events (str, Variable, GlobalEvent, ...) stay whole."""
+    if isinstance(cond, (frozenset, tuple)):
+        return tuple(cond)
+    return (cond,)
+
+
 def _build_graph(binds, graph_factory=DirectedGraph):
     """Dependency graph: arc condition -> outcome per binding."""
     g = graph_factory()
-    for (outcome, condition) in binds:
+    for outcome, condition, prob in _bind_items(binds):
         g.add_edge(condition, outcome)
     return g
 
@@ -164,7 +253,7 @@ def _reference_candidates(binds):
     """Benchmark first, then binding conditions (insertion order, unique)."""
     seen = {global_event}
     candidates = [global_event]
-    for (outcome, condition) in binds:
+    for outcome, condition, prob in _bind_items(binds):
         if condition not in seen:
             seen.add(condition)
             candidates.append(condition)
@@ -176,7 +265,7 @@ def _strict_chain(binds, B, A):
     conditions): P(A1...An|C) = P(A1|C) * P(A2|A1C) * ... .  A step without
     an explicit binding is underivable -> None (the caller yields 0.0);
     steps are bounded to guard against cycles."""
-    p = 1.0
+    p = 1  # type-neutral unit (Decimal/Fraction safe)
     cond = B
     cur = B
     steps = 0
@@ -185,10 +274,10 @@ def _strict_chain(binds, B, A):
         if steps > len(binds) + 1:
             return None
         advanced = False
-        for (outcome, condition), prob in binds.items():
+        for outcome, condition, prob in _bind_items(binds):
             if condition == cond and outcome != cur:
                 p *= prob
-                cond = IntersectionEvent(*cond, outcome)
+                cond = IntersectionEvent(*_condition_members(cond), outcome)
                 cur = outcome
                 advanced = True
                 break
@@ -198,24 +287,25 @@ def _strict_chain(binds, B, A):
 
 
 def _resolve(binds, A, B, strict=False, graph=None, graph_factory=DirectedGraph,
-             stats=None):
+             stats=None, path_func=shortest_path_between):
     """Resolution of P(A|B): direct hit (reflexive / binding) -> exact;
     strict -> A4 Bayes (direct refs), then the exact chain rule, else 0.0;
     fallback -> chain-rule product on the shortest path (A3, Markov)."""
     if A == B:
         return 1.0
-    if (A, B) in binds:
+    direct = _bind_lookup(binds, A, B)
+    if direct is not None:
         if stats is not None:
             stats["hits"] += 1
-        return binds[(A, B)]
+        return direct
     if strict:
-        pba = binds.get((B, A))
+        pba = _bind_lookup(binds, B, A)
         if pba is not None:
             for C in _reference_candidates(binds):
                 if C in (A, B):
                     continue
-                pa = binds.get((A, C))
-                pb = binds.get((B, C))
+                pa = _bind_lookup(binds, A, C)
+                pb = _bind_lookup(binds, B, C)
                 if pa is not None and pb not in (None, 0):
                     if stats is not None:
                         stats["bayes"] += 1
@@ -230,14 +320,14 @@ def _resolve(binds, A, B, strict=False, graph=None, graph_factory=DirectedGraph,
         return 0.0
     if graph is None:
         graph = _build_graph(binds, graph_factory)
-    path = shortest_path_between(graph, B, A)
+    path = path_func(graph, B, A)
     if path is None:
         if stats is not None:
             stats["miss"] += 1
         return 0.0
-    p = 1.0
+    p = 1  # type-neutral unit (Decimal/Fraction safe)
     for i in range(1, len(path)):
-        seg = binds.get((path[i], path[i - 1]))
+        seg = _bind_lookup(binds, path[i], path[i - 1])
         if seg is None:
             if stats is not None:
                 stats["miss"] += 1
@@ -248,52 +338,65 @@ def _resolve(binds, A, B, strict=False, graph=None, graph_factory=DirectedGraph,
     return p
 
 
-def chain_probability(binds, A, B, graph=None, graph_factory=DirectedGraph):
-    """P(A|B) by direct hit or chain-rule product (A3); 0.0 when unresolved."""
-    return _resolve(binds, A, B, graph=graph, graph_factory=graph_factory)
+# ---------- probability entry points ----------
+def chain_probability(binds, A, B, graph=None, graph_factory=DirectedGraph,
+                      strict=False, path_func=shortest_path_between):
+    """P(A|B) by direct hit or chain-rule product (A3); 0.0 when unresolved.
+    strict=True switches to the rigorous path (A4 Bayes / exact chain)."""
+    return _resolve(binds, A, B, strict=strict, graph=graph,
+                    graph_factory=graph_factory, path_func=path_func)
 
 
-def default_probability_func(context, A, B, graph_factory=DirectedGraph):
+def default_probability_func(context, A, B, graph_factory=DirectedGraph,
+                             path_func=shortest_path_between):
     """Default probability slot: exact hits first, chain fallback (A3)."""
-    return _resolve(_as_binds(context), A, B, graph_factory=graph_factory)
+    return _resolve(_as_binds(context), A, B, graph_factory=graph_factory,
+                    path_func=path_func)
 
 
-def strict_probability_func(context, A, B, graph_factory=DirectedGraph):
+def strict_probability_func(context, A, B, graph_factory=DirectedGraph,
+                            path_func=shortest_path_between):
     """Rigorous slot: exact hit, then relative Bayes (A4, direct refs only),
-    then chain fallback (A3)."""
+    then the exact chain rule, else 0.0."""
     return _resolve(_as_binds(context), A, B, strict=True,
-                    graph_factory=graph_factory)
+                    graph_factory=graph_factory, path_func=path_func)
 
 
-def chain_intersection(context, A, B, C):
-    """P(AB|C) ~= P(A|B)*P(B|C)   (chain rule, Markov approximation)."""
-    return (default_probability_func(context, A, B)
-            * default_probability_func(context, B, C))
+def chain_intersection(context, A, B, C, strict=False):
+    """P(AB|C) ~= P(A|B)*P(B|C)   (chain rule, Markov approximation);
+    strict=True uses the rigorous slots (A4 Bayes / exact chain)."""
+    prob = strict_probability_func if strict else default_probability_func
+    return prob(context, A, B) * prob(context, B, C)
 
 
-def union_probability(context, A, B, C):
+def union_probability(context, A, B, C, strict=False):
     """P(A+B|C) = P(A|C) + P(B|C) - P(AB|C)   (A5, exact)."""
-    return (default_probability_func(context, A, C)
-            + default_probability_func(context, B, C)
-            - chain_intersection(context, A, B, C))
+    prob = strict_probability_func if strict else default_probability_func
+    return (prob(context, A, C)
+            + prob(context, B, C)
+            - chain_intersection(context, A, B, C, strict=strict))
 
 
-def consistency_diagnostic(context, A, B, C):
+def consistency_diagnostic(context, A, B, C, strict=False):
     """Both Bayes decompositions; equal iff P(C|A) == P(C|B) (diagnostic)."""
-    left = default_probability_func(context, B, A) * default_probability_func(context, A, C)
-    right = default_probability_func(context, A, B) * default_probability_func(context, B, C)
+    prob = strict_probability_func if strict else default_probability_func
+    left = prob(context, B, A) * prob(context, A, C)
+    right = prob(context, A, B) * prob(context, B, C)
     return {"left": left, "right": right, "consistent": left == right}
 
 
+# ---------- engines ----------
 class EventContextProtocol:
-    """Protocol-class engine (deploy form): state (binds, cached graph, stats,
-    strict switch) + slot methods; `deploy` wires it onto a context uniformly."""
+    """Protocol-class engine (deploy form): binds + cached graph + stats +
+    strict switch + graph factory; `deploy` wires the slots onto a context."""
 
-    __slots__ = ("binds", "strict", "_graph", "_graph_ver", "_binds_len", "stats")
+    __slots__ = ("binds", "strict", "graph_factory", "_graph", "_graph_ver",
+                 "_binds_len", "stats")
 
-    def __init__(self, binds=None, strict=False):
+    def __init__(self, binds=None, strict=False, graph_factory=DirectedGraph):
         self.binds = binds if binds is not None else {}
         self.strict = strict
+        self.graph_factory = graph_factory
         self._graph = None
         self._graph_ver = -1
         self._binds_len = len(self.binds)
@@ -309,7 +412,7 @@ class EventContextProtocol:
     def _ensure_graph(self):
         """Cached graph, rebuilt when the binds grew (len check) or invalidated."""
         if len(self.binds) != self._binds_len or self._graph_ver < 0:
-            self._graph = _build_graph(self.binds)
+            self._graph = _build_graph(self.binds, self.graph_factory)
             self._graph_ver += 1
             self._binds_len = len(self.binds)
         return self._graph
@@ -329,7 +432,8 @@ class EventContextProtocol:
                         graph=self._ensure_graph(), stats=self.stats)
 
     def deploy(self, context):
-        """Wire slot methods onto the context; attach self to extension."""
+        """Wire slot methods onto the context and attach self to extension;
+        the context must provide its own bind_probability (slot consumer)."""
         self._sync_binds(getattr(context, "binds", None))
         context.binds = self.binds
         context.add_func = self.add_bind
@@ -340,18 +444,25 @@ class EventContextProtocol:
 
 class EventBinds(dict):
     """Binds-as-engine protocol class: state on the binds container itself;
-    class methods injected into the slots (no separate engine instance)."""
+    slot functions injected into the slots (no separate engine instance)."""
 
     def __bool__(self):
-        return True  # never dropped by legacy truthiness substitution
+        return True  # always truthy: never dropped by truthiness substitution
 
-    def __init__(self, *args, strict=False, **kwargs):
+    def __init__(self, *args, strict=False, graph_factory=DirectedGraph, **kwargs):
         super().__init__(*args, **kwargs)
         self.strict = strict
+        self.graph_factory = graph_factory
         self._graph = None
         self._graph_ver = -1
         self._len = len(self)
         self.stats = {"adds": 0, "hits": 0, "bayes": 0, "chain": 0, "miss": 0}
+
+    def __setitem__(self, key, value):
+        """Direct writes invalidate the cached graph as well."""
+        super().__setitem__(key, value)
+        if hasattr(self, "_graph_ver"):
+            self._graph_ver = -1
 
     def add_bind(self, items):
         """add_func slot (self signature: the binds instance is self)."""
@@ -363,24 +474,31 @@ class EventBinds(dict):
 
     def _ensure_graph(self):
         if len(self) != self._len or self._graph_ver < 0:
-            self._graph = _build_graph(self)
+            self._graph = _build_graph(self, self.graph_factory)
             self._graph_ver += 1
             self._len = len(self)
         return self._graph
 
     def resolve(context, A, B):
-        """probability_func slot (class-body, no self; state via context.binds)."""
-        binds = getattr(context, "binds")
+        """probability_func slot (duck): binds.resolve(A, B),
+        EventBinds.resolve(context, A, B), or context.probability_func."""
+        binds = getattr(context, "binds", context)
         return _resolve(binds, A, B, strict=binds.strict,
                         graph=binds._ensure_graph(), stats=binds.stats)
 
-"""
-Explicit public exports (prevents import-star namespace pollution).
-"""
+    def copy(self):
+        """Engine-aware copy: keeps strict flag, graph factory and stats."""
+        other = type(self)(self, strict=self.strict,
+                           graph_factory=self.graph_factory)
+        other.stats.update(self.stats)
+        return other
+
+# ---- exports ----
 __all__ = (
     "UnionEvent",
     "IntersectionEvent",
     "GlobalEvent",
+    "global_event",
     "event_bind",
     "event_context",
     "default_add_bind",

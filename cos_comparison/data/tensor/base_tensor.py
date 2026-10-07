@@ -1,4 +1,4 @@
-#It provide tensor data container.
+# Tensor data container.
 
 from abc import ABC, abstractmethod
 from ... import core
@@ -15,11 +15,10 @@ class BaseTensor(ABC):
         pass
 
 class Tensor(core.vector_map_as_tensor,BaseTensor):
-    # core.vector_map_as_tensor is FIRST in the MRO, so its concrete
-    # __getitem__/__setitem__/etc. provide the BaseTensor abstract interface
-    # and nothing is shadowed. All parent flexible settings (vector, shape,
-    # start, strides, offset, start_offset, step_offset) are passed through
-    # completely via *args/**kwargs.
+    # core.vector_map_as_tensor first in the MRO: its concrete methods
+    # satisfy BaseTensor's abstract interface, nothing is shadowed; parent
+    # flexible settings (vector, shape, start, strides, offset, start_offset,
+    # step_offset) pass through *args/**kwargs.
     def __init__(self,*args,data=None,split_start=None,split_shape=None,**kwargs):
         if data is not None:
             loaded = core.load_as_default_data(data, start=split_start, shape=split_shape)

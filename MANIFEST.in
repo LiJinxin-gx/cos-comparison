@@ -5,7 +5,7 @@ include setup.py
 include MANIFEST.in
 include core_base.txt
 include History.txt
-recursive-include cos_comparison *.c *.h
+recursive-include cos_comparison *.c *.h *.cc *.cpp *.cxx *.cu *.hpp *.hh *.hxx *.cuh *.inl *.inc *.m *.mm *.pyi *.txt *.json
 recursive-include explore *.py *.pyw *.md *.json
 recursive-include tests *.py *.pyw *.md *.json
 recursive-include docs *.md

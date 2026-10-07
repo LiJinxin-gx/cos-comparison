@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Guard: the package and this test suite must never touch GUI frameworks
-(tkinter / Qt / wx / ...).  Acceptance must not pop windows on shared
-devices.
-
-The legacy GUI drivers (test_image_gui.pyw and the GUI shell error
-tests) were intentionally removed from the suite for this reason; GUI
-behaviour is out of scope for automated verification.
-"""
+"""Guard: the package and this suite must never touch GUI frameworks
+(tkinter / Qt / wx / ...), so acceptance cannot pop windows on shared
+devices.  The legacy GUI drivers (test_image_gui.pyw, the GUI shell
+error tests) were removed: GUI behaviour is out of scope."""
 
 import importlib
 import os
@@ -25,8 +21,10 @@ MODULES = [
     "cos_comparison.interface.api.parallel_api",
     "cos_comparison.interface.api.async_api",
     "cos_comparison.interface.api.database_api",
+    "cos_comparison.interface.api.io_api",
     "cos_comparison.interface.tools.context_tool",
     "cos_comparison.interface.tools.random_tool",
+    "cos_comparison.interface.tools.iter_tool",
     "cos_comparison.interface.tools.math_tool",
     "cos_comparison.data",
     "cos_comparison.data.tensor",
@@ -66,7 +64,7 @@ class TestNoGUI(unittest.TestCase):
         offenders = []
         for f in sorted(here.glob("test_*.py")):
             if f.name == os.path.basename(__file__):
-                continue  # this file enumerates the framework names itself
+                continue  # this file itself lists the framework names
             src = f.read_text(encoding="utf-8")
             if any(g in src for g in GUI_FRAMEWORKS):
                 offenders.append(f.name)
@@ -81,7 +79,7 @@ class TestNoGUI(unittest.TestCase):
         offenders = []
         for f in sorted(here.glob("test_*.py")):
             if f.name == os.path.basename(__file__):
-                continue  # this file enumerates the framework names itself
+                continue  # this file itself lists the framework names
             src = f.read_text(encoding="utf-8")
             if "test_image_gui" in src or "image_gui" in src:
                 offenders.append(f.name)

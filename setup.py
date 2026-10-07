@@ -2,15 +2,17 @@
 setup.py – Build and install cos_comparison with optional C acceleration.
 
 This script compiles:
-1. The Python C extension (pydll) – placed inside cos_comparison/core/
-2. The ctypes shared library (core.dll / .so / .dylib) – placed inside cos_comparison/core/cos_comparison_c/
-3. The math_tool C extensions (_topology / _fourier)
+1. The Python C extension (cos_comparison_pydll) – placed inside cos_comparison/core/
+2. The math_tool C extensions (_topology / _fourier / _linear_algebra / _unit_map)
 
 Robust fallbacks keep the installation working even when compilation or
 version injection fails: every extension is built in isolation (one
-failure skips that extension only), the ctypes backend failure is a
-warning, and a version-file injection failure leaves the package
-installable (the runtime then falls back to a default version).
+failure skips that extension only), an extension that rejects the
+compiler standard flags is retried once without them (low-version
+toolchains), and a version-file injection failure leaves the package
+installable (the runtime then falls back to a default version).  The
+ctypes backend was removed in v0.5.0: the compiled extension IS the C
+backend (call name "c" in core/config.json).
 """
 
 import os
@@ -19,7 +21,8 @@ import platform
 import shutil
 
 import re
-from setuptools import setup, Extension, find_packages
+import setuptools
+from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
 # Change to the directory of this script so that all relative paths work correctly
@@ -92,7 +95,7 @@ def _make_extension(name, source, include_dir, libs=None):
 ext_modules = []
 
 # ----------------------------------------------------------------------
-#  Python C extension (pydll)
+#  Python C extension (the C backend: cos_comparison_pydll)
 # ----------------------------------------------------------------------
 c_source_abs = os.path.abspath("cos_comparison/core/include/cos_comparison_pydll.c")
 c_source_rel = os.path.relpath(c_source_abs, setup_dir)
@@ -105,10 +108,10 @@ if os.path.isfile(c_source_rel):
         ext_modules.append(ext)
         print("Python C extension (cos_comparison_pydll) configured.")
 else:
-    print("Warning: pydll source not found, skipping.")
+    print("Warning: C backend source not found, skipping.")
 
 # ----------------------------------------------------------------------
-#  math_tool C extensions (_topology / _fourier)
+#  math_tool C extensions (_topology / _fourier / _linear_algebra / _unit_map)
 # ----------------------------------------------------------------------
 math_inc_dir = os.path.relpath(
     os.path.abspath(
@@ -123,6 +126,9 @@ math_sources = [
     ("cos_comparison.interface.tools.math_tool._linear_algebra",
      "cos_comparison/interface/tools/math_tool/include/_linear_algebra.c",
      math_libs),
+    ("cos_comparison.interface.tools.math_tool._unit_map",
+     "cos_comparison/interface/tools/math_tool/include/_unit_map.c",
+     math_libs),
 ]
 for name, rel_path, libs in math_sources:
     abs_path = os.path.abspath(rel_path)
@@ -136,86 +142,46 @@ for name, rel_path, libs in math_sources:
         print("Warning: {0} source not found, skipping.".format(rel_path))
 
 # ----------------------------------------------------------------------
-#  Custom build_ext: per-extension failure isolation + ctypes shared library
+#  Custom build_ext: per-extension failure isolation
 # ----------------------------------------------------------------------
+def _strip_std_flags(ext):
+    """Drop compiler standard flags (/std:... or -std=...) from an
+    extension in place; True when something was removed (the old-toolchain
+    retry), False when there is nothing to reduce."""
+    args = list(getattr(ext, "extra_compile_args", ()) or ())
+    reduced = [a for a in args
+               if not (isinstance(a, str)
+                       and (a.startswith("/std:") or a.startswith("-std=")))]
+    if len(reduced) == len(args):
+        return False
+    ext.extra_compile_args = reduced
+    return True
+
+
 class SafeBuildExt(build_ext):
     def build_extension(self, ext):
-        """Build one extension; a failure skips only that extension so the
-        remaining ones (and the pure-Python install) keep working."""
+        """Build one extension; a failure is retried once without the
+        compiler standard flags (low-version toolchains), then skips only
+        that extension so the remaining ones (and the pure-Python install)
+        keep working."""
         try:
             super().build_extension(ext)
+            return
         except Exception as e:  # noqa: BLE001 - per-extension fallback
+            if _strip_std_flags(ext):
+                print(f"\n*** extension {ext.name} failed with the configured "
+                      f"compiler standard flags; retrying without them "
+                      f"(low-version toolchain). ***")
+                self.force = True   # recompile after the partial failure
+                try:
+                    super().build_extension(ext)
+                    return
+                except Exception as retry_exc:  # noqa: BLE001
+                    e = retry_exc
             print(f"\n*** extension {ext.name} compilation failed: {e} ***")
             print("*** That extension will be skipped; the package stays "
                   "installable (pure Python fallback). ***")
             self.extensions = [x for x in self.extensions if x is not ext]
-
-    def build_ctypes_backend(self):
-        """Build the ctypes C backend shared library and place it in build/lib."""
-        ctypes_src_dir = os.path.abspath("cos_comparison/core/cos_comparison_c/include")
-        ctypes_out_dir = os.path.abspath("cos_comparison/core/cos_comparison_c")
-        core_src = os.path.join(ctypes_src_dir, "core.c")
-
-        if not os.path.isfile(core_src):
-            print("Info: ctypes backend source not found, skipping.")
-            return
-
-        try:
-            compiler = self.compiler
-            os.makedirs(self.build_temp, exist_ok=True)
-
-            # Compile core.c to object file
-            print("Building ctypes C backend...")
-            objects = compiler.compile(
-                [core_src],
-                output_dir=self.build_temp,
-                include_dirs=[ctypes_src_dir],
-                extra_preargs=compile_args,
-                macros=[],
-            )
-
-            # Determine output library name per platform
-            if is_windows:
-                lib_name = "core"
-                lib_ext = ".dll"
-            elif sys.platform == "darwin":
-                lib_name = "core"
-                lib_ext = ".dylib"
-            else:
-                lib_name = "core"
-                lib_ext = ".so"
-
-            # --- IMPORTANT: output directly to build/lib ---
-            build_lib = self.build_lib
-            target_dir = os.path.join(build_lib, "cos_comparison", "core", "cos_comparison_c")
-            os.makedirs(target_dir, exist_ok=True)
-            output_lib = os.path.join(target_dir, lib_name + lib_ext)
-
-            link_args = []
-            if is_windows:
-                link_args = ['/DLL']
-
-            # Use link_shared_object for precise control over output path
-            compiler.link_shared_object(
-                objects,
-                output_lib,
-                libraries=math_libs,
-                library_dirs=[],
-                runtime_library_dirs=[],
-                extra_preargs=link_args
-            )
-
-            print(f"ctypes backend built successfully: {output_lib}")
-
-            # (Optional) Copy to source directory for in-place development
-            source_lib = os.path.join(ctypes_out_dir, lib_name + lib_ext)
-            if source_lib != output_lib:
-                shutil.copy2(output_lib, source_lib)
-                print(f"Copied to source directory: {source_lib}")
-
-        except Exception as e:  # noqa: BLE001 - ctypes fallback is a warning
-            print(f"\n*** ctypes backend compilation failed: {e} ***")
-            print("*** ctypes acceleration will not be available. ***")
 
     def run(self):
         # Build the Python C extensions; per-extension failures are handled
@@ -229,12 +195,71 @@ class SafeBuildExt(build_ext):
                   "(pure Python fallback). ***")
             self.extensions = []
 
-        # Build ctypes backend regardless of Python extension status
+# ----------------------------------------------------------------------
+#  License metadata shim for setuptools < 77
+#  pyproject.toml carries the modern SPDX form (`license = "MIT"` +
+#  `license-files`), understood only by setuptools>=77 - but the Python
+#  3.8 floor allows setuptools 61.  On older setuptools the build is
+#  pointed at a temporary legacy-compatible sibling copy
+#  (`license = {text = "MIT"}`, no `license-files` key) instead of the
+#  real file, which is never modified: sdists and the working tree always
+#  keep the modern metadata.
+# ----------------------------------------------------------------------
+def _setuptools_before_77():
+    try:
+        parts = (setuptools.__version__ or "").split(".")
+        major = int(re.match(r"\d+", parts[0]).group(0))
+        minor = int(re.match(r"\d+", parts[1]).group(0)) if len(parts) > 1 else 0
+    except Exception:  # noqa: BLE001 - version parsing must never break setup
+        return False
+    return (major, minor) < (77, 0)
+
+
+def _install_license_shim():
+    """Teach pre-77 setuptools to read a legacy license table for this
+    build without touching pyproject.toml on disk."""
+    if not _setuptools_before_77():
+        return
+    try:
+        import setuptools.config.pyprojecttoml as pyprojecttoml
+    except Exception:  # noqa: BLE001 - unknown layout: keep the old behaviour
+        return
+
+    original_apply = pyprojecttoml.apply_configuration
+
+    def apply_configuration(dist, filename, ignore_option_errors=False):
         try:
-            self.build_ctypes_backend()
-        except Exception as e:  # noqa: BLE001 - extra safety net
-            print(f"\n*** ctypes backend step failed: {e} ***")
-            print("*** The installation continues without it. ***")
+            with open(filename, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            return original_apply(dist, filename, ignore_option_errors)
+        legacy = re.sub(
+            r'^([ \t]*)license[ \t]*=[ \t]*"([^"]*)"',
+            lambda m: '%slicense = {text = "%s"}' % (m.group(1), m.group(2)),
+            text, count=1, flags=re.MULTILINE)
+        legacy = re.sub(r'^[ \t]*license-files[ \t]*=.*(?:\n|$)', '',
+                        legacy, flags=re.MULTILINE)
+        if legacy == text:
+            return original_apply(dist, filename, ignore_option_errors)
+        legacy_path = os.path.join(
+            os.path.dirname(os.path.abspath(filename)),
+            "_cc_legacy_pyproject.toml")
+        try:
+            with open(legacy_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(legacy)
+            print("License shim: setuptools<77 detected; using a legacy "
+                  "license table for this build (pyproject.toml untouched).")
+            return original_apply(dist, legacy_path, ignore_option_errors)
+        finally:
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                pass
+
+    pyprojecttoml.apply_configuration = apply_configuration
+
+
+_install_license_shim()
 
 # ----------------------------------------------------------------------
 #  Final setup
@@ -242,10 +267,10 @@ class SafeBuildExt(build_ext):
 try:
     setup(
         cmdclass={'build_ext': SafeBuildExt},
-        packages=find_packages(where=".", include=["cos_comparison*", "explore*"]),
         ext_modules=ext_modules,
         include_package_data=True,   # Use package_data from pyproject.toml
-        # package_data is defined in pyproject.toml – no need to duplicate here
+        # packages / package_data are defined in pyproject.toml (single
+        # source of truth) – no need to duplicate them here
     )
 except SystemExit:
     raise
@@ -253,7 +278,6 @@ except Exception as e:  # noqa: BLE001 - last-resort fallback: install pure Pyth
     print(f"\n*** setup() failed ({e}); retrying without C extensions. ***")
     setup(
         cmdclass={'build_ext': SafeBuildExt},
-        packages=find_packages(where=".", include=["cos_comparison*", "explore*"]),
         ext_modules=[],
         include_package_data=True,
     )

@@ -1,6 +1,6 @@
 # Modular Architecture
 
-Module responsibility boundaries, dependency rules, and data-flow conventions. Frozen as of v0.4.1 (maintained through v0.4.3).
+Module responsibility boundaries, dependency rules, and data-flow conventions. Frozen as of v0.4.1 (maintained through v0.5.2).
 
 ## Contents
 
@@ -19,7 +19,7 @@ Module responsibility boundaries, dependency rules, and data-flow conventions. F
 
 | Foundation | Role | Independence |
 |------------|------|:------------:|
-| **`core`** | Internal low-level algorithms and data formats (algorithm family, three-backend acceleration, `vector_map_as_tensor`) | ✅ stdlib only |
+| **`core`** | Internal low-level algorithms and data formats (algorithm family, two-backend acceleration, `vector_map_as_tensor`) | ✅ stdlib only |
 | **`interface`** | External interactions (system/processes, concurrency, communication, dynamic-library/module calls, context tools) | ✅ stdlib only |
 | **`data`** | Data carrying and generic abstraction (`DataWrap`, tensor family) | — |
 | **Functional layers** | Operate on top of `core`, `interface`, `data` via attach-and-take | — |
@@ -32,11 +32,11 @@ All internal algorithms and data formats are exposed by `core`; all model-to-wor
 
 | Module | Role | Core Responsibility |
 |--------|------|---------------------|
-| `core` | Algorithm core | Local similarity (cos/mod/cosmod), data formats, three-backend auto-loading, stride indexing |
+| `core` | Algorithm core | Local similarity (cos/mod/cosmod), data formats, two-backend auto-loading, stride indexing |
 | `interface` | External abstraction | System/process (`system_api`), locks/shared arrays/threads (`parallel_api`), async hosts (`async_api`), IO/socket/pipe/file (`communicate_api`), dynamic calls (`call_api`), database (`database_api`), context tools |
 | `data` | Data carrying | `DataWrap`, `Tensor`/`SafeTensor`/`ParallelTensor`, shape/stride/type normalization |
 | `sense_layer` | Sensory | Receives external data, attaches to core algorithms |
-| `memory_layer` | Memory | Map/Table/Database carriers, transaction & rollback |
+| `memory_layer` | Memory | Map/Table/Database/IO-stream carriers, transaction & rollback |
 | `brain_layer` | Cognition | Symbolic/probabilistic logic, reflex monitoring (pure logic, mechanisms in `interface`) |
 | `action_layer` | Action | Execution scheduling (`ExecuterDriver`, delegated async execution) |
 | `generate_layer` | Generation | Attaches external callees to produce data |
@@ -92,7 +92,7 @@ Layers **do not own or transform data**. Data is constructed by the caller; laye
 
 ## Conformance Checklist
 
-| Check | Status (v0.4.3) |
+| Check | Status (v0.5.2) |
 |-------|:----------------:|
 | `core` depends on stdlib only | ✅ Pass |
 | `interface` depends on stdlib only | ✅ Pass |

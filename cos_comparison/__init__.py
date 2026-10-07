@@ -15,7 +15,10 @@ try:
     del _file_path
     del _script_dir
 except Exception:
-    __version__ = "0.4"
+    __version__ = "0.5.3"
 
 version = __version__
-version_tuple = tuple(__version__.split("."))
+try:
+    version_tuple = tuple(int(part) for part in __version__.split("."))
+except ValueError:  # non-numeric version tag: keep the raw parts
+    version_tuple = tuple(__version__.split("."))

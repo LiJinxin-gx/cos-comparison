@@ -13,6 +13,13 @@
  * Kahn / BFS.
  */
 #define PY_SSIZE_T_CLEAN
+#ifdef _MSC_VER
+/* CPython extension ABI patterns under /Wall (see cos_comparison_pydll.c):
+   C4191 method-table casts, C4232 PyType_GenericNew address,
+   C4820 struct padding; C5045/C4711/C4710 are /Wall performance hints. */
+#pragma warning(push)
+#pragma warning(disable: 4191 4232 4820 5045 4711 4710)
+#endif
 #include <Python.h>
 #include <limits.h>
 #include <stddef.h>
@@ -21,7 +28,7 @@
  * Internal helpers
  * ================================================================== */
 
-static int _lock_graph(PyObject *lock) {
+static int lock_graph(PyObject *lock) {
     /* with lock: acquire via __enter__ (None / no-op lock: skip). */
     if (lock == NULL || lock == Py_None) return 0;
     PyObject *r = PyObject_CallMethod(lock, "__enter__", NULL);
@@ -30,11 +37,21 @@ static int _lock_graph(PyObject *lock) {
     return 0;
 }
 
-static void _unlock_graph(PyObject *lock) {
+static void unlock_graph(PyObject *lock) {
     if (lock == NULL || lock == Py_None) return;
     PyObject *r = PyObject_CallMethod(lock, "__exit__", "OOO",
                                       Py_None, Py_None, Py_None);
     Py_XDECREF(r);
+}
+
+/* dict[key] = int (owns the temporary; the common PyLong leak pattern in
+ * this module went through PyDict_SetItem with an unchecked temporary). */
+static int set_long(PyObject *dict, PyObject *key, long value) {
+    PyObject *boxed = PyLong_FromLong(value);
+    if (!boxed) return -1;
+    int rc = PyDict_SetItem(dict, key, boxed);
+    Py_DECREF(boxed);
+    return rc;
 }
 
 /* ==================================================================
@@ -53,44 +70,67 @@ typedef struct {
 
 static PyTypeObject GraphType;
 
-static int _graph_add_vertex(GraphObject *self, PyObject *v) {
+static int graph_add_vertex(GraphObject *self, PyObject *v) {
     int contains = PySet_Contains(self->vertices, v);
     if (contains < 0) return -1;
     if (contains) return 0;
-    if (PySet_Add(self->vertices, v) < 0) return -1;
-    Py_INCREF(v);
     if (PyDict_SetItem(self->parent, v, v) < 0 ||
-        PyDict_SetItem(self->rank, v, PyLong_FromLong(0)) < 0) {
-        Py_DECREF(v);
+        set_long(self->rank, v, 0) < 0) {
         return -1;
     }
-    Py_DECREF(v);
+    if (PySet_Add(self->vertices, v) < 0) {
+        PyDict_DelItem(self->parent, v);   /* roll back the half-registered */
+        PyDict_DelItem(self->rank, v);
+        return -1;
+    }
     self->components++;
     return 0;
 }
 
-static PyObject *_graph_find(GraphObject *self, PyObject *x) {
-    /* two-pass path compression (iterative) */
+static PyObject *graph_find(GraphObject *self, PyObject *x) {
+    /* iterative find + path compression; every walked node is held (root
+     * by INCREF, the compressed chain by a snapshot list) so dict/GC
+     * activity during compression cannot invalidate the walk. */
     PyObject *root = x;
+    Py_INCREF(root);
     PyObject *p;
-    while ((p = PyDict_GetItem(self->parent, root)) != NULL &&
-           PyObject_RichCompareBool(root, p, Py_NE) == 1) {
+    while ((p = PyDict_GetItem(self->parent, root)) != NULL) {
+        int ne = PyObject_RichCompareBool(root, p, Py_NE);
+        if (ne < 0) { Py_DECREF(root); return NULL; }
+        if (!ne) break;
+        Py_INCREF(p);
+        Py_DECREF(root);
         root = p;
     }
+    PyObject *chain = PyList_New(0);
+    if (!chain) { Py_DECREF(root); return NULL; }
     PyObject *cur = x;
+    Py_INCREF(cur);
+    int ok = 1;
     while (PyObject_RichCompareBool(cur, root, Py_NE) == 1) {
-        PyObject *parent = PyDict_GetItem(self->parent, cur);
-        if (PyDict_SetItem(self->parent, cur, root) < 0) return NULL;
+        if (PyList_Append(chain, cur) < 0) { ok = 0; break; }
+        PyObject *parent = PyObject_GetItem(self->parent, cur);
+        Py_DECREF(cur);
+        if (!parent) { ok = 0; break; }
         cur = parent;
     }
-    Py_INCREF(root);
-    return root;
+    Py_XDECREF(cur);
+    if (ok) {
+        Py_ssize_t n = PyList_GET_SIZE(chain);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            if (PyDict_SetItem(self->parent, PyList_GET_ITEM(chain, i),
+                               root) < 0) { ok = 0; break; }
+        }
+    }
+    Py_DECREF(chain);
+    if (!ok) { Py_DECREF(root); return NULL; }
+    return root;   /* strong reference */
 }
 
-static int _graph_union(GraphObject *self, PyObject *a, PyObject *b) {
-    PyObject *ra = _graph_find(self, a);
+static int graph_union(GraphObject *self, PyObject *a, PyObject *b) {
+    PyObject *ra = graph_find(self, a);
     if (!ra) return -1;
-    PyObject *rb = _graph_find(self, b);
+    PyObject *rb = graph_find(self, b);
     if (!rb) { Py_DECREF(ra); return -1; }
     int same = PyObject_RichCompareBool(ra, rb, Py_EQ);
     if (same < 0) { Py_DECREF(ra); Py_DECREF(rb); return -1; }
@@ -110,8 +150,7 @@ static int _graph_union(GraphObject *self, PyObject *a, PyObject *b) {
     if (ra_rank == rb_rank) {
         long nr = PyLong_AsLong(PyDict_GetItem(self->rank, new_root));
         if (PyErr_Occurred()) { Py_DECREF(ra); Py_DECREF(rb); return -1; }
-        if (PyDict_SetItem(self->rank, new_root,
-                           PyLong_FromLong(nr + 1)) < 0) {
+        if (set_long(self->rank, new_root, nr + 1) < 0) {
             Py_DECREF(ra); Py_DECREF(rb); return -1;
         }
     }
@@ -120,7 +159,7 @@ static int _graph_union(GraphObject *self, PyObject *a, PyObject *b) {
     return 0;
 }
 
-static PyObject *_graph_new_graph(PyTypeObject *type, PyObject *args,
+static PyObject *graph_new_graph(PyTypeObject *type, PyObject *args,
                                   PyObject *kwargs) {
     PyObject *lock = Py_None;
     static char *kwlist[] = {"lock", NULL};
@@ -142,7 +181,24 @@ static PyObject *_graph_new_graph(PyTypeObject *type, PyObject *args,
     return (PyObject*)self;
 }
 
-static void _graph_dealloc(GraphObject *self) {
+static int graph_tp_traverse(GraphObject *self, visitproc visit, void *arg) {
+    Py_VISIT(self->vertices);
+    Py_VISIT(self->parent);
+    Py_VISIT(self->rank);
+    Py_VISIT(self->lock);
+    return 0;
+}
+
+static int graph_tp_clear(GraphObject *self) {
+    Py_CLEAR(self->vertices);
+    Py_CLEAR(self->parent);
+    Py_CLEAR(self->rank);
+    Py_CLEAR(self->lock);
+    return 0;
+}
+
+static void graph_dealloc(GraphObject *self) {
+    PyObject_GC_UnTrack(self);
     Py_XDECREF(self->vertices);
     Py_XDECREF(self->parent);
     Py_XDECREF(self->rank);
@@ -150,82 +206,82 @@ static void _graph_dealloc(GraphObject *self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject *_graph_add_edge(GraphObject *self, PyObject *args) {
+static PyObject *graph_add_edge(GraphObject *self, PyObject *args) {
     PyObject *u, *v;
     if (!PyArg_ParseTuple(args, "OO", &u, &v)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
-    if (_graph_add_vertex(self, u) < 0 ||
-        _graph_add_vertex(self, v) < 0 ||
-        _graph_union(self, u, v) < 0) {
-        _unlock_graph(self->lock);
+    if (lock_graph(self->lock) < 0) return NULL;
+    if (graph_add_vertex(self, u) < 0 ||
+        graph_add_vertex(self, v) < 0 ||
+        graph_union(self, u, v) < 0) {
+        unlock_graph(self->lock);
         return NULL;
     }
     self->edges++;
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     Py_RETURN_NONE;
 }
 
-#define _GRAPH_COUNT_METHOD(name, field)                                      \
-static PyObject *_graph_##name(GraphObject *self, PyObject *Py_UNUSED(ign)) { \
-    if (_lock_graph(self->lock) < 0) return NULL;                             \
+#define GRAPH_COUNT_METHOD(name, field)                                      \
+static PyObject *graph_##name(GraphObject *self, PyObject *ign) {(void)ign; \
+    if (lock_graph(self->lock) < 0) return NULL;                             \
     PyObject *r = PyLong_FromSsize_t(field);                                  \
-    _unlock_graph(self->lock);                                                \
+    unlock_graph(self->lock);                                                \
     return r;                                                                 \
 }
 
-_GRAPH_COUNT_METHOD(vertices_count, PySet_GET_SIZE(self->vertices))
-_GRAPH_COUNT_METHOD(edges_count, self->edges)
-_GRAPH_COUNT_METHOD(components_count, self->components)
+GRAPH_COUNT_METHOD(vertices_count, PySet_GET_SIZE(self->vertices))
+GRAPH_COUNT_METHOD(edges_count, self->edges)
+GRAPH_COUNT_METHOD(components_count, self->components)
 
-static PyObject *_graph_euler(GraphObject *self, PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *graph_euler(GraphObject *self, PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     Py_ssize_t v = PySet_GET_SIZE(self->vertices);
     PyObject *r = PyLong_FromSsize_t(v - self->edges + self->components);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
-static PyObject *_graph_cycle_rank(GraphObject *self, PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *graph_cycle_rank(GraphObject *self, PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     Py_ssize_t v = PySet_GET_SIZE(self->vertices);
     PyObject *r = PyLong_FromSsize_t(self->edges - v + self->components);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
-static PyObject *_graph_is_connected(GraphObject *self, PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *graph_is_connected(GraphObject *self, PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     PyObject *r = PyBool_FromLong(self->components <= 1);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
-static PyObject *_graph_repr(GraphObject *self) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *graph_repr(GraphObject *self) {
+    if (lock_graph(self->lock) < 0) return NULL;
     Py_ssize_t v = PySet_GET_SIZE(self->vertices);
     PyObject *r = PyUnicode_FromFormat(
         "<Graph: V=%zd, E=%zd, C=%zd, \xCF\x87=%zd, r=%zd>",
         v, self->edges, self->components,
         v - self->edges + self->components,
         self->edges - v + self->components);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
 static PyMethodDef graph_methods[] = {
-    {"add_edge", (PyCFunction)_graph_add_edge, METH_VARARGS,
+    {"add_edge", (PyCFunction)graph_add_edge, METH_VARARGS,
      "Add an undirected edge between vertices u and v (parallel allowed)."},
-    {"vertices_count", (PyCFunction)_graph_vertices_count, METH_NOARGS,
+    {"vertices_count", (PyCFunction)graph_vertices_count, METH_NOARGS,
      "Return the number of vertices."},
-    {"edges_count", (PyCFunction)_graph_edges_count, METH_NOARGS,
+    {"edges_count", (PyCFunction)graph_edges_count, METH_NOARGS,
      "Return the number of edges."},
-    {"components_count", (PyCFunction)_graph_components_count, METH_NOARGS,
+    {"components_count", (PyCFunction)graph_components_count, METH_NOARGS,
      "Return the number of connected components."},
-    {"euler_characteristic", (PyCFunction)_graph_euler, METH_NOARGS,
+    {"euler_characteristic", (PyCFunction)graph_euler, METH_NOARGS,
      "Return the Euler characteristic V - E + C."},
-    {"cycle_rank", (PyCFunction)_graph_cycle_rank, METH_NOARGS,
+    {"cycle_rank", (PyCFunction)graph_cycle_rank, METH_NOARGS,
      "Return the cycle rank E - V + C."},
-    {"is_connected", (PyCFunction)_graph_is_connected, METH_NOARGS,
+    {"is_connected", (PyCFunction)graph_is_connected, METH_NOARGS,
      "Return True if the graph is connected."},
     {NULL, NULL, 0, NULL}
 };
@@ -234,10 +290,12 @@ static PyTypeObject GraphType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "_topology.Graph",
     .tp_basicsize = sizeof(GraphObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = _graph_new_graph,
-    .tp_dealloc = (destructor)_graph_dealloc,
-    .tp_repr = (reprfunc)_graph_repr,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_new = graph_new_graph,
+    .tp_dealloc = (destructor)graph_dealloc,
+    .tp_traverse = (traverseproc)graph_tp_traverse,
+    .tp_clear = (inquiry)graph_tp_clear,
+    .tp_repr = (reprfunc)graph_repr,
     .tp_methods = graph_methods,
     .tp_doc = "Undirected multigraph with union-find components."
 };
@@ -261,43 +319,64 @@ typedef struct {
 
 static PyTypeObject DirectedGraphType;
 
-static int _dg_add_vertex(DirectedGraphObject *self, PyObject *v) {
+static int dg_add_vertex(DirectedGraphObject *self, PyObject *v) {
     int contains = PySet_Contains(self->vertices, v);
     if (contains < 0) return -1;
     if (contains) return 0;
-    if (PySet_Add(self->vertices, v) < 0) return -1;
-    Py_INCREF(v);
     if (PyDict_SetItem(self->parent, v, v) < 0 ||
-        PyDict_SetItem(self->rank, v, PyLong_FromLong(0)) < 0) {
-        Py_DECREF(v);
+        set_long(self->rank, v, 0) < 0) {
         return -1;
     }
-    Py_DECREF(v);
+    if (PySet_Add(self->vertices, v) < 0) {
+        PyDict_DelItem(self->parent, v);   /* roll back the half-registered */
+        PyDict_DelItem(self->rank, v);
+        return -1;
+    }
     self->components++;
     return 0;
 }
 
-static PyObject *_dg_find(DirectedGraphObject *self, PyObject *x) {
+static PyObject *dg_find(DirectedGraphObject *self, PyObject *x) {
     PyObject *root = x;
+    Py_INCREF(root);
     PyObject *p;
-    while ((p = PyDict_GetItem(self->parent, root)) != NULL &&
-           PyObject_RichCompareBool(root, p, Py_NE) == 1) {
+    while ((p = PyDict_GetItem(self->parent, root)) != NULL) {
+        int ne = PyObject_RichCompareBool(root, p, Py_NE);
+        if (ne < 0) { Py_DECREF(root); return NULL; }
+        if (!ne) break;
+        Py_INCREF(p);
+        Py_DECREF(root);
         root = p;
     }
+    PyObject *chain = PyList_New(0);
+    if (!chain) { Py_DECREF(root); return NULL; }
     PyObject *cur = x;
+    Py_INCREF(cur);
+    int ok = 1;
     while (PyObject_RichCompareBool(cur, root, Py_NE) == 1) {
-        PyObject *parent = PyDict_GetItem(self->parent, cur);
-        if (PyDict_SetItem(self->parent, cur, root) < 0) return NULL;
+        if (PyList_Append(chain, cur) < 0) { ok = 0; break; }
+        PyObject *parent = PyObject_GetItem(self->parent, cur);
+        Py_DECREF(cur);
+        if (!parent) { ok = 0; break; }
         cur = parent;
     }
-    Py_INCREF(root);
-    return root;
+    Py_XDECREF(cur);
+    if (ok) {
+        Py_ssize_t n = PyList_GET_SIZE(chain);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            if (PyDict_SetItem(self->parent, PyList_GET_ITEM(chain, i),
+                               root) < 0) { ok = 0; break; }
+        }
+    }
+    Py_DECREF(chain);
+    if (!ok) { Py_DECREF(root); return NULL; }
+    return root;   /* strong reference */
 }
 
-static int _dg_union(DirectedGraphObject *self, PyObject *a, PyObject *b) {
-    PyObject *ra = _dg_find(self, a);
+static int dg_union(DirectedGraphObject *self, PyObject *a, PyObject *b) {
+    PyObject *ra = dg_find(self, a);
     if (!ra) return -1;
-    PyObject *rb = _dg_find(self, b);
+    PyObject *rb = dg_find(self, b);
     if (!rb) { Py_DECREF(ra); return -1; }
     int same = PyObject_RichCompareBool(ra, rb, Py_EQ);
     if (same < 0) { Py_DECREF(ra); Py_DECREF(rb); return -1; }
@@ -313,8 +392,7 @@ static int _dg_union(DirectedGraphObject *self, PyObject *a, PyObject *b) {
     if (ra_rank == rb_rank) {
         long nr = PyLong_AsLong(PyDict_GetItem(self->rank, new_root));
         if (PyErr_Occurred()) { Py_DECREF(ra); Py_DECREF(rb); return -1; }
-        if (PyDict_SetItem(self->rank, new_root,
-                           PyLong_FromLong(nr + 1)) < 0) {
+        if (set_long(self->rank, new_root, nr + 1) < 0) {
             Py_DECREF(ra); Py_DECREF(rb); return -1;
         }
     }
@@ -323,15 +401,15 @@ static int _dg_union(DirectedGraphObject *self, PyObject *a, PyObject *b) {
     return 0;
 }
 
-static int _dg_bump(DirectedGraphObject *self, PyObject *key,
+static int dg_bump(DirectedGraphObject *self, PyObject *key,
                     PyObject *table, int delta) { (void)self;
     PyObject *cur = PyDict_GetItem(table, key);
     long n = cur ? PyLong_AsLong(cur) : 0;
     if (PyErr_Occurred()) return -1;
-    return PyDict_SetItem(table, key, PyLong_FromLong(n + delta));
+    return set_long(table, key, n + delta);
 }
 
-static PyObject *_dg_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+static PyObject *dg_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     PyObject *lock = Py_None;
     static char *kwlist[] = {"lock", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &lock))
@@ -357,7 +435,30 @@ static PyObject *_dg_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
     return (PyObject*)self;
 }
 
-static void _dg_dealloc(DirectedGraphObject *self) {
+static int dg_tp_traverse(DirectedGraphObject *self, visitproc visit, void *arg) {
+    Py_VISIT(self->vertices);
+    Py_VISIT(self->adj);
+    Py_VISIT(self->in_deg);
+    Py_VISIT(self->out_deg);
+    Py_VISIT(self->parent);
+    Py_VISIT(self->rank);
+    Py_VISIT(self->lock);
+    return 0;
+}
+
+static int dg_tp_clear(DirectedGraphObject *self) {
+    Py_CLEAR(self->vertices);
+    Py_CLEAR(self->adj);
+    Py_CLEAR(self->in_deg);
+    Py_CLEAR(self->out_deg);
+    Py_CLEAR(self->parent);
+    Py_CLEAR(self->rank);
+    Py_CLEAR(self->lock);
+    return 0;
+}
+
+static void dg_dealloc(DirectedGraphObject *self) {
+    PyObject_GC_UnTrack(self);
     Py_XDECREF(self->vertices);
     Py_XDECREF(self->adj);
     Py_XDECREF(self->in_deg);
@@ -368,81 +469,84 @@ static void _dg_dealloc(DirectedGraphObject *self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject *_dg_add_edge(DirectedGraphObject *self, PyObject *args) {
+static PyObject *dg_add_edge(DirectedGraphObject *self, PyObject *args) {
     PyObject *u, *v;
     if (!PyArg_ParseTuple(args, "OO", &u, &v)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
-    if (_dg_add_vertex(self, u) < 0 || _dg_add_vertex(self, v) < 0) {
-        _unlock_graph(self->lock);
+    if (lock_graph(self->lock) < 0) return NULL;
+    if (dg_add_vertex(self, u) < 0 || dg_add_vertex(self, v) < 0) {
+        unlock_graph(self->lock);
         return NULL;
     }
     self->edges++;
-    if (_dg_bump(self, u, self->out_deg, 1) < 0 ||
-        _dg_bump(self, v, self->in_deg, 1) < 0) {
-        _unlock_graph(self->lock);
+    if (dg_bump(self, u, self->out_deg, 1) < 0 ||
+        dg_bump(self, v, self->in_deg, 1) < 0) {
+        unlock_graph(self->lock);
         return NULL;
     }
     PyObject *targets = PyDict_GetItem(self->adj, u);
+    int owns_targets = 0;
     if (targets == NULL) {
         targets = PyDict_New();
         if (!targets || PyDict_SetItem(self->adj, u, targets) < 0) {
             Py_XDECREF(targets);
-            _unlock_graph(self->lock);
+            unlock_graph(self->lock);
             return NULL;
         }
+        owns_targets = 1;
     }
     PyObject *cur = PyDict_GetItem(targets, v);
     long n = cur ? PyLong_AsLong(cur) : 0;
-    if (PyErr_Occurred() ||
-        PyDict_SetItem(targets, v, PyLong_FromLong(n + 1)) < 0 ||
-        _dg_union(self, u, v) < 0) {
-        _unlock_graph(self->lock);
+    if (PyErr_Occurred() || set_long(targets, v, n + 1) < 0 ||
+        dg_union(self, u, v) < 0) {
+        if (owns_targets) Py_DECREF(targets);
+        unlock_graph(self->lock);
         return NULL;
     }
-    _unlock_graph(self->lock);
+    if (owns_targets) Py_DECREF(targets);
+    unlock_graph(self->lock);
     Py_RETURN_NONE;
 }
 
-static PyObject *_dg_vertices_count(DirectedGraphObject *self,
-                                    PyObject *Py_UNUSED(ign)) {
+static PyObject *dg_vertices_count(DirectedGraphObject *self,
+                                    PyObject *ign) {(void)ign;
     return PyLong_FromSsize_t(PySet_GET_SIZE(self->vertices));
 }
 
-static PyObject *_dg_edges_count(DirectedGraphObject *self,
-                                 PyObject *Py_UNUSED(ign)) {
+static PyObject *dg_edges_count(DirectedGraphObject *self,
+                                 PyObject *ign) {(void)ign;
     return PyLong_FromSsize_t(self->edges);
 }
 
-static PyObject *_dg_degree(DirectedGraphObject *self, PyObject *args,
+static PyObject *dg_degree(DirectedGraphObject *self, PyObject *args,
                             int in_out) {
     PyObject *v;
     if (!PyArg_ParseTuple(args, "O", &v)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
+    if (lock_graph(self->lock) < 0) return NULL;
     PyObject *table = in_out ? self->in_deg : self->out_deg;
     PyObject *cur = PyDict_GetItem(table, v);
     PyObject *r = cur ? PyLong_FromLong(PyLong_AsLong(cur))
                       : PyLong_FromLong(0);
     if (cur && PyErr_Occurred()) r = NULL;
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
-static PyObject *_dg_in_degree(DirectedGraphObject *self, PyObject *args) {
-    return _dg_degree(self, args, 1);
+static PyObject *dg_in_degree(DirectedGraphObject *self, PyObject *args) {
+    return dg_degree(self, args, 1);
 }
 
-static PyObject *_dg_out_degree(DirectedGraphObject *self, PyObject *args) {
-    return _dg_degree(self, args, 0);
+static PyObject *dg_out_degree(DirectedGraphObject *self, PyObject *args) {
+    return dg_degree(self, args, 0);
 }
 
-static PyObject *_dg_neighbors(DirectedGraphObject *self, PyObject *args) {
+static PyObject *dg_neighbors(DirectedGraphObject *self, PyObject *args) {
     PyObject *v;
     if (!PyArg_ParseTuple(args, "O", &v)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
+    if (lock_graph(self->lock) < 0) return NULL;
     int known = PySet_Contains(self->vertices, v);
-    if (known < 0) { _unlock_graph(self->lock); return NULL; }
+    if (known < 0) { unlock_graph(self->lock); return NULL; }
     if (!known) {
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         PyErr_Format(PyExc_KeyError, "Unknown vertex: %R", v);
         return NULL;
     }
@@ -450,24 +554,24 @@ static PyObject *_dg_neighbors(DirectedGraphObject *self, PyObject *args) {
     PyObject *keys = targets ? PyDict_Keys(targets) : PyList_New(0);
     PyObject *r = PySequence_Tuple(keys);
     Py_DECREF(keys);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
-static PyObject *_dg_weak_count(DirectedGraphObject *self,
-                                PyObject *Py_UNUSED(ign)) {
+static PyObject *dg_weak_count(DirectedGraphObject *self,
+                                PyObject *ign) {(void)ign;
     return PyLong_FromSsize_t(self->components);
 }
 
-static PyObject *_dg_is_weakly_connected(DirectedGraphObject *self,
-                                         PyObject *Py_UNUSED(ign)) {
+static PyObject *dg_is_weakly_connected(DirectedGraphObject *self,
+                                         PyObject *ign) {(void)ign;
     return PyBool_FromLong(self->components <= 1);
 }
 
 /* ---- iterative Tarjan (matches the Python frames-based version) ---- */
-static PyObject *_dg_strong_components(DirectedGraphObject *self,
-                                       PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *dg_strong_components(DirectedGraphObject *self,
+                                       PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     PyObject *index = PyDict_New();
     PyObject *lowlink = PyDict_New();
     PyObject *on_stack = PySet_New(NULL);
@@ -478,7 +582,7 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
         !components) {
         Py_XDECREF(index); Py_XDECREF(lowlink); Py_XDECREF(on_stack);
         Py_XDECREF(stack); Py_XDECREF(frames); Py_XDECREF(components);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return PyErr_NoMemory();
     }
     long counter = 0;
@@ -487,7 +591,7 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
     if (!viter) {
         Py_DECREF(index); Py_DECREF(lowlink); Py_DECREF(on_stack);
         Py_DECREF(stack); Py_DECREF(frames); Py_DECREF(components);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return NULL;
     }
     PyObject *root;
@@ -496,8 +600,8 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
         int has = PyDict_Contains(index, root);
         if (has < 0) { Py_DECREF(root); ok = 0; break; }
         if (has) { Py_DECREF(root); continue; }
-        if (PyDict_SetItem(index, root, PyLong_FromLong(counter)) < 0 ||
-            PyDict_SetItem(lowlink, root, PyLong_FromLong(counter)) < 0) {
+        if (set_long(index, root, counter) < 0 ||
+            set_long(lowlink, root, counter) < 0) {
             Py_DECREF(root); ok = 0; break;
         }
         counter++;
@@ -527,8 +631,8 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
                 int w_has = PyDict_Contains(index, w);
                 if (w_has < 0) { Py_DECREF(w); ok = 0; break; }
                 if (!w_has) {
-                    if (PyDict_SetItem(index, w, PyLong_FromLong(counter)) < 0 ||
-                        PyDict_SetItem(lowlink, w, PyLong_FromLong(counter)) < 0 ||
+                    if (set_long(index, w, counter) < 0 ||
+                        set_long(lowlink, w, counter) < 0 ||
                         PyList_Append(stack, w) < 0 ||
                         PySet_Add(on_stack, w) < 0) {
                         Py_DECREF(w); ok = 0; break;
@@ -555,7 +659,7 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
                     long low_v = PyLong_AsLong(PyDict_GetItem(lowlink, v));
                     if (PyErr_Occurred()) { Py_DECREF(w); ok = 0; break; }
                     if (idx_w < low_v) {
-                        if (PyDict_SetItem(lowlink, v, PyLong_FromLong(idx_w)) < 0) {
+                        if (set_long(lowlink, v, idx_w) < 0) {
                             Py_DECREF(w); ok = 0; break;
                         }
                     }
@@ -575,8 +679,7 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
                 long low_p = PyLong_AsLong(PyDict_GetItem(lowlink, parent));
                 if (PyErr_Occurred()) { Py_DECREF(popped); ok = 0; break; }
                 if (low_v < low_p) {
-                    if (PyDict_SetItem(lowlink, parent,
-                                       PyLong_FromLong(low_v)) < 0) {
+                    if (set_long(lowlink, parent, low_v) < 0) {
                         Py_DECREF(popped); ok = 0; break;
                     }
                 }
@@ -618,7 +721,7 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
     Py_DECREF(viter);
     Py_DECREF(index); Py_DECREF(lowlink); Py_DECREF(on_stack);
     Py_DECREF(stack); Py_DECREF(frames);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     if (!ok) {
         Py_DECREF(components);
         return NULL;
@@ -627,22 +730,22 @@ static PyObject *_dg_strong_components(DirectedGraphObject *self,
 }
 
 /* ---- Kahn topological sort ---- */
-static PyObject *_dg_topological_sort(DirectedGraphObject *self,
-                                      PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *dg_topological_sort(DirectedGraphObject *self,
+                                      PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     PyObject *indeg = PyDict_New();
     PyObject *queue = PyList_New(0);
     PyObject *order = PyList_New(0);
     if (!indeg || !queue || !order) {
         Py_XDECREF(indeg); Py_XDECREF(queue); Py_XDECREF(order);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return PyErr_NoMemory();
     }
     /* indeg[v] = in_deg.get(v, 0) for v in vertices */
     PyObject *viter = PyObject_GetIter(self->vertices);
     if (!viter) {
         Py_DECREF(indeg); Py_DECREF(queue); Py_DECREF(order);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return NULL;
     }
     PyObject *v;
@@ -650,23 +753,20 @@ static PyObject *_dg_topological_sort(DirectedGraphObject *self,
     while ((v = PyIter_Next(viter))) {
         PyObject *cur = PyDict_GetItem(self->in_deg, v);
         long n = cur ? PyLong_AsLong(cur) : 0;
-        Py_DECREF(v);
-        if (PyErr_Occurred()) { ok = 0; break; }
+        if (PyErr_Occurred()) { Py_DECREF(v); ok = 0; break; }
         if (n == 0) {
-            Py_INCREF(v);
-            if (PyDict_SetItem(indeg, v, PyLong_FromLong(0)) < 0 ||
-                PyList_Append(queue, v) < 0) {
+            if (set_long(indeg, v, 0) < 0 || PyList_Append(queue, v) < 0) {
                 Py_DECREF(v); ok = 0; break;
             }
-            Py_DECREF(v);
-        } else if (PyDict_SetItem(indeg, v, PyLong_FromLong(n)) < 0) {
-            ok = 0; break;
+        } else if (set_long(indeg, v, n) < 0) {
+            Py_DECREF(v); ok = 0; break;
         }
+        Py_DECREF(v);
     }
     Py_DECREF(viter);
     if (!ok) {
         Py_DECREF(indeg); Py_DECREF(queue); Py_DECREF(order);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return NULL;
     }
     Py_ssize_t head = 0;
@@ -689,7 +789,7 @@ static PyObject *_dg_topological_sort(DirectedGraphObject *self,
                 long c = cnt ? PyLong_AsLong(cnt) : 0;
                 if (PyErr_Occurred()) { Py_DECREF(w); ok = 0; break; }
                 n -= c;
-                if (PyDict_SetItem(indeg, w, PyLong_FromLong(n)) < 0) {
+                if (set_long(indeg, w, n) < 0) {
                     Py_DECREF(w); ok = 0; break;
                 }
                 if (n == 0 && PyList_Append(queue, w) < 0) {
@@ -704,7 +804,7 @@ static PyObject *_dg_topological_sort(DirectedGraphObject *self,
         if (!ok) break;
     }
     Py_DECREF(indeg); Py_DECREF(queue);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     if (!ok) { Py_DECREF(order); return NULL; }
     if (PyList_GET_SIZE(order) != PySet_GET_SIZE(self->vertices)) {
         Py_DECREF(order);
@@ -713,35 +813,53 @@ static PyObject *_dg_topological_sort(DirectedGraphObject *self,
     return order;
 }
 
+static PyObject *dg_strong_components_count(DirectedGraphObject *self,
+                                            PyObject *ign) {(void)ign;
+    PyObject *components = dg_strong_components(self, NULL);
+    if (!components) return NULL;
+    Py_ssize_t n = PyList_GET_SIZE(components);
+    Py_DECREF(components);
+    return PyLong_FromSsize_t(n);
+}
+
+static PyObject *dg_is_dag(DirectedGraphObject *self,
+                           PyObject *ign) {(void)ign;
+    PyObject *order = dg_topological_sort(self, NULL);
+    if (!order) return NULL;
+    int is_dag = (order != Py_None);
+    Py_DECREF(order);
+    return PyBool_FromLong(is_dag);
+}
+
 /* ---- reachable / shortest_path (BFS over _adj inside the lock) ---- */
-static PyObject *_dg_reachable(DirectedGraphObject *self, PyObject *args) {
+static PyObject *dg_reachable(DirectedGraphObject *self, PyObject *args) {
     PyObject *src, *dst;
     if (!PyArg_ParseTuple(args, "OO", &src, &dst)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
+    if (lock_graph(self->lock) < 0) return NULL;
     int has_src = PySet_Contains(self->vertices, src);
     int has_dst = PySet_Contains(self->vertices, dst);
     if (has_src < 0 || has_dst < 0) {
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return NULL;
     }
     if (!has_src || !has_dst) {
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         Py_RETURN_FALSE;
     }
     int eq = PyObject_RichCompareBool(src, dst, Py_EQ);
-    if (eq < 0) { _unlock_graph(self->lock); return NULL; }
-    if (eq == 1) { _unlock_graph(self->lock); Py_RETURN_TRUE; }
+    if (eq < 0) { unlock_graph(self->lock); return NULL; }
+    if (eq == 1) { unlock_graph(self->lock); Py_RETURN_TRUE; }
 
     PyObject *seen = PySet_New(NULL);
     PyObject *queue = PyList_New(0);
     if (!seen || !queue) {
         Py_XDECREF(seen); Py_XDECREF(queue);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return PyErr_NoMemory();
     }
     if (PySet_Add(seen, src) < 0 || PyList_Append(queue, src) < 0) {
         Py_DECREF(seen); Py_DECREF(queue);
-        _unlock_graph(self->lock);
+        unlock_graph(self->lock);
         return NULL;
     }
     Py_ssize_t head = 0;
@@ -753,7 +871,7 @@ static PyObject *_dg_reachable(DirectedGraphObject *self, PyObject *args) {
         PyObject *titer = PyObject_GetIter(targets);
         if (!titer) {
             Py_DECREF(seen); Py_DECREF(queue);
-            _unlock_graph(self->lock);
+            unlock_graph(self->lock);
             return NULL;
         }
         PyObject *w;
@@ -761,17 +879,17 @@ static PyObject *_dg_reachable(DirectedGraphObject *self, PyObject *args) {
             int d = PyObject_RichCompareBool(w, dst, Py_EQ);
             if (d < 0) { Py_DECREF(w); Py_DECREF(titer);
                          Py_DECREF(seen); Py_DECREF(queue);
-                         _unlock_graph(self->lock); return NULL; }
+                         unlock_graph(self->lock); return NULL; }
             if (d == 1) { Py_DECREF(w); Py_DECREF(titer); found = 1; break; }
             int s = PySet_Contains(seen, w);
             if (s < 0) { Py_DECREF(w); Py_DECREF(titer);
                          Py_DECREF(seen); Py_DECREF(queue);
-                         _unlock_graph(self->lock); return NULL; }
+                         unlock_graph(self->lock); return NULL; }
             if (!s) {
                 if (PySet_Add(seen, w) < 0 || PyList_Append(queue, w) < 0) {
                     Py_DECREF(w); Py_DECREF(titer);
                     Py_DECREF(seen); Py_DECREF(queue);
-                    _unlock_graph(self->lock); return NULL;
+                    unlock_graph(self->lock); return NULL;
                 }
             }
             Py_DECREF(w);
@@ -780,13 +898,13 @@ static PyObject *_dg_reachable(DirectedGraphObject *self, PyObject *args) {
         if (found || PyErr_Occurred()) break;
     }
     Py_DECREF(seen); Py_DECREF(queue);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     if (PyErr_Occurred()) return NULL;
     return PyBool_FromLong(found);
 }
 
 /* BFS shortest path over the internal adjacency (inside the lock). */
-static PyObject *_dg_bfs(DirectedGraphObject *self, PyObject *src,
+static PyObject *dg_bfs(DirectedGraphObject *self, PyObject *src,
                          PyObject *dst) {
     int eq = PyObject_RichCompareBool(src, dst, Py_EQ);
     if (eq < 0) return NULL;
@@ -803,7 +921,6 @@ static PyObject *_dg_bfs(DirectedGraphObject *self, PyObject *src,
         Py_XDECREF(prev); Py_XDECREF(queue);
         return PyErr_NoMemory();
     }
-    Py_INCREF(Py_None);
     if (PyDict_SetItem(prev, src, Py_None) < 0 ||
         PyList_Append(queue, src) < 0) {
         Py_DECREF(prev); Py_DECREF(queue);
@@ -817,7 +934,6 @@ static PyObject *_dg_bfs(DirectedGraphObject *self, PyObject *src,
         PyObject *titer = PyObject_GetIter(targets);
         if (!titer) { Py_DECREF(prev); Py_DECREF(queue); return NULL; }
         PyObject *w;
-        int done = 0;
         while ((w = PyIter_Next(titer))) {
             int s = PyDict_Contains(prev, w);
             if (s < 0) { Py_DECREF(w); Py_DECREF(titer);
@@ -866,99 +982,94 @@ static PyObject *_dg_bfs(DirectedGraphObject *self, PyObject *src,
             Py_DECREF(w);
         }
         Py_DECREF(titer);
-        if (done || PyErr_Occurred()) break;
+        if (PyErr_Occurred()) break;
     }
     Py_DECREF(prev); Py_DECREF(queue);
     if (PyErr_Occurred()) return NULL;
     Py_RETURN_NONE;
 }
 
-static PyObject *_dg_shortest_path(DirectedGraphObject *self, PyObject *args) {
+static PyObject *dg_shortest_path(DirectedGraphObject *self, PyObject *args) {
     PyObject *src, *dst;
     if (!PyArg_ParseTuple(args, "OO", &src, &dst)) return NULL;
-    if (_lock_graph(self->lock) < 0) return NULL;
-    PyObject *r = _dg_bfs(self, src, dst);
-    _unlock_graph(self->lock);
+    if (lock_graph(self->lock) < 0) return NULL;
+    PyObject *r = dg_bfs(self, src, dst);
+    unlock_graph(self->lock);
     return r;
 }
 
 /* ---- Eulerian tests ---- */
-static int _dg_non_isolated_weakly_connected(DirectedGraphObject *self) {
-    /* all vertices with non-zero degree share one weak component */
+static int dg_non_isolated_weakly_connected(DirectedGraphObject *self) {
+    /* all vertices with non-zero degree share one weak component; the
+     * first active root is kept until a different component proves the
+     * graph disconnected (the old code dropped root after the first
+     * comparison, NULL-dereferencing on later active vertices). */
     int seen_active = 0;
     PyObject *root = NULL;
     PyObject *viter = PyObject_GetIter(self->vertices);
     if (!viter) return -1;
     PyObject *v;
+    int result = 1;
     while ((v = PyIter_Next(viter))) {
         PyObject *in_c = PyDict_GetItem(self->in_deg, v);
         PyObject *out_c = PyDict_GetItem(self->out_deg, v);
         long in_n = in_c ? PyLong_AsLong(in_c) : 0;
         long out_n = out_c ? PyLong_AsLong(out_c) : 0;
+        if (PyErr_Occurred()) { Py_DECREF(v); result = -1; break; }
+        if (in_n == 0 && out_n == 0) { Py_DECREF(v); continue; }
+        PyObject *r = dg_find(self, v);
         Py_DECREF(v);
-        if (PyErr_Occurred()) { Py_DECREF(viter); return -1; }
-        if (in_n == 0 && out_n == 0) continue;
+        if (!r) { Py_XDECREF(root); result = -1; break; }
         if (!seen_active) {
-            root = _dg_find(self, v);
-            if (!root) { Py_DECREF(viter); return -1; }
+            root = r;
             seen_active = 1;
         } else {
-            PyObject *r = _dg_find(self, v);
-            if (!r) { Py_DECREF(root); Py_DECREF(viter); return -1; }
             int same = PyObject_RichCompareBool(r, root, Py_EQ);
             Py_DECREF(r);
-            Py_DECREF(root);
-            root = NULL;
-            if (same < 0) { Py_DECREF(viter); return -1; }
-            if (!same) { Py_DECREF(viter); return 0; }
+            if (same < 0) { Py_XDECREF(root); result = -1; break; }
+            if (!same) { Py_XDECREF(root); result = 0; break; }
         }
     }
     Py_DECREF(viter);
     Py_XDECREF(root);
-    if (PyErr_Occurred()) return -1;
-    return 1;
+    return result;
 }
 
-static PyObject *_dg_has_eulerian_circuit(DirectedGraphObject *self,
-                                          PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *dg_has_eulerian_circuit(DirectedGraphObject *self,
+                                          PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
     PyObject *viter = PyObject_GetIter(self->vertices);
-    if (!viter) { _unlock_graph(self->lock); return NULL; }
+    if (!viter) { unlock_graph(self->lock); return NULL; }
     PyObject *v;
     int ok = 1;
+    int balanced = 1;
     while ((v = PyIter_Next(viter))) {
         PyObject *in_c = PyDict_GetItem(self->in_deg, v);
         PyObject *out_c = PyDict_GetItem(self->out_deg, v);
         long in_n = in_c ? PyLong_AsLong(in_c) : 0;
         long out_n = out_c ? PyLong_AsLong(out_c) : 0;
         Py_DECREF(v);
-        if (PyErr_Occurred() || in_n != out_n) {
-            if (PyErr_Occurred()) ok = 0;
-            else {
-                Py_DECREF(viter);
-                _unlock_graph(self->lock);
-                Py_RETURN_FALSE;
-            }
-            break;
-        }
+        if (PyErr_Occurred()) { ok = 0; break; }
+        if (in_n != out_n) { balanced = 0; break; }
     }
     Py_DECREF(viter);
-    if (!ok) { _unlock_graph(self->lock); return NULL; }
-    int w = _dg_non_isolated_weakly_connected(self);
-    _unlock_graph(self->lock);
+    if (!ok) { unlock_graph(self->lock); return NULL; }
+    if (!balanced) { unlock_graph(self->lock); Py_RETURN_FALSE; }
+    int w = dg_non_isolated_weakly_connected(self);
+    unlock_graph(self->lock);
     if (w < 0) return NULL;
     return PyBool_FromLong(w);
 }
 
-static PyObject *_dg_has_eulerian_path(DirectedGraphObject *self,
-                                       PyObject *Py_UNUSED(ign)) {
-    if (_lock_graph(self->lock) < 0) return NULL;
-    int w = _dg_non_isolated_weakly_connected(self);
-    if (w < 0) { _unlock_graph(self->lock); return NULL; }
-    if (!w) { _unlock_graph(self->lock); Py_RETURN_FALSE; }
+static PyObject *dg_has_eulerian_path(DirectedGraphObject *self,
+                                       PyObject *ign) {(void)ign;
+    if (lock_graph(self->lock) < 0) return NULL;
+    int w = dg_non_isolated_weakly_connected(self);
+    if (w < 0) { unlock_graph(self->lock); return NULL; }
+    if (!w) { unlock_graph(self->lock); Py_RETURN_FALSE; }
     long start = 0, end = 0;
     PyObject *viter = PyObject_GetIter(self->vertices);
-    if (!viter) { _unlock_graph(self->lock); return NULL; }
+    if (!viter) { unlock_graph(self->lock); return NULL; }
     PyObject *v;
     while ((v = PyIter_Next(viter))) {
         PyObject *in_c = PyDict_GetItem(self->in_deg, v);
@@ -967,64 +1078,64 @@ static PyObject *_dg_has_eulerian_path(DirectedGraphObject *self,
         long out_n = out_c ? PyLong_AsLong(out_c) : 0;
         Py_DECREF(v);
         if (PyErr_Occurred()) {
-            Py_DECREF(viter); _unlock_graph(self->lock); return NULL;
+            Py_DECREF(viter); unlock_graph(self->lock); return NULL;
         }
         long d = out_n - in_n;
         if (d == 1) start++;
         else if (d == -1) end++;
         else if (d != 0) {
             Py_DECREF(viter);
-            _unlock_graph(self->lock);
+            unlock_graph(self->lock);
             Py_RETURN_FALSE;
         }
     }
     Py_DECREF(viter);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return PyBool_FromLong(start <= 1 && start == end);
 }
 
-static PyObject *_dg_repr(DirectedGraphObject *self) {
-    if (_lock_graph(self->lock) < 0) return NULL;
+static PyObject *dg_repr(DirectedGraphObject *self) {
+    if (lock_graph(self->lock) < 0) return NULL;
     Py_ssize_t v = PySet_GET_SIZE(self->vertices);
     PyObject *r = PyUnicode_FromFormat(
         "<DirectedGraph: V=%zd, E=%zd, weak C=%zd>",
         v, self->edges, self->components);
-    _unlock_graph(self->lock);
+    unlock_graph(self->lock);
     return r;
 }
 
 static PyMethodDef dgraph_methods[] = {
-    {"add_edge", (PyCFunction)_dg_add_edge, METH_VARARGS,
+    {"add_edge", (PyCFunction)dg_add_edge, METH_VARARGS,
      "Add a directed arc from u to v (parallel and self-loops allowed)."},
-    {"vertices_count", (PyCFunction)_dg_vertices_count, METH_NOARGS,
+    {"vertices_count", (PyCFunction)dg_vertices_count, METH_NOARGS,
      "Return the number of vertices."},
-    {"edges_count", (PyCFunction)_dg_edges_count, METH_NOARGS,
+    {"edges_count", (PyCFunction)dg_edges_count, METH_NOARGS,
      "Return the number of arcs."},
-    {"in_degree", (PyCFunction)_dg_in_degree, METH_VARARGS,
+    {"in_degree", (PyCFunction)dg_in_degree, METH_VARARGS,
      "Return the in-degree of v."},
-    {"out_degree", (PyCFunction)_dg_out_degree, METH_VARARGS,
+    {"out_degree", (PyCFunction)dg_out_degree, METH_VARARGS,
      "Return the out-degree of v."},
-    {"neighbors", (PyCFunction)_dg_neighbors, METH_VARARGS,
+    {"neighbors", (PyCFunction)dg_neighbors, METH_VARARGS,
      "Return the distinct successors of v as a tuple."},
-    {"weak_components_count", (PyCFunction)_dg_weak_count, METH_NOARGS,
+    {"weak_components_count", (PyCFunction)dg_weak_count, METH_NOARGS,
      "Return the number of weak components."},
-    {"is_weakly_connected", (PyCFunction)_dg_is_weakly_connected,
+    {"is_weakly_connected", (PyCFunction)dg_is_weakly_connected,
      METH_NOARGS, "Return True if weakly connected."},
-    {"strong_components", (PyCFunction)_dg_strong_components, METH_NOARGS,
+    {"strong_components", (PyCFunction)dg_strong_components, METH_NOARGS,
      "Return the strongly connected components (iterative Tarjan)."},
-    {"strong_components_count", (PyCFunction)_dg_strong_components,
+    {"strong_components_count", (PyCFunction)dg_strong_components_count,
      METH_NOARGS, "Return the number of strongly connected components."},
-    {"topological_sort", (PyCFunction)_dg_topological_sort, METH_NOARGS,
+    {"topological_sort", (PyCFunction)dg_topological_sort, METH_NOARGS,
      "Return a topological order or None if cyclic (Kahn)."},
-    {"is_dag", (PyCFunction)_dg_topological_sort, METH_NOARGS,
+    {"is_dag", (PyCFunction)dg_is_dag, METH_NOARGS,
      "Return True if the graph is a DAG."},
-    {"reachable", (PyCFunction)_dg_reachable, METH_VARARGS,
+    {"reachable", (PyCFunction)dg_reachable, METH_VARARGS,
      "Return True if dst is reachable from src."},
-    {"shortest_path", (PyCFunction)_dg_shortest_path, METH_VARARGS,
+    {"shortest_path", (PyCFunction)dg_shortest_path, METH_VARARGS,
      "Return the shortest directed path [src, ..., dst] or None."},
-    {"has_eulerian_circuit", (PyCFunction)_dg_has_eulerian_circuit,
+    {"has_eulerian_circuit", (PyCFunction)dg_has_eulerian_circuit,
      METH_NOARGS, "Return True if an Eulerian circuit exists."},
-    {"has_eulerian_path", (PyCFunction)_dg_has_eulerian_path,
+    {"has_eulerian_path", (PyCFunction)dg_has_eulerian_path,
      METH_NOARGS, "Return True if an Eulerian path exists."},
     {NULL, NULL, 0, NULL}
 };
@@ -1033,10 +1144,12 @@ static PyTypeObject DirectedGraphType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "_topology.DirectedGraph",
     .tp_basicsize = sizeof(DirectedGraphObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = _dg_new,
-    .tp_dealloc = (destructor)_dg_dealloc,
-    .tp_repr = (reprfunc)_dg_repr,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_new = dg_new,
+    .tp_dealloc = (destructor)dg_dealloc,
+    .tp_traverse = (traverseproc)dg_tp_traverse,
+    .tp_clear = (inquiry)dg_tp_clear,
+    .tp_repr = (reprfunc)dg_repr,
     .tp_methods = dgraph_methods,
     .tp_doc = "Directed multigraph with iterative algorithms."
 };
@@ -1048,21 +1161,42 @@ static PyTypeObject DirectedGraphType = {
 static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void)self;
     PyObject *cell_list;
     if (!PyArg_ParseTuple(args, "O", &cell_list)) return NULL;
-    PyObject *iter = PyObject_GetIter(cell_list);
+    /* one-shot iterables (generators / iterators) cannot be re-walked by
+       the big-int fallback below: materialize them once */
+    PyObject *cells = cell_list;
+    PyObject *owned = NULL;
+    if (!PySequence_Check(cell_list)) {
+        owned = PySequence_List(cell_list);
+        if (owned == NULL) return NULL;
+        cells = owned;
+    }
+    PyObject *iter = PyObject_GetIter(cells);
+    Py_XDECREF(owned);   /* the iterator keeps a materialized list alive */
     if (!iter) return NULL;
     long long factor = 1;
     long long acc = 0;
     int big = 0;
     PyObject *item;
     while ((item = PyIter_Next(iter))) {
-        if (Py_TYPE(item) != &PyLong_Type) {
+        /* integer protocol (PyNumber_Index); bool stays excluded */
+        PyObject *cell_obj = NULL;
+        if (PyBool_Check(item)) {
             Py_DECREF(item); Py_DECREF(iter);
             PyErr_SetString(PyExc_TypeError,
                             "Cell must be a positive integer.");
             return NULL;
         }
-        long long cell = PyLong_AsLongLong(item);
+        cell_obj = PyNumber_Index(item);
+        if (!cell_obj) {
+            Py_DECREF(item); Py_DECREF(iter);
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "Cell must be a positive integer.");
+            return NULL;
+        }
         Py_DECREF(item);
+        long long cell = PyLong_AsLongLong(cell_obj);
+        Py_DECREF(cell_obj);
         if (PyErr_Occurred()) {
             PyErr_Clear();
             big = 1;
@@ -1074,11 +1208,8 @@ static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void
                             "Cell must be a positive integer.");
             return NULL;
         }
-        if ((factor != 0 && cell > LLONG_MAX / factor) ||
-            (factor != 0 && cell < LLONG_MIN / factor)) {
-            big = 1;
-            break;
-        }
+        /* factor is only 1 or -1 and cell fits long long, so the product
+           cannot overflow (only the accumulation can) */
         long long term = cell * factor;
         if ((term > 0 && acc > LLONG_MAX - term) ||
             (term < 0 && acc < LLONG_MIN - term)) {
@@ -1093,8 +1224,8 @@ static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void
         return NULL;
     }
     if (big) {
-        Py_DECREF(iter);
-        PyObject *new_iter = PyObject_GetIter(cell_list);
+        PyObject *new_iter = PyObject_GetIter(cells);
+        Py_DECREF(iter);   /* released after the new iterator holds cells */
         if (!new_iter) return NULL;
         PyObject *f = PyLong_FromLong(1);
         PyObject *res = PyLong_FromLong(0);
@@ -1104,23 +1235,35 @@ static PyObject *py_euler_characteristic(PyObject *self, PyObject *args) { (void
         }
         PyObject *it;
         while ((it = PyIter_Next(new_iter))) {
-            if (Py_TYPE(it) != &PyLong_Type) {
+            PyObject *cell_obj = NULL;
+            if (PyBool_Check(it)) {
                 Py_DECREF(it);
                 Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
                 PyErr_SetString(PyExc_TypeError,
                                 "Cell must be a positive integer.");
                 return NULL;
             }
-            long long c = PyLong_AsLongLong(it);
+            cell_obj = PyNumber_Index(it);
+            if (!cell_obj) {
+                Py_DECREF(it);
+                Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
+                PyErr_Clear();
+                PyErr_SetString(PyExc_TypeError,
+                                "Cell must be a positive integer.");
+                return NULL;
+            }
+            long long c = PyLong_AsLongLong(cell_obj);
             if (PyErr_Occurred()) PyErr_Clear();
             else if (c <= 0) {
+                Py_DECREF(cell_obj);
                 Py_DECREF(it);
                 Py_DECREF(new_iter); Py_DECREF(f); Py_DECREF(res);
                 PyErr_SetString(PyExc_ValueError,
                                 "Cell must be a positive integer.");
                 return NULL;
             }
-            PyObject *term = PyNumber_Multiply(it, f);
+            PyObject *term = PyNumber_Multiply(cell_obj, f);
+            Py_DECREF(cell_obj);
             PyObject *nr = PyNumber_Add(res, term);
             Py_XDECREF(term);
             Py_DECREF(res);
@@ -1288,34 +1431,47 @@ static PyMethodDef methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+static int module_exec(PyObject *m) {
+    if (PyType_Ready(&GraphType) < 0 || PyType_Ready(&DirectedGraphType) < 0)
+        return -1;
+    Py_INCREF(&GraphType);
+    if (PyModule_AddObject(m, "Graph", (PyObject*)&GraphType) < 0) {
+        Py_DECREF(&GraphType);
+        return -1;
+    }
+    Py_INCREF(&DirectedGraphType);
+    if (PyModule_AddObject(m, "DirectedGraph",
+                           (PyObject*)&DirectedGraphType) < 0) {
+        Py_DECREF(&DirectedGraphType);
+        return -1;
+    }
+    return 0;
+}
+
+static PyModuleDef_Slot module_slots[] = {
+    {Py_mod_exec, (void*)module_exec},
+#if defined(Py_mod_gil) && defined(Py_MOD_GIL_NOT_USED)
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL}
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "_topology",
     "C99 optimized topology algorithms and graph types (math_tool).",
     0,
     methods,
-    NULL, NULL, NULL, NULL
+    module_slots,
+    NULL, NULL, NULL
 };
 
 PyMODINIT_FUNC PyInit__topology(void);
 
 PyMODINIT_FUNC PyInit__topology(void) {
-    if (PyType_Ready(&GraphType) < 0 || PyType_Ready(&DirectedGraphType) < 0)
-        return NULL;
-    PyObject *m = PyModule_Create(&moduledef);
-    if (!m) return NULL;
-    Py_INCREF(&GraphType);
-    if (PyModule_AddObject(m, "Graph", (PyObject*)&GraphType) < 0) {
-        Py_DECREF(&GraphType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    Py_INCREF(&DirectedGraphType);
-    if (PyModule_AddObject(m, "DirectedGraph",
-                           (PyObject*)&DirectedGraphType) < 0) {
-        Py_DECREF(&DirectedGraphType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    return m;
+    return PyModuleDef_Init(&moduledef);
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

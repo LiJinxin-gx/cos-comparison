@@ -123,6 +123,19 @@ class TestRandomSelection(unittest.TestCase):
             with self.assertRaises(IndexError):
                 t.choice([])
 
+    def test_falsy_nonempty_container(self):
+        class FalsySeq:
+            def __len__(self):
+                return 1
+            def __bool__(self):
+                return False
+            def __getitem__(self, index):
+                return 42
+
+        for t in (make_random(), make_secure()):
+            self.assertEqual(t.choice(FalsySeq()), 42)
+            self.assertEqual(t.choices(FalsySeq(), k=2), [42, 42])
+
     def test_shuffle_keeps_multiset(self):
         for t in (make_random(), make_secure()):
             for _ in range(20):
@@ -369,15 +382,14 @@ class TestSingletons(unittest.TestCase):
         self.assertIsInstance(secure, SecureRandomTool)
 
     def test_no_recursion_on_large_inputs(self):
-        import sys
         from cos_comparison.interface.tools.random_tool import RandomTool
         t = RandomTool()
         big = list(range(5000))
         t.shuffle(big)
-        self.assertEqual(len(set(big)), 5000)
+        self.assertEqual(sorted(big), list(range(5000)))
         s = t.sample(big, 3000)
+        self.assertEqual(len(s), 3000)
         self.assertEqual(len(set(s)), 3000)
-        self.assertIsNotNone(sys.getrecursionlimit())
 
 
 if __name__ == "__main__":

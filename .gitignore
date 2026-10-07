@@ -32,9 +32,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Explore directory (separate repository)
-explore/
-
 # Temporary files
 *.tmp
 *.bak

@@ -18,21 +18,23 @@ Template matching: slides an external kernel across data, computing similarity b
 ## Signature
 
 ```python
-cos_comparison_active(data, *, kernel=None,
-                      w1=1, w2=1, b1=0, b2=0,
+cos_comparison_active(data, *arg, kernel=None,
                       start=None, end=None, step=None,
                       algorithm=_default_algorithm,
                       output=None, output_start=None, output_step=None,
+                      transform1=None, transform2=None,
+                      iterate=None,
                       start_callback=None, end_callback=None,
                       global_error_callback=None, local_error_callback=None,
-                      return_callback=lambda output, name: output, **kwargs)
+                      return_callback=None,
+                      use_namespace=True, namespace_hook=None, **kwargs)
 ```
 
 ---
 
 ## Parameters
 
-Shared parameters (`data`, `w1`/`w2`/`b1`/`b2`, `start`/`end`/`step`, `algorithm`, `output*`, callbacks) are documented in [Common Parameters](core.md#common-parameters).
+Shared parameters (`data`, `transform1`/`transform2`, `iterate`, `start`/`end`/`step`, `algorithm`, `output*`, callbacks) are documented in [Common Parameters](core.md#common-parameters).
 
 **Mode-specific:**
 
@@ -40,7 +42,7 @@ Shared parameters (`data`, `w1`/`w2`/`b1`/`b2`, `start`/`end`/`step`, `algorithm
 |-----------|------|-------------|
 | `kernel` | nested list / tensor | **Required** (`ValueError` if `None`). Template to search for; same dimensionality as data; must be regular; window size set from kernel shape |
 
-- `data` duck typing: if `data` exposes `__cos_comparison_active__`, the call is delegated to it
+- `data` duck typing: if `data` exposes `__cos_comparison_active__`, the call is delegated to that bound hook (it receives the call's extra arguments plus the effective option values; `data` itself is the bound `self`)
 
 ---
 
